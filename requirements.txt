@@ -1,0 +1,6 @@
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+numba>=0.58        # optional but ~100x faster contact integration
+rebound>=4.0       # optional: only for `python -m dolle_sim rebound-check`
+pytest>=7          # tests

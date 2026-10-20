@@ -1,0 +1,287 @@
+{
+  "name": "colliding_clouds_carbon_vs_silica",
+  "seed": 7,
+  "duration_s": 60,
+  "dt_s": 0.004,
+  "output_fps": 15,
+  "_comment": "Two dust clouds launched toward each other (e.g. from two spring/piston dispensers). Relative speeds are set by the launch speeds, so the impact-speed range can straddle the predicted sticking threshold.",
+  "environment": {
+    "preset": "rocksat_x",
+    "pressure_pa": 0.5,
+    "spin_rate_hz": 0.0167,
+    "spin_axis": [
+      0,
+      0,
+      1
+    ],
+    "gravity_gradient": true,
+    "altitude_m": 130000,
+    "local_vertical": [
+      0,
+      0,
+      1
+    ],
+    "electric_field_v_m": [
+      0,
+      0,
+      0
+    ],
+    "magnetic_field_t": [
+      0,
+      2e-05,
+      -4.5e-05
+    ],
+    "temperature_gradient_k_m": [
+      0.0,
+      0.0,
+      3.0
+    ],
+    "illumination": {
+      "intensity_w_m2": 1000.0,
+      "direction": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "forces": {
+    "coulomb": true,
+    "polarization": true,
+    "image_charges": true,
+    "self_gravity": true,
+    "lorentz": true,
+    "external_e_field": true,
+    "long_range_cutoff_m": 0.0015,
+    "thermophoresis": true,
+    "photophoresis": true,
+    "radiation_pressure": true,
+    "brownian": true,
+    "long_range_update_every": 5
+  },
+  "contact": {
+    "wall_sticking": "jkr",
+    "contact_charging": true,
+    "neighbor_skin_m": 0.0005,
+    "fragmentation": true
+  },
+  "camera": {
+    "view_axis": [
+      0,
+      0,
+      1
+    ],
+    "fps": 500,
+    "depth_of_field_m": 0.01,
+    "position_noise_m": 5e-06,
+    "track_frames": 6
+  },
+  "chambers": [
+    {
+      "name": "carbon",
+      "size_m": [
+        0.06,
+        0.03,
+        0.03
+      ],
+      "wall_material": "glass_fluorosilane",
+      "particles": [
+        {
+          "material": "graphite",
+          "count": 1500,
+          "radius_m": 5e-05,
+          "radius_rel_sigma": 0.05,
+          "region_m": {
+            "center": [
+              0.012,
+              0.015,
+              0.015
+            ],
+            "size": [
+              0.008,
+              0.008,
+              0.008
+            ]
+          },
+          "velocity": {
+            "mode": "jet",
+            "direction": [
+              1,
+              0,
+              0
+            ],
+            "cone_deg": 8,
+            "speed_mean_m_s": 0.02,
+            "speed_sigma_m_s": 0.008
+          },
+          "spin": {
+            "rate_hz_mean": 5.0,
+            "rate_hz_sigma": 3.0
+          },
+          "charge_e_sigma": 20000.0,
+          "surface_energy_log_sigma": 0.3,
+          "charge_e_mean": 0
+        },
+        {
+          "material": "graphite",
+          "count": 1500,
+          "radius_m": 5e-05,
+          "radius_rel_sigma": 0.05,
+          "region_m": {
+            "center": [
+              0.048,
+              0.015,
+              0.015
+            ],
+            "size": [
+              0.008,
+              0.008,
+              0.008
+            ]
+          },
+          "velocity": {
+            "mode": "jet",
+            "direction": [
+              -1,
+              0,
+              0
+            ],
+            "cone_deg": 8,
+            "speed_mean_m_s": 0.02,
+            "speed_sigma_m_s": 0.008
+          },
+          "spin": {
+            "rate_hz_mean": 5.0,
+            "rate_hz_sigma": 3.0
+          },
+          "charge_e_sigma": 20000.0,
+          "surface_energy_log_sigma": 0.3,
+          "charge_e_mean": 0
+        }
+      ],
+      "center_from_spin_axis_m": [
+        0.05,
+        0.0,
+        0.0
+      ],
+      "center_from_cg_m": [
+        0.05,
+        0.0,
+        0.3
+      ],
+      "wall_adhesion_factor": 0.05,
+      "wall_vibration": {
+        "amplitude_m": 2e-05,
+        "frequency_hz": 200,
+        "axes": [
+          0,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "name": "silica",
+      "size_m": [
+        0.06,
+        0.03,
+        0.03
+      ],
+      "wall_material": "glass_fluorosilane",
+      "particles": [
+        {
+          "material": "silica",
+          "count": 1500,
+          "radius_m": 5e-05,
+          "radius_rel_sigma": 0.05,
+          "region_m": {
+            "center": [
+              0.012,
+              0.015,
+              0.015
+            ],
+            "size": [
+              0.008,
+              0.008,
+              0.008
+            ]
+          },
+          "velocity": {
+            "mode": "jet",
+            "direction": [
+              1,
+              0,
+              0
+            ],
+            "cone_deg": 8,
+            "speed_mean_m_s": 0.005,
+            "speed_sigma_m_s": 0.002
+          },
+          "spin": {
+            "rate_hz_mean": 5.0,
+            "rate_hz_sigma": 3.0
+          },
+          "charge_e_sigma": 20000.0,
+          "surface_energy_log_sigma": 0.3,
+          "charge_e_mean": 0
+        },
+        {
+          "material": "silica",
+          "count": 1500,
+          "radius_m": 5e-05,
+          "radius_rel_sigma": 0.05,
+          "region_m": {
+            "center": [
+              0.048,
+              0.015,
+              0.015
+            ],
+            "size": [
+              0.008,
+              0.008,
+              0.008
+            ]
+          },
+          "velocity": {
+            "mode": "jet",
+            "direction": [
+              -1,
+              0,
+              0
+            ],
+            "cone_deg": 8,
+            "speed_mean_m_s": 0.005,
+            "speed_sigma_m_s": 0.002
+          },
+          "spin": {
+            "rate_hz_mean": 5.0,
+            "rate_hz_sigma": 3.0
+          },
+          "charge_e_sigma": 20000.0,
+          "surface_energy_log_sigma": 0.3,
+          "charge_e_mean": 0
+        }
+      ],
+      "center_from_spin_axis_m": [
+        0.05,
+        0.0,
+        0.0
+      ],
+      "center_from_cg_m": [
+        0.05,
+        0.0,
+        0.3
+      ],
+      "wall_adhesion_factor": 0.05,
+      "wall_vibration": {
+        "amplitude_m": 5e-06,
+        "frequency_hz": 200,
+        "axes": [
+          0,
+          1,
+          2
+        ]
+      }
+    }
+  ]
+}

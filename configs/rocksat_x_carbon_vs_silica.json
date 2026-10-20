@@ -1,0 +1,191 @@
+{
+  "name": "rocksat_x_carbon_vs_silica",
+  "seed": 1,
+  "duration_s": 120,
+  "dt_s": 0.004,
+  "output_fps": 15,
+  "_comment": "Carbon (graphite) vs silica, 100 um grains, RockSat-X: despun with a 1 rpm roll, 1e-4 g residual. Walls: fluorinated, roughened glass (adhesion factor 0.05) vibrated at 200 Hz so grains keep bouncing; launch and wall speeds are chosen per material to straddle each predicted sticking velocity.",
+  "environment": {
+    "preset": "rocksat_x",
+    "pressure_pa": 1.0,
+    "temperature_k": 293,
+    "gas": "air",
+    "residual_accel_g": [
+      0.0,
+      0.0,
+      0.0001
+    ],
+    "jitter_rms_g": 5e-05,
+    "jitter_corr_time": 0.05,
+    "spin_rate_hz": 0.0167,
+    "spin_axis": [
+      0,
+      0,
+      1
+    ],
+    "gravity_gradient": true,
+    "altitude_m": 130000,
+    "local_vertical": [
+      0,
+      0,
+      1
+    ],
+    "electric_field_v_m": [
+      0,
+      0,
+      0
+    ],
+    "magnetic_field_t": [
+      0,
+      2e-05,
+      -4.5e-05
+    ],
+    "temperature_gradient_k_m": [
+      0.0,
+      0.0,
+      3.0
+    ],
+    "illumination": {
+      "intensity_w_m2": 1000.0,
+      "direction": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "forces": {
+    "coulomb": true,
+    "polarization": true,
+    "image_charges": true,
+    "self_gravity": true,
+    "lorentz": true,
+    "external_e_field": true,
+    "long_range_cutoff_m": 0.003,
+    "thermophoresis": true,
+    "photophoresis": true,
+    "radiation_pressure": true,
+    "brownian": true,
+    "long_range_update_every": 5
+  },
+  "contact": {
+    "friction_coefficient": 0.3,
+    "tangential_restitution": 0.0,
+    "wall_sticking": "jkr",
+    "contact_charging": true,
+    "neighbor_skin_m": 0.001,
+    "fragmentation": true
+  },
+  "camera": {
+    "view_axis": [
+      0,
+      0,
+      1
+    ],
+    "fps": 500,
+    "depth_of_field_m": 0.01,
+    "position_noise_m": 5e-06,
+    "track_frames": 6
+  },
+  "materials": {},
+  "chambers": [
+    {
+      "name": "carbon",
+      "size_m": [
+        0.03,
+        0.03,
+        0.03
+      ],
+      "wall_material": "glass_fluorosilane",
+      "center_from_spin_axis_m": [
+        0.05,
+        0.0,
+        0.0
+      ],
+      "particles": [
+        {
+          "material": "graphite",
+          "count": 2000,
+          "radius_m": 5e-05,
+          "radius_rel_sigma": 0.05,
+          "charge_e_mean": 0,
+          "charge_e_sigma": 20000.0,
+          "velocity": {
+            "mode": "isotropic",
+            "speed_mean_m_s": 0.035,
+            "speed_sigma_m_s": 0.02
+          },
+          "spin": {
+            "rate_hz_mean": 5.0,
+            "rate_hz_sigma": 3.0
+          },
+          "surface_energy_log_sigma": 0.3
+        }
+      ],
+      "center_from_cg_m": [
+        0.05,
+        0.0,
+        0.3
+      ],
+      "wall_adhesion_factor": 0.05,
+      "wall_vibration": {
+        "amplitude_m": 2.5e-05,
+        "frequency_hz": 200,
+        "axes": [
+          0,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "name": "silica",
+      "size_m": [
+        0.03,
+        0.03,
+        0.03
+      ],
+      "wall_material": "glass_fluorosilane",
+      "center_from_spin_axis_m": [
+        0.05,
+        0.0,
+        0.0
+      ],
+      "particles": [
+        {
+          "material": "silica",
+          "count": 2000,
+          "radius_m": 5e-05,
+          "radius_rel_sigma": 0.05,
+          "charge_e_mean": 0,
+          "charge_e_sigma": 20000.0,
+          "velocity": {
+            "mode": "isotropic",
+            "speed_mean_m_s": 0.007,
+            "speed_sigma_m_s": 0.004
+          },
+          "spin": {
+            "rate_hz_mean": 5.0,
+            "rate_hz_sigma": 3.0
+          },
+          "surface_energy_log_sigma": 0.3
+        }
+      ],
+      "center_from_cg_m": [
+        0.05,
+        0.0,
+        0.3
+      ],
+      "wall_adhesion_factor": 0.05,
+      "wall_vibration": {
+        "amplitude_m": 5e-06,
+        "frequency_hz": 200,
+        "axes": [
+          0,
+          1,
+          2
+        ]
+      }
+    }
+  ]
+}
