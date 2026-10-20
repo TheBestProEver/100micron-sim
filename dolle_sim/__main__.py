@@ -5,6 +5,7 @@
     python -m dolle_sim sweep --pairs graphite:graphite silica:silica --radius 50e-6
     python -m dolle_sim invert --material graphite --radius 50e-6 --vstick 0.08
     python -m dolle_sim materials
+    python -m dolle_sim analyze results/rocksat_x_carbon_vs_silica
     python -m dolle_sim rebound-check configs/rocksat_x_carbon_vs_silica.json --duration 10
 """
 from __future__ import annotations
@@ -50,6 +51,64 @@ def _print_preflight(pf):
         print("  ! " + w)
 
 
+def _print_measurement(m):
+    print(f"  camera: {m['observable_monomer_impacts']} of {m['monomer_monomer_impacts']} monomer-monomer impacts "
+          f"observable ({m['observable_monomer_impacts_stereo']} in stereo)")
+    for key, label in (("threshold_truth_normal_speed", "truth (3D normal speed, all impacts)"),
+                       ("threshold_2d_relative", "1 camera, 2D relative speed"),
+                       ("threshold_2d_normal", "1 camera, 2D normal component"),
+                       ("threshold_stereo_normal", "stereo cameras, 3D normal speed")):
+        f = m.get(key)
+        txt = (f"v_stick = {f['v50_m_s'] * 1e3:7.2f} mm/s  (1-sigma {f['v50_lo_1sigma'] * 1e3:.2f}"
+               f"-{f['v50_hi_1sigma'] * 1e3:.2f}, N={f['n']})") if f else "no fit (needs sticks and bounces)"
+        print(f"    {label:40s} {txt}")
+
+
+def cmd_analyze(a):
+    """Re-run the synthetic-camera analysis on saved results (no re-simulation)."""
+    import csv
+    from types import SimpleNamespace
+    from .analysis import measurement_report
+    from .output import _plot_measurement, _write_csv
+    out = Path(a.results)
+    cfg = _load(out / "config_used.json")
+    top = _load(out / "summary.json")
+    num = {"t", "v_n", "v_t", "v_rel", "vrel_x", "vrel_y", "vrel_z", "vcm_x", "vcm_y", "vcm_z",
+           "n_x", "n_y", "n_z", "x", "y", "z", "r_sum"}
+    sims, pfs = [], []
+    for ch, summ in zip(cfg["chambers"], top["chambers"]):
+        d = out / ch.get("name", "chamber")
+        with open(d / "collisions.csv", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        cols = []
+        for r in rows:
+            c = {k: (float(v) if k in num else v) for k, v in r.items()}
+            for k in ("i", "j", "n_i", "n_j"):
+                c[k] = int(c[k])
+            for k in ("frozen_i", "frozen_j", "post_fragment", "yielded"):
+                if k in c:
+                    c[k] = c[k] in ("True", "true", "1")
+            cols.append(c)
+        cam = dict(cfg.get("camera", {}))
+        cam.update(ch.get("camera", {}))
+        if a.camera:
+            cam.update(json.loads(a.camera))
+        sim = SimpleNamespace(collisions=cols, size=np.asarray(ch.get("size_m", [0.05, 0.05, 0.05]), float),
+                              duration=summ["duration_s"], name=summ["chamber"])
+        mrows, rep = measurement_report(sim, cam)
+        sim.measurement = (mrows, rep)
+        _write_csv(d / "camera_measurements.csv", mrows)
+        summ["measurement"] = rep
+        (d / "summary.json").write_text(json.dumps(_jsonable(summ), indent=2))
+        print(f"[{summ['chamber']}]")
+        _print_measurement(rep)
+        sims.append(sim)
+        pfs.append(summ["preflight"])
+    (out / "summary.json").write_text(json.dumps(_jsonable(top), indent=2))
+    _plot_measurement(sims, out / "sticking_measurement.png", pfs)
+    print(f"Updated {out / 'sticking_measurement.png'}")
+
+
 def cmd_run(a):
     from .simulation import ChamberSim
     cfg = _load(a.config)
@@ -74,12 +133,7 @@ def cmd_run(a):
         cam = dict(cfg.get("camera", {}))
         cam.update(ch.get("camera", {}))
         summaries.append(write_chamber(sim, out / sim.name, pf, cam))
-        m = summaries[-1]["measurement"]
-        fit = m.get("threshold_measured_camera")
-        print(f"  camera: {m['observable_impacts']}/{m['grain_grain_impacts']} impacts observable"
-              + (f"; measured v_stick = {fit['v50_m_s'] * 1e3:.2f} mm/s "
-                 f"(1-sigma {fit['v50_lo_1sigma'] * 1e3:.2f}-{fit['v50_hi_1sigma'] * 1e3:.2f})" if fit else
-                 "; not enough sticks AND bounces observed to fit a threshold"))
+        _print_measurement(summaries[-1]["measurement"])
         sims.append(sim)
         pfs.append(pf)
     plot_all(sims, out, pfs)
@@ -133,14 +187,15 @@ def cmd_rebound_check(a):
     cfg = _load(a.config)
     out = Path(a.out)
     for ch in cfg["chambers"]:
-        print(f"Cross-checking '{ch.get('name')}' against REBOUND ({a.duration:g} s, <= {a.max_grains} grains) ...", flush=True)
+        print(f"Cross-checking '{ch.get('name')}' against REBOUND ({a.duration:g} s, <= {a.max_grains} grains in total) ...", flush=True)
         r = compare(cfg, ch, a.duration, out, a.max_grains)
         b = r["ballistic_check"]
         print(f"  ballistic: {b['grains_compared']} grains, max position difference "
               f"{b['max_position_difference_m'] * 1e6:.3f} um after {b['t_s']:g} s")
         print(f"  {'':32s} {'DOLL-E':>12s} {'REBOUND':>12s}")
-        for k in ("grain_grain_impacts", "grain_grain_sticks", "monomer_monomer_stick_fraction",
-                  "median_impact_speed_m_s", "wall_impacts", "wall_sticks", "run_time_s"):
+        for k in ("grain_grain_impacts", "grain_grain_sticks", "free_monomer_impacts",
+                  "free_monomer_stick_fraction", "median_impact_speed_m_s", "wall_impacts", "wall_sticks",
+                  "run_time_s"):
             x, y = r["dolle_engine"][k], r["rebound_engine"][k]
             f = (lambda z: "-" if z is None else (f"{z:.4g}" if isinstance(z, float) else str(z)))
             print(f"  {k:32s} {f(x):>12s} {f(y):>12s}")
@@ -188,6 +243,10 @@ def main(argv=None):
     i.add_argument("--radius", type=float, default=50e-6)
     i.add_argument("--vstick", type=float, required=True, help="measured sticking velocity [m/s]")
     i.set_defaults(fn=cmd_invert)
+    an = sub.add_parser("analyze", help="re-run the synthetic camera analysis on a results folder")
+    an.add_argument("results")
+    an.add_argument("--camera", help="JSON camera overrides, e.g. {\"fps\": 1000}")
+    an.set_defaults(fn=cmd_analyze)
     rc = sub.add_parser("rebound-check", help="cross-check the engine against REBOUND on the same chamber")
     rc.add_argument("config")
     rc.add_argument("--duration", type=float, default=10.0)

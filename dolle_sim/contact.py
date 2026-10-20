@@ -19,9 +19,11 @@ energetically bound (stick). Physics included:
   the limiting pressure p_y the loading curve becomes linear,
       F = F_y + pi p_y R (delta - delta_y),
   and unloading is elastic with an enlarged radius of curvature R_p and a
-  permanent indentation delta_p. The non-adhesive (Hertz) part of the JKR
-  force is replaced by this elasto-plastic law, so adhesion and plasticity
-  act together (plastic flattening increases the contact area and adhesion).
+  permanent indentation delta_p. During loading the Hertz part of the JKR
+  force is replaced by this law; unloading follows the JKR relations of the
+  flattened contact (radius R_p, overlap delta - delta_p), so the pull-off
+  force rises to 1.5 pi w R_p and the contact breaks at
+  delta_p + delta_c(R_p) (plastic flattening increases adhesion).
 
 The result is a physically-derived sticking threshold that depends on
 material (E, nu, gamma, rho), grain size and the effective mass of the bodies
@@ -197,6 +199,7 @@ def _resolve_core(R, C, A, B, a_c, G_c, a_snap, U0, delta_c, E_star, a0, beta, v
     damp_c = -2 * math.sqrt(5.0 / 6.0) * beta * math.sqrt(m_eff * 2 * E_star)
     kH = 4.0 / 3.0 * E_star * math.sqrt(R)
     F_y = kH * delta_y ** 1.5
+    w_adh = C * C * E_star / (2 * math.pi)              # work of adhesion (C = sqrt(2 pi w / E*))
     # snap-on: contact forms at delta = 0 with a finite contact radius
     if 0.5 * m_eff * v_in ** 2 + U0 < 0.0:
         return True, 0.0, 0.0, 0.0, 0.0, a_snap, False
@@ -206,30 +209,43 @@ def _resolve_core(R, C, A, B, a_c, G_c, a_snap, U0, delta_c, E_star, a0, beta, v
     F_peak = 0.0
     a_peak = a
     yielded = False
-    F_max = 0.0       # peak non-adhesive force (plastic branch)
-    kP = kH           # unloading stiffness prefactor with R_p
-    d_p = 0.0         # permanent indentation
+    # flattened-contact (post-yield) JKR geometry, Thornton & Ning (1998): radius R_p, offset d_p
+    R_p = R
+    d_p = 0.0
+    A_p = A
+    a_cp = a_c
+    dc_p = delta_c
+    G_cp = G_c
     unloaded = False
     for _ in range(300000):
         v_half = v + 0.5 * dt * acc
         d += dt * v_half
         t += dt
-        if d < delta_c:                       # contact broken -> bounce
-            return False, abs(v_half), d_peak, F_peak, t, a_peak, yielded
-        a = _solve_a(d, a, R, C, a_c)
-        F_el = A * a ** 3 - B * a ** 1.5      # JKR (elastic + adhesive)
-        if d > delta_y and d >= d_peak:
-            # plastic loading: replace the Hertz part by the linear plastic law
-            yielded = True
-            F_max = F_y + math.pi * p_y * R * (d - delta_y)
-            R_p = (4 * E_star / (3 * F_max)) * ((2 * F_max + F_y) / (2 * math.pi * p_y)) ** 1.5
-            kP = 4.0 / 3.0 * E_star * math.sqrt(R_p)
-            d_p = d - (F_max / kP) ** (2.0 / 3.0)
-            F_el += F_max - kH * d ** 1.5
-        elif yielded and d > 0:
-            # elastic unloading/reloading on the flattened contact
-            F_ne = kP * (d - d_p) ** 1.5 if d > d_p else 0.0
-            F_el += F_ne - kH * d ** 1.5
+        if yielded and d < d_peak:
+            # elastic unloading / reloading of the flattened contact: JKR with R_p in d - d_p
+            ds = d - d_p
+            if ds < dc_p:                                   # flattened contact breaks -> bounce
+                return False, abs(v_half), d_peak, F_peak, t, a_peak, yielded
+            a = _solve_a(ds, a, R_p, C, a_cp)
+            F_el = A_p * a ** 3 - B * a ** 1.5
+        else:
+            if d < delta_c:                                 # contact broken -> bounce
+                return False, abs(v_half), d_peak, F_peak, t, a_peak, yielded
+            a = _solve_a(d, a, R, C, a_c)
+            F_el = A * a ** 3 - B * a ** 1.5                # JKR (elastic + adhesive)
+            if d > delta_y:
+                # plastic loading: the Hertz part is replaced by the linear limiting-pressure law
+                yielded = True
+                F_max = F_y + math.pi * p_y * R * (d - delta_y)
+                F_el += F_max - kH * d ** 1.5
+                R_p = (4 * E_star / (3 * F_max)) * ((2 * F_max + F_y) / (2 * math.pi * p_y)) ** 1.5
+                kP = 4.0 / 3.0 * E_star * math.sqrt(R_p)
+                d_p = d - (F_max / kP) ** (2.0 / 3.0)
+                A_p = 4 * E_star / (3 * R_p)
+                a0_p = (4.5 * math.pi * w_adh * R_p ** 2 / E_star) ** (1.0 / 3.0)
+                a_cp = a0_p / 6.0 ** (2.0 / 3.0)
+                dc_p = a_cp ** 2 / R_p - C * math.sqrt(a_cp)
+                G_cp = _G(a_cp, A_p, B, C, R_p)
         acc = -(F_el + damp_c * math.sqrt(a) * v_half) / m_eff
         v_new = v_half + 0.5 * dt * acc
         if d > d_peak:
@@ -243,7 +259,11 @@ def _resolve_core(R, C, A, B, a_c, G_c, a_snap, U0, delta_c, E_star, a0, beta, v
             # failed to escape on the rebound and is falling back in: bound
             return True, 0.0, d_peak, F_peak, t, a_peak, yielded
         v = v_new
-        # bound: total energy below the break threshold -> can never escape (elastic case)
-        if not yielded and 0.5 * m_eff * v * v + _G(a, A, B, C, R) - G_c < 0.0:
-            return True, 0.0, d_peak, F_peak, t, a_peak, yielded
+        # bound: total energy below the break threshold of the current contact -> can never escape
+        if not yielded:
+            if 0.5 * m_eff * v * v + _G(a, A, B, C, R) - G_c < 0.0:
+                return True, 0.0, d_peak, F_peak, t, a_peak, yielded
+        elif d < d_peak:
+            if 0.5 * m_eff * v * v + _G(a, A_p, B, C, R_p) - G_cp < 0.0:
+                return True, 0.0, d_peak, F_peak, t, a_peak, yielded
     return True, 0.0, d_peak, F_peak, t, a_peak, yielded

@@ -244,14 +244,19 @@ function drawHist() {
   const W = hc.width, H = hc.height, ev = ch.events.filter(e => e[0] <= t && !e[3]);
   hctx.clearRect(0, 0, W, H);
   if (!ch.events.length) return;
-  const all = ch.events.filter(e => !e[3]).map(e => Math.log10(Math.max(e[1], 1e-6)));
-  if (!all.length) { hctx.fillStyle = '#8a93a3'; hctx.font = `${11 * devicePixelRatio}px system-ui`;
+  if (ch.histRange === undefined) {          // computed once per chamber (no spread over huge arrays)
+    let mn = Infinity, mx = -Infinity;
+    for (const e of ch.events) if (!e[3]) { const l = Math.log10(Math.max(e[1], 1e-6)); if (l < mn) mn = l; if (l > mx) mx = l; }
+    ch.histRange = mn === Infinity ? null : [mn - 0.1, mx + 0.1];
+  }
+  if (!ch.histRange) { hctx.fillStyle = '#8a93a3'; hctx.font = `${11 * devicePixelRatio}px system-ui`;
     hctx.fillText('no grain–grain impacts', 10, H / 2); return; }
-  const lo = Math.min(...all) - 0.1, hi = Math.max(...all) + 0.1, nb = 24;
+  const [lo, hi] = ch.histRange, nb = 24;
   const s = new Array(nb).fill(0), b = new Array(nb).fill(0);
   for (const e of ev) { const k = Math.min(nb - 1, Math.floor((Math.log10(Math.max(e[1], 1e-6)) - lo) / (hi - lo) * nb));
     (e[2] ? s : b)[k]++; }
-  const mx = Math.max(1, ...s.map((v, i) => v + b[i])), bw = W / nb, pad = 16 * devicePixelRatio;
+  let mx = 1; for (let k = 0; k < nb; k++) mx = Math.max(mx, s[k] + b[k]);
+  const bw = W / nb, pad = 16 * devicePixelRatio;
   for (let k = 0; k < nb; k++) {
     const hs = (H - pad) * s[k] / mx, hb = (H - pad) * b[k] / mx;
     hctx.fillStyle = '#3ccf7e'; hctx.fillRect(k * bw + 1, H - pad - hs, bw - 2, hs);

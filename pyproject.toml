@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dolle-sim"
-version = "0.1.0"
+version = "0.2.0"
 description = "DOLL-E: microgravity dust-collision simulator for 100 um grains on NASA RockSat"
 readme = "README.md"
 requires-python = ">=3.10"

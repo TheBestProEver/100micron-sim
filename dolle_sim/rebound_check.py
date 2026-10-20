@@ -2,23 +2,31 @@
 
 REBOUND (Rein & Liu 2012, https://rebound.readthedocs.io) is a widely used,
 well-tested N-body code. Here it provides an *independent* integrator,
-mutual-gravity solver and collision-detection scheme ("line" detection) for
-the same chamber, same initial conditions and same external forces, while our
-JKR contact model is plugged in as REBOUND's collision resolver. Walls are
-handled after every REBOUND step.
+mutual-gravity solver and collision detection ("line" detection) for the same
+chamber, the same initial conditions and the same external forces. Our JKR
+contact model is plugged in as REBOUND's collision resolver; walls are handled
+after every REBOUND step.
+
+How the physics is split in REBOUND:
+  * leapfrog (DKD) for positions with the position-dependent forces
+    (residual acceleration, centrifugal) in `additional_forces`;
+  * gas drag + Coriolis applied as an exact velocity operator in
+    pre/post-timestep hooks (Strang splitting), because leapfrog evaluates
+    velocity-dependent forces explicitly and would pump energy in a spinning frame;
+  * collisions: REBOUND reports a pair after the step; the resolver rewinds the
+    pair along its straight-line relative motion to the actual contact time, so the
+    contact normal and the normal speed are exact; it applies the impulse there and
+    re-advances the pair to the end of the step.
 
 What is compared (both engines run with the physics REBOUND can represent:
 point-mass rotation-free grains, residual acceleration, gas drag, payload
-spin, mutual gravity, JKR stick/bounce, walls):
-  * ballistic trajectories before the first collision (should agree to
-    round-off/integrator error),
-  * collision statistics over the run (chaotic, so statistical agreement:
-    numbers of grain-grain impacts, sticking fraction, wall impacts, speed
-    decay).
+spin, mutual gravity, JKR stick/bounce, static walls):
+  * ballistic trajectories before any collision (against REBOUND IAS15),
+  * collision statistics over the run, with Poisson uncertainties.
 
 Differences by design: REBOUND merges stuck grains into one sphere of equal
-volume, our engine keeps rigid aggregates of spheres; REBOUND has no grain
-spin. So aggregate-related numbers can differ somewhat.
+volume, our engine keeps rigid aggregates of touching spheres (larger collision
+cross-section); REBOUND grains do not spin.
 """
 from __future__ import annotations
 
@@ -35,48 +43,71 @@ from .materials import pair_props
 from .contact import JKRContact
 
 
-def _simplify(cfg, chamber):
+def _simplify(cfg, chamber, n_max):
     """Strip the physics REBOUND cannot represent, from both engines' configs."""
     cfg = copy.deepcopy(cfg)
     ch = copy.deepcopy(chamber)
-    env = cfg.setdefault("environment", {})
-    env["jitter_rms_g"] = 0.0
-    env["gravity_gradient"] = False
-    env["illumination"] = {"intensity_w_m2": 0.0}
-    env["temperature_gradient_k_m"] = [0, 0, 0]
+    for env in (cfg.setdefault("environment", {}), ch.setdefault("environment", {})):
+        env["jitter_rms_g"] = 0.0
+        env["gravity_gradient"] = False
+        env["illumination"] = {"intensity_w_m2": 0.0}
+        env["temperature_gradient_k_m"] = [0, 0, 0]
+        env.pop("accel_csv", None)
     cfg["forces"] = {"coulomb": False, "polarization": False, "image_charges": False, "self_gravity": True,
                      "lorentz": False, "external_e_field": False, "thermophoresis": False,
                      "photophoresis": False, "radiation_pressure": False, "brownian": False,
-                     "long_range_cutoff_m": 0.003}
+                     "space_charge": False, "long_range_cutoff_m": 0.003}
     c = cfg.setdefault("contact", {})
     c.update({"contact_charging": False, "fragmentation": False, "friction_coefficient": 0.0})
     ch.pop("wall_vibration", None)
+    total = sum(int(g["count"]) for g in ch["particles"])
+    scale = min(1.0, n_max / max(total, 1))
     for g in ch["particles"]:
+        g["count"] = max(1, int(round(int(g["count"]) * scale)))
         g["charge_e_mean"] = 0
         g["charge_e_sigma"] = 0
         g["spin"] = {"rate_hz_mean": 0.0, "rate_hz_sigma": 0.0}
     return cfg, ch
 
 
-def run_rebound(sim0: ChamberSim, duration: float, dt: float, gravity=True):
+def _exact_velocity_operator(V, gam, Om, h):
+    """Exact solution of dV/dt = -gam V - 2 Omega x V over h (rows of V, per-row gam)."""
+    W = float(np.linalg.norm(Om))
+    if W == 0:
+        return V * np.exp(-gam * h)[:, None]
+    e = Om / W
+    e1 = np.cross(e, [1.0, 0, 0] if abs(e[0]) < 0.9 else [0, 1.0, 0])
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(e, e1)
+    vp = (V @ e) * np.exp(-gam * h)
+    z = (V @ e1 + 1j * (V @ e2)) * np.exp(-(gam + 2j * W) * h)
+    return vp[:, None] * e + z.real[:, None] * e1 + z.imag[:, None] * e2
+
+
+def run_rebound(sim0: ChamberSim, duration: float):
     import rebound
 
+    dt = sim0.dt
     env = sim0.env
     rs = rebound.Simulation()
-    rs.G = 6.67430e-11 if gravity else 0.0
+    rs.G = 6.67430e-11
     rs.integrator = "leapfrog"
     rs.dt = dt
     rs.collision = "line"
     N = sim0.N
-    mat = sim0.mat.copy()
-    rad = sim0.rad.copy()
-    adh = sim0.adh.copy()
     for k in range(N):
-        rs.add(m=sim0.mass[k], r=rad[k], x=sim0.pos[k, 0], y=sim0.pos[k, 1], z=sim0.pos[k, 2],
+        rs.add(m=sim0.mass[k], r=sim0.rad[k], x=sim0.pos[k, 0], y=sim0.pos[k, 1], z=sim0.pos[k, 2],
                vx=sim0.V[k, 0], vy=sim0.V[k, 1], vz=sim0.V[k, 2])
-    # per-particle bookkeeping keyed by REBOUND index. Particles are never removed (indices stay
-    # stable inside a step); merged or wall-stuck grains are "parked" far away with zero mass/radius.
+    # Per-particle bookkeeping keyed by REBOUND index. Particles are never removed (indices stay stable);
+    # merged grains are "parked" far away with zero mass/radius; wall-stuck grains stay in place
+    # (frozen, infinite mass) so they remain collision targets as in DOLL-E.
     parked = np.zeros(N, bool)
+    frozen = np.zeros(N, bool)
+    info = [dict(mat=int(sim0.mat[k]), rad=float(sim0.rad[k]), adh=float(sim0.adh[k]),
+                 dragc=float(sim0.dragc[k]), n=1, m=float(sim0.mass[k])) for k in range(N)]
+    contacts = {}
+    log = []
+    a_res, Om, off = env.a_res.copy(), env.omega.copy(), sim0.axis_offset.copy()
 
     def park(idx):
         p = rs.particles[idx]
@@ -85,16 +116,9 @@ def run_rebound(sim0: ChamberSim, duration: float, dt: float, gravity=True):
         p.x, p.y, p.z = 1e3 * (idx + 1), 1e3, 1e3
         p.vx = p.vy = p.vz = 0.0
 
-    info = {k: dict(mat=int(mat[k]), rad=float(rad[k]), adh=float(adh[k]), dragc=float(sim0.dragc[k]), n=1,
-                    m=float(sim0.mass[k])) for k in range(N)}
-    contacts = {}
-    log = []
-    a_res = env.a_res.copy()
-    Om = env.omega.copy()
-    off = sim0.axis_offset.copy()
-
     def contact(ki, kj):
-        a, b = info[ki], info[kj] if kj is not None else None
+        a = info[ki]
+        b = info[kj] if kj is not None else None
         f = math.sqrt(a["adh"] * b["adh"]) if b else a["adh"] * sim0.wall_adh
         key = (a["mat"], round(a["rad"] * 2e6), None if b is None else b["mat"],
                None if b is None else round(b["rad"] * 2e6), round(math.log(f) * 50))
@@ -106,16 +130,31 @@ def run_rebound(sim0: ChamberSim, duration: float, dt: float, gravity=True):
                                                       adhesion_factor=math.exp(key[-1] / 50)))
         return c
 
+    def velocity_operator(h):
+        n = rs.N
+        vel = np.zeros((n, 3))
+        rs.serialize_particle_data(vxvyvz=vel)
+        gam = np.array([info[k]["dragc"] / info[k]["m"] if env.P > 0 else 0.0 for k in range(n)])
+        vel = _exact_velocity_operator(vel, gam, Om, h)
+        vel[parked | frozen] = 0.0
+        for k, p in enumerate(rs.particles):
+            p.vx, p.vy, p.vz = vel[k]
+
+    def pre(simp):
+        velocity_operator(0.5 * dt)
+
+    def post(simp):
+        velocity_operator(0.5 * dt)
+
     def forces(simp):
         s = simp.contents
         n = s.N
-        xyz, vel = np.zeros((n, 3)), np.zeros((n, 3))
-        s.serialize_particle_data(xyz=xyz, vxvyvz=vel)
-        c_m = np.array([info[k]["dragc"] / info[k]["m"] for k in range(n)])
-        a = a_res[None, :] - c_m[:, None] * vel
+        xyz = np.zeros((n, 3))
+        s.serialize_particle_data(xyz=xyz)
+        a = np.repeat(a_res[None, :], n, axis=0)
         if Om.any():
-            a += -2 * np.cross(Om[None, :], vel) - np.cross(Om[None, :], np.cross(Om[None, :], xyz + off))
-        a[parked] = 0.0
+            a -= np.cross(Om[None, :], np.cross(Om[None, :], xyz + off))
+        a[parked | frozen] = 0.0
         for k, p in enumerate(s.particles):
             p.ax += a[k, 0]
             p.ay += a[k, 1]
@@ -123,139 +162,119 @@ def run_rebound(sim0: ChamberSim, duration: float, dt: float, gravity=True):
 
     def resolve(simp, col):
         s = simp.contents
-        ps = s.particles
-        if parked[col.p1] or parked[col.p2]:
+        i, j = col.p1, col.p2
+        if parked[i] or parked[j] or (frozen[i] and frozen[j]):
             return 0
-        p1, p2 = ps[col.p1], ps[col.p2]
-        dx = np.array([p2.x - p1.x, p2.y - p1.y, p2.z - p1.z])
-        dv = np.array([p1.vx - p2.vx, p1.vy - p2.vy, p1.vz - p2.vz])
-        d = np.linalg.norm(dx)
-        n = dx / d
-        vn = float(dv @ n)
+        ps = s.particles
+        p1, p2 = ps[i], ps[j]
+        x1 = np.array([p1.x, p1.y, p1.z]); x2 = np.array([p2.x, p2.y, p2.z])
+        v1 = np.array([p1.vx, p1.vy, p1.vz]); v2 = np.array([p2.vx, p2.vy, p2.vz])
+        S = p1.r + p2.r
+        r_end, u = x2 - x1, v2 - v1
+        # rewind along the relative straight-line motion to the contact time (largest root <= dt back)
+        a2, b2, c2 = u @ u, -2 * (r_end @ u), r_end @ r_end - S * S
+        disc = b2 * b2 - 4 * a2 * c2
+        if a2 <= 0 or disc < 0:
+            return 0
+        sback = (-b2 + math.sqrt(disc)) / (2 * a2)        # time since contact
+        if sback < 0 or sback > 1.5 * dt:
+            return 0
+        n = (r_end - u * sback) / S
+        vn = float((v1 - v2) @ n)
         if vn <= 0:
-            return 0                         # already separating
-        m_eff = p1.m * p2.m / (p1.m + p2.m)
-        h1, h2 = col.p1, col.p2
-        res = contact(h1, h2).resolve(vn, m_eff)
-        log.append(dict(t=s.t, kind="pp", n_i=info[h1]["n"], n_j=info[h2]["n"], v_n=vn,
-                        outcome="stick" if res.stuck else "bounce", e_n=res.e_n))
+            return 0                                      # was separating at contact
+        if frozen[i] or frozen[j]:
+            m_eff = p2.m if frozen[i] else p1.m
+        else:
+            m_eff = p1.m * p2.m / (p1.m + p2.m)
+        res = contact(i, j).resolve(vn, m_eff)
+        log.append(dict(t=s.t, kind="pp", n_i=info[i]["n"], n_j=info[j]["n"], v_n=vn,
+                        outcome="stick" if res.stuck else "bounce", e_n=res.e_n,
+                        frozen=bool(frozen[i] or frozen[j])))
+        # move both back to contact
+        x1c, x2c = x1 - v1 * sback, x2 - v2 * sback
         if res.stuck:
+            if frozen[i] or frozen[j]:
+                keep, gone = (i, j) if frozen[i] else (j, i)
+                frozen[gone] = True                       # sticks to the wall-bound grain
+                pg = ps[gone]
+                xc = x2c if gone == j else x1c
+                pg.x, pg.y, pg.z = xc
+                pg.vx = pg.vy = pg.vz = 0.0
+                return 0
             M = p1.m + p2.m
-            for attr in ("vx", "vy", "vz"):
-                setattr(p1, attr, (p1.m * getattr(p1, attr) + p2.m * getattr(p2, attr)) / M)
-            for attr in ("x", "y", "z"):
-                setattr(p1, attr, (p1.m * getattr(p1, attr) + p2.m * getattr(p2, attr)) / M)
+            vc = (p1.m * v1 + p2.m * v2) / M
+            xc = (p1.m * x1c + p2.m * x2c) / M + vc * sback
+            p1.x, p1.y, p1.z = xc
+            p1.vx, p1.vy, p1.vz = vc
             p1.r = (p1.r ** 3 + p2.r ** 3) ** (1 / 3)
             p1.m = M
-            info[h1]["n"] += info[h2]["n"]
-            info[h1]["dragc"] += info[h2]["dragc"]
-            info[h1]["m"] = M
-            park(h2)
+            info[i]["n"] += info[j]["n"]
+            info[i]["dragc"] += info[j]["dragc"]
+            info[i]["m"] = M
+            park(j)
             return 0
         J = (1 + res.e_n) * vn * m_eff
-        p1.vx -= J * n[0] / p1.m; p1.vy -= J * n[1] / p1.m; p1.vz -= J * n[2] / p1.m
-        p2.vx += J * n[0] / p2.m; p2.vy += J * n[1] / p2.m; p2.vz += J * n[2] / p2.m
+        if not frozen[i]:
+            v1 = v1 - J * n / p1.m
+        if not frozen[j]:
+            v2 = v2 + J * n / p2.m
+        x1n, x2n = x1c + v1 * sback, x2c + v2 * sback
+        if not frozen[i]:
+            p1.x, p1.y, p1.z = x1n
+            p1.vx, p1.vy, p1.vz = v1
+        if not frozen[j]:
+            p2.x, p2.y, p2.z = x2n
+            p2.vx, p2.vy, p2.vz = v2
         return 0
 
     rs.additional_forces = forces
-    rs.force_is_velocity_dependent = 1
+    rs.pre_timestep_modifications = pre
+    rs.post_timestep_modifications = post
     rs.collision_resolve = resolve
     size = sim0.size
     wall_stuck = 0
-    wall_hits = 0
     series = []
     t_out = 0.0
-    while rs.t < duration - 1e-12:
-        rs.integrate(rs.t + dt, exact_finish_time=0)
-        remove = []
-        for idx in np.flatnonzero(~parked):
+    n_steps = int(round(duration / dt))
+    for _ in range(n_steps):
+        rs.steps(1)
+        for idx in np.flatnonzero(~parked & ~frozen):
             p = rs.particles[int(idx)]
             h = int(idx)
             for ax_i, attr, vattr in ((0, "x", "vx"), (1, "y", "vy"), (2, "z", "vz")):
                 x, v = getattr(p, attr), getattr(p, vattr)
                 lo, hi = p.r, size[ax_i] - p.r
                 if (x < lo and v < 0) or (x > hi and v > 0):
-                    wall_hits += 1
                     res = contact(h, None).resolve(abs(v), p.m)
-                    if res.stuck and sim0.wall_mode != "never":
+                    mode = sim0.wall_mode
+                    stuck = res.stuck if mode == "jkr" else mode == "always"
+                    plane = lo if x < lo else hi
+                    if stuck:
                         wall_stuck += info[h]["n"]
-                        remove.append(h)
+                        frozen[h] = True
+                        setattr(p, attr, plane)
+                        p.vx = p.vy = p.vz = 0.0
                     else:
                         e = res.e_n if not res.stuck else math.sqrt(sim0.mats[info[h]["mat"]].e_dry * sim0.wall_mat.e_dry)
+                        setattr(p, attr, plane + e * (plane - x))      # reflect the overshoot
                         setattr(p, vattr, -e * v)
                     log.append(dict(t=rs.t, kind="wall", n_i=info[h]["n"], n_j=0, v_n=abs(v),
-                                    outcome="stick" if (res.stuck and sim0.wall_mode != "never") else "bounce",
-                                    e_n=res.e_n))
+                                    outcome="stick" if stuck else "bounce", e_n=res.e_n, frozen=False))
                     break
-        for h in remove:
-            park(h)
         if rs.t >= t_out - 1e-12:
             vel = np.zeros((rs.N, 3))
             rs.serialize_particle_data(vxvyvz=vel)
-            live = ~parked
+            live = ~parked & ~frozen
             series.append(dict(t=rs.t, free_bodies=int(live.sum()),
                                mean_speed=float(np.linalg.norm(vel[live], axis=1).mean()) if live.any() else 0.0,
                                wall_monomers=wall_stuck))
             t_out += 0.25
-    xyz = np.zeros((rs.N, 3))
-    rs.serialize_particle_data(xyz=xyz)
-    return dict(log=log, series=series, wall_hits=wall_hits, wall_stuck=wall_stuck, final_N=int((~parked).sum()))
+    return dict(log=log, series=series, wall_stuck=wall_stuck, final_N=int((~parked & ~frozen).sum()))
 
 
-def compare(cfg: dict, chamber: dict, duration: float, out: Path, n_max: int = 400):
-    cfg, chamber = _simplify(cfg, chamber)
-    for g in chamber["particles"]:
-        g["count"] = min(int(g["count"]), n_max)
-    cfg["duration_s"] = duration
-    dt = float(cfg.get("dt_s", 1e-3))
-    out.mkdir(parents=True, exist_ok=True)
-
-    # --- 1) ballistic trajectory check (no collisions: walls/neighbours irrelevant over a short time)
-    ours = ChamberSim(cfg, chamber, 1)
-    ref0 = ChamberSim(cfg, chamber, 1)
-    t_bal = min(0.2, duration)
-    ours.duration = t_bal
-    ours.run(progress=False)
-    rb = _ballistic_rebound(ref0, t_bal, dt)
-    free = np.flatnonzero((ours.nmono[ours.body] == 1) & ~ours.frozen[ours.body])
-    untouched = [k for k in free if not any(c["i"] == k or c["j"] == k for c in ours.collisions)]
-    dev = np.linalg.norm(ours.pos[untouched] - rb[untouched], axis=1) if untouched else np.array([np.nan])
-
-    # --- 2) statistics over the full duration
-    t0 = time.time()
-    ours = ChamberSim(cfg, chamber, 1)
-    ref_init = ChamberSim(cfg, chamber, 1)
-    ours.run(progress=False)
-    t_ours = time.time() - t0
-    t0 = time.time()
-    rb = run_rebound(ref_init, duration, dt)
-    t_rb = time.time() - t0
-
-    def stats(log):
-        pp = [c for c in log if c["kind"] == "pp"]
-        mono = [c for c in pp if c["n_i"] == 1 and c["n_j"] == 1]
-        return {"grain_grain_impacts": len(pp), "grain_grain_sticks": sum(c["outcome"] == "stick" for c in pp),
-                "monomer_monomer_impacts": len(mono),
-                "monomer_monomer_stick_fraction": (sum(c["outcome"] == "stick" for c in mono) / len(mono)) if mono else None,
-                "median_impact_speed_m_s": float(np.median([c["v_n"] for c in pp])) if pp else None,
-                "wall_impacts": sum(c["kind"] == "wall" for c in log),
-                "wall_sticks": sum(c["kind"] == "wall" and c["outcome"] == "stick" for c in log)}
-
-    rep = {
-        "chamber": chamber.get("name"), "n_grains": ours.N, "duration_s": duration, "dt_s": dt,
-        "ballistic_check": {"t_s": t_bal, "grains_compared": len(untouched),
-                            "max_position_difference_m": float(np.nanmax(dev)),
-                            "median_position_difference_m": float(np.nanmedian(dev))},
-        "dolle_engine": {**stats(ours.collisions), "run_time_s": t_ours},
-        "rebound_engine": {**stats(rb["log"]), "run_time_s": t_rb, "rebound_version": __import__("rebound").__version__},
-    }
-    (out / f"rebound_check_{chamber.get('name')}.json").write_text(json.dumps(rep, indent=2))
-    _plot(ours, rb, out / f"rebound_check_{chamber.get('name')}.png", chamber.get("name"))
-    return rep
-
-
-def _ballistic_rebound(sim0, t_end, dt):
-    """Integrate every grain with REBOUND with collisions off and the same external forces."""
+def _ballistic_rebound(sim0, t_end):
+    """Integrate every grain with REBOUND IAS15 with collisions off and the same external forces."""
     import rebound
     rs = rebound.Simulation()
     rs.G = 6.67430e-11
@@ -264,7 +283,7 @@ def _ballistic_rebound(sim0, t_end, dt):
     for k in range(sim0.N):
         rs.add(m=sim0.mass[k], r=sim0.rad[k], x=sim0.pos[k, 0], y=sim0.pos[k, 1], z=sim0.pos[k, 2],
                vx=sim0.V[k, 0], vy=sim0.V[k, 1], vz=sim0.V[k, 2])
-    cm = sim0.dragc / sim0.mass
+    cm = sim0.dragc / sim0.mass if env.P > 0 else np.zeros(sim0.N)
     a_res, Om, off = env.a_res, env.omega, sim0.axis_offset
 
     def forces(simp):
@@ -283,10 +302,71 @@ def _ballistic_rebound(sim0, t_end, dt):
 
     rs.additional_forces = forces
     rs.force_is_velocity_dependent = 1
-    rs.integrate(t_end)
+    rs.integrate(t_end, exact_finish_time=1)
     xyz = np.zeros((rs.N, 3))
     rs.serialize_particle_data(xyz=xyz)
     return xyz
+
+
+def _stats(log):
+    pp = [c for c in log if c["kind"] == "pp"]
+    mono = [c for c in pp if c["n_i"] == 1 and c["n_j"] == 1 and not c.get("frozen", False)]
+    n_mono = len(mono)
+    sticks = sum(c["outcome"] == "stick" for c in mono)
+    frac = sticks / n_mono if n_mono else None
+    return {"grain_grain_impacts": len(pp), "grain_grain_impacts_err": math.sqrt(len(pp)),
+            "grain_grain_sticks": sum(c["outcome"] == "stick" for c in pp),
+            "free_monomer_impacts": n_mono,
+            "free_monomer_stick_fraction": frac,
+            "free_monomer_stick_fraction_err": (math.sqrt(frac * (1 - frac) / n_mono) if n_mono else None),
+            "median_impact_speed_m_s": float(np.median([c["v_n"] for c in pp])) if pp else None,
+            "wall_impacts": sum(c["kind"] == "wall" for c in log),
+            "wall_sticks": sum(c["kind"] == "wall" and c["outcome"] == "stick" for c in log)}
+
+
+def compare(cfg: dict, chamber: dict, duration: float, out: Path, n_max: int = 400):
+    cfg, chamber = _simplify(cfg, chamber, n_max)
+    cfg["duration_s"] = duration
+    out.mkdir(parents=True, exist_ok=True)
+
+    # --- 1) ballistic trajectory check over a whole number of DOLL-E steps
+    ours = ChamberSim(cfg, chamber, 1)
+    ref0 = ChamberSim(cfg, chamber, 1)
+    dt = ours.dt
+    n_bal = max(1, int(round(min(0.2, duration) / dt)))
+    t_bal = n_bal * dt
+    ours._build_neighbors()
+    for k in range(n_bal):
+        ours.step(k * dt)
+    rb = _ballistic_rebound(ref0, t_bal)
+    touched = {c["i"] for c in ours.collisions} | {c["j"] for c in ours.collisions}
+    untouched = [k for k in range(ours.N) if k not in touched and ours.nmono[ours.body[k]] == 1]
+    dev = np.linalg.norm(ours.pos[untouched] - rb[untouched], axis=1) if untouched else np.array([np.nan])
+
+    # --- 2) statistics over the full duration
+    t0 = time.time()
+    ours = ChamberSim(cfg, chamber, 1)
+    ref_init = ChamberSim(cfg, chamber, 1)
+    ours.run(progress=False)
+    t_ours = time.time() - t0
+    t0 = time.time()
+    rbr = run_rebound(ref_init, duration)
+    t_rb = time.time() - t0
+
+    ours_log = [dict(c, frozen=bool(c.get("frozen_i") or c.get("frozen_j"))) if c["kind"] == "pp" else c
+                for c in ours.collisions]
+    rep = {
+        "chamber": chamber.get("name"), "n_grains": ours.N, "duration_s": duration, "dt_s": dt,
+        "ballistic_check": {"t_s": t_bal, "grains_compared": len(untouched),
+                            "max_position_difference_m": float(np.nanmax(dev)),
+                            "median_position_difference_m": float(np.nanmedian(dev))},
+        "dolle_engine": {**_stats(ours_log), "run_time_s": t_ours},
+        "rebound_engine": {**_stats(rbr["log"]), "run_time_s": t_rb,
+                           "rebound_version": __import__("rebound").__version__},
+    }
+    (out / f"rebound_check_{chamber.get('name')}.json").write_text(json.dumps(rep, indent=2))
+    _plot(ours, rbr, out / f"rebound_check_{chamber.get('name')}.png", chamber.get("name"))
+    return rep
 
 
 def _plot(ours, rb, path, name):

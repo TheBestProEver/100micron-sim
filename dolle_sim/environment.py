@@ -13,9 +13,12 @@ relative to the chamber.
 Also modelled (all optional, all in the chamber frame):
 * Gravity gradient (tidal) acceleration of a free-falling payload,
       a_tid = (GM/r^3) [3 (x.e_up) e_up - x],
-  x = position relative to the rocket's centre of mass. ~1e-7 g per 10 cm.
+  x = position relative to the rocket's centre of mass; at most 2 GM/r^3 |x|
+  (~5e-8 g per 10 cm at 130 km).
 * Uniform external electric field E [V/m] (e.g. from charged/biased walls).
 * Uniform magnetic field B [T] (Earth's field ~ 25-65 uT) -> Lorentz force q v x B.
+  The local vertical and Earth's B field are fixed in inertial space, so in the
+  spinning chamber frame they rotate as R(-Omega t); both are given at t = 0.
 * Gas torque on spinning grains (free-molecular <-> continuum interpolation).
 * Temperature gradient across the chamber [K/m] (thermophoresis) and the
   camera/LED illumination [W/m^2] (photophoresis, radiation pressure).
@@ -160,11 +163,24 @@ class Environment:
         ratio = 0.3 + (1.114 - 0.3) * Kn / (1 + Kn)
         return 0.4 * self.drag_coeff(radius) * radius ** 2 / ratio
 
-    def tidal_accel(self, x_cg: np.ndarray) -> np.ndarray:
+    def to_chamber(self, v_inertial: np.ndarray, t: float) -> np.ndarray:
+        """An inertially fixed vector (given at t=0) expressed in the spinning chamber frame."""
+        W = float(np.linalg.norm(self.omega))
+        if W == 0:
+            return v_inertial
+        k = self.omega / W
+        th = -W * t
+        return (v_inertial * math.cos(th) + np.cross(k, v_inertial) * math.sin(th)
+                + k * (k @ v_inertial) * (1 - math.cos(th)))
+
+    def magnetic_field(self, t: float) -> np.ndarray:
+        return self.to_chamber(self.B_field, t)
+
+    def tidal_accel(self, x_cg: np.ndarray, t: float = 0.0) -> np.ndarray:
         """Gravity-gradient acceleration at positions x_cg (relative to the rocket CG)."""
         if not self.gravity_gradient:
             return np.zeros_like(x_cg)
-        up = self.e_up
+        up = self.to_chamber(self.e_up, t)
         return self.tidal_rate * (3 * (x_cg @ up)[:, None] * up[None, :] - x_cg)
 
     def describe(self) -> dict:
@@ -174,7 +190,7 @@ class Environment:
             "residual_accel_m_s2": self.a_res.tolist(), "jitter_rms_m_s2": self.jitter_rms,
             "spin_rate_hz": self.spin_hz, "spin_axis": (self.omega / max(np.linalg.norm(self.omega), 1e-30)).tolist(),
             "window_s": self.window_s, "gravity_gradient": self.gravity_gradient,
-            "tidal_accel_per_m_g": 3 * self.tidal_rate / G0,
+            "tidal_accel_max_per_m_g": 2 * self.tidal_rate / G0,
             "electric_field_v_m": self.E_field.tolist(), "magnetic_field_t": self.B_field.tolist(),
             "temperature_gradient_k_m": self.grad_T.tolist(), "illumination_w_m2": self.light_I,
             "illumination_direction": self.light_dir.tolist(),

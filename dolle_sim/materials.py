@@ -173,6 +173,7 @@ def pair_props(m1: Material, r1: float, m2: Material, r2: float | None,
     R_star = r1 if r2 is None else r1 * r2 / (r1 + r2)
     # Work of adhesion between dissimilar surfaces (Berthelot-type mixing rule)
     w = 2.0 * math.sqrt(m1.gamma * m2.gamma) * adhesion_factor
+    w = max(w, 1e-12)            # non-adhesive limit (keeps the JKR algebra finite)
     e_dry = math.sqrt(m1.e_dry * m2.e_dry)
     F_c = 1.5 * math.pi * w * R_star
     a0 = (4.5 * math.pi * w * R_star ** 2 / E_star) ** (1.0 / 3.0)

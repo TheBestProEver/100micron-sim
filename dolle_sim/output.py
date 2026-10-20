@@ -43,12 +43,14 @@ def _jsonable(o):
 
 def collision_stats(sim):
     pp = [c for c in sim.collisions if c["kind"] == "pp"]
-    mono = [c for c in pp if c["n_i"] == 1 and c["n_j"] == 1]
+    mono = [c for c in pp if c["n_i"] == 1 and c["n_j"] == 1 and not c.get("frozen_i") and not c.get("frozen_j")
+            and not c.get("post_fragment")]
     s = {
         "grain_grain_collisions": len(pp),
         "grain_grain_sticks": sum(c["outcome"] == "stick" for c in pp),
         "monomer_monomer_collisions": len(mono),
         "monomer_monomer_sticks": sum(c["outcome"] == "stick" for c in mono),
+        "impacts_on_wall_bound_grains": sum(bool(c.get("frozen_i") or c.get("frozen_j")) for c in pp),
         "wall_collisions": sum(c["kind"] == "wall" for c in sim.collisions),
         "wall_sticks": sum(c["kind"] == "wall" and c["outcome"] == "stick" for c in sim.collisions),
     }
@@ -138,45 +140,49 @@ def _plot_collisions(sims, path, preflights):
 
 
 def _plot_measurement(sims, path, preflights):
-    """Stick fraction vs speed: perfect 3D truth vs what the camera would measure, with logistic fits."""
-    fig, axes = plt.subplots(1, len(sims), figsize=(5.5 * len(sims), 4.2), squeeze=False, constrained_layout=True)
+    """Stick fraction vs speed for perfect 3D truth and for each camera strategy, with logistic fits."""
+    fig, axes = plt.subplots(1, len(sims), figsize=(6.2 * len(sims), 4.6), squeeze=False, constrained_layout=True)
     for k, (s, pf) in enumerate(zip(sims, preflights)):
         ax = axes[0, k]
         rows, rep = getattr(s, "measurement", ([], {}))
+        mono = [r for r in rows if r["n_i"] == 1 and r["n_j"] == 1 and not r.get("on_wall_partner")
+                and not r.get("post_fragment")]
         series = [
-            ("true normal speed (all monomer pairs)", [r for r in rows if r["n_i"] == 1 and r["n_j"] == 1], "v_n_true",
-             rep.get("threshold_truth_normal_speed"), "#2a6fdb"),
-            ("camera: 2D relative speed (observable)", [r for r in rows if r["observable"]], "v_rel_measured_2d",
-             rep.get("threshold_measured_camera"), "#e0703a"),
+            ("truth: 3D normal speed", mono, "v_n_true", rep.get("threshold_truth_normal_speed"), "#2a6fdb"),
+            ("1 camera: 2D relative speed", [r for r in mono if r["observable"]], "v_rel_measured_2d",
+             rep.get("threshold_2d_relative"), "#e0703a"),
+            ("1 camera: 2D normal component", [r for r in mono if r["observable"]], "v_n_measured_2d",
+             rep.get("threshold_2d_normal"), "#b0479b"),
+            ("stereo: 3D normal speed", [r for r in mono if r.get("observable_stereo")], "v_n_measured_stereo",
+             rep.get("threshold_stereo_normal"), "#2f9e66"),
         ]
         for label, rr, key, fit, col in series:
             if not rr:
                 continue
-            v = np.array([r[key] for r in rr])
+            v = np.maximum(np.array([r[key] for r in rr]), 1e-5)
             y = np.array([r["outcome"] == "stick" for r in rr], float)
-            bins = np.logspace(np.log10(max(v.min(), 1e-5)), np.log10(v.max()) + 1e-9, 14)
+            bins = np.logspace(np.log10(v.min()), np.log10(v.max()) + 1e-9, 14)
             idx = np.digitize(v, bins)
-            xc, fr, er = [], [], []
+            xc, fr = [], []
             for b in range(1, len(bins)):
                 m = idx == b
                 if m.sum() >= 3:
                     xc.append(np.sqrt(bins[b - 1] * bins[b]))
                     fr.append(y[m].mean())
-                    er.append(np.sqrt(fr[-1] * (1 - fr[-1]) / m.sum()) + 1e-3)
-            ax.errorbar(xc, fr, yerr=er, fmt="o", color=col, ms=4, capsize=2, label=f"{label} (N={len(rr)})")
+            ax.plot(xc, fr, "o", color=col, ms=3.5, alpha=0.8)
             if fit:
                 xx = np.logspace(np.log10(bins[0]), np.log10(bins[-1]), 200)
-                ax.plot(xx, 1 / (1 + np.exp((np.log(xx) - np.log(fit["v50_m_s"])) / fit["log_width"])), color=col)
-                ax.axvline(fit["v50_m_s"], color=col, ls=":", lw=1)
-                ax.text(fit["v50_m_s"], 0.5 + (0.1 if col == "#2a6fdb" else -0.1),
-                        f" v50={fit['v50_m_s'] * 1e3:.1f} [{fit['v50_lo_1sigma'] * 1e3:.1f}-{fit['v50_hi_1sigma'] * 1e3:.1f}] mm/s",
-                        color=col, fontsize=7)
+                ax.plot(xx, 1 / (1 + np.exp((np.log(xx) - np.log(fit["v50_m_s"])) / fit["log_width"])), color=col,
+                        label=f"{label} (N={len(rr)}): {fit['v50_m_s'] * 1e3:.1f} "
+                              f"[{fit['v50_lo_1sigma'] * 1e3:.1f}-{fit['v50_hi_1sigma'] * 1e3:.1f}] mm/s")
+            else:
+                ax.plot([], [], "o", color=col, label=f"{label} (N={len(rr)}): no fit (needs sticks and bounces)")
         for g in pf["groups"]:
             ax.axvline(g["v_stick_pp_DEM_m_s"], color="k", ls="--", lw=0.8)
-        ax.set(xscale="log", ylim=(-0.05, 1.05), xlabel="impact speed [m/s]", ylabel="fraction that stick",
-               title=f"{s.name}: measured sticking threshold")
+        ax.set(xscale="log", ylim=(-0.05, 1.05), xlabel="impact speed [m/s]", ylabel="fraction of impacts that stick",
+               title=f"{s.name}: sticking threshold (dashed = model v_stick)")
         ax.grid(alpha=0.3, which="both")
-        ax.legend(fontsize=7, frameon=False, loc="upper right")
+        ax.legend(fontsize=6.5, frameon=False, loc="lower left")
     fig.savefig(path, dpi=130)
     plt.close(fig)
 

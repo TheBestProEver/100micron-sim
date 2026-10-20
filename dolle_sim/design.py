@@ -71,7 +71,7 @@ def preflight(cfg: dict, chamber: dict) -> dict:
             "g_jitter_rms": env.jitter_rms,
             "centrifugal_payload_spin": a_cf,
             "coriolis_payload_spin": 2 * spin * v0,
-            "gravity_gradient_tidal": 3 * env.tidal_rate * x_far if env.gravity_gradient else 0.0,
+            "gravity_gradient_tidal": 2 * env.tidal_rate * x_far if env.gravity_gradient else 0.0,
             "mutual_gravity_at_contact": G_N * mass / (2 * r) ** 2,
             "mutual_gravity_at_mean_spacing": G_N * mass / sep ** 2,
             "coulomb_at_mean_spacing": K_E * q_rms ** 2 / sep ** 2 / mass,
@@ -90,9 +90,11 @@ def preflight(cfg: dict, chamber: dict) -> dict:
         else:
             budget["thermophoresis"] = 0.0
         thermo_per_K = (32.0 / 15.0) * r ** 2 * env.kappa_tr / env.v_th / (1 + 3.9 * env.mfp / float(size.min()))             / float(size.min()) / mass if env.P > 0 else 0.0     # per kelvin across the chamber
-        budget["photophoresis"] = ((math.pi / 6) * 0.5 * m.absorptivity * env.P * env.light_I * r ** 3
+        alpha = float(cfg.get("forces", {}).get("photophoresis_accommodation", 1.0))
+        budget["photophoresis"] = ((math.pi / 3) * alpha * 0.5 * m.absorptivity * env.P * env.light_I * r ** 3
                                    / (env.T * m.thermal_conductivity) / mass) if env.P > 0 else 0.0
-        budget["radiation_pressure"] = env.light_I * math.pi * r ** 2 / 2.99792458e8 / mass
+        Q_pr = m.absorptivity + 0.3 * (1 - m.absorptivity)
+        budget["radiation_pressure"] = Q_pr * env.light_I * math.pi * r ** 2 / 2.99792458e8 / mass
         v_brown = math.sqrt(1.380649e-23 * env.T / mass)
         # walls: vibration and the chance a wall hit ends in sticking
         vib = chamber.get("wall_vibration", {}) or {}
@@ -105,13 +107,20 @@ def preflight(cfg: dict, chamber: dict) -> dict:
         # walls capture grains slower than the wall-sticking speed: path ends after ~1/p_stick wall hits
         vs = float(g.get("velocity", {}).get("speed_sigma_m_s", 0.3 * v0))
         rng0 = np.random.default_rng(0)
-        speeds = np.abs(v0 + vs * rng0.standard_normal(4000))
-        # approach speed relative to a vibrating wall (random phase); hits only when approaching
+        n_s = 20000
+        speeds = np.abs(v0 + vs * rng0.standard_normal(n_s))
+        # wall-hit rate is proportional to the speed: resample speeds flux-weighted
+        speeds = rng0.choice(speeds, n_s, p=speeds / speeds.sum())
         # flux-weighted normal component of an isotropic velocity: v cos(theta), cos(theta) = sqrt(U)
-        v_app = speeds * np.sqrt(rng0.random(4000)) + v_vib * np.cos(rng0.random(4000) * 2 * math.pi)
-        v_app = v_app[v_app > 0]
+        v_n = speeds * np.sqrt(rng0.random(n_s))
+        # vibrating walls: phase uniform at arrival, hit rate weighted by the approach speed
+        n_axes = len(set((chamber.get("wall_vibration") or {}).get("axes", [0, 1, 2]))) if v_vib > 0 else 0
+        v_app = v_n + v_vib * np.cos(rng0.random(n_s) * 2 * math.pi)
+        wgt = np.clip(v_app, 0, None)
+        p_vib = float((wgt * (v_app < v_pw)).sum() / wgt.sum()) if wgt.sum() > 0 else 1.0
+        p_static = float(np.mean(v_n < v_pw))
         wall_mode = cfg.get("contact", {}).get("wall_sticking", "jkr")
-        p_wall_true = float(np.mean(v_app < v_pw)) if len(v_app) else 1.0
+        p_wall_true = (n_axes / 3) * p_vib + (1 - n_axes / 3) * p_static
         p_wall = max(p_wall_true, 1e-3) if wall_mode != "never" else 1e-3
         chord = 4 * vol / (2 * (size[0] * size[1] + size[1] * size[2] + size[0] * size[2]))
         dist = min(dist, chord / p_wall)
@@ -189,23 +198,24 @@ def stick_probability_curve(mat_a: str, mat_b: str, radius: float, velocities,
     """Monte-Carlo sticking probability vs impact speed for monomer-monomer impacts.
 
     Real powders are not identical spheres: sizes vary and the effective surface
-    energy varies grain to grain (roughness, contamination). gamma is drawn
-    log-normally (sigma in natural-log units) and radii normally, giving a
-    smooth stick->bounce transition like the ones measured in experiments.
+    energy varies grain to grain (roughness, contamination). Each grain gets a
+    log-normal surface-energy factor (sigma in natural-log units; the same model as
+    the simulation's surface_energy_log_sigma, the pair uses sqrt(f_a f_b)) and a
+    normally distributed radius, giving a smooth stick->bounce transition like the
+    ones measured in experiments.
     """
     rng = np.random.default_rng(seed)
     ma0 = get_material(mat_a, overrides)
     mb0 = get_material(mat_b, overrides)
-    probs, v50 = [], []
+    probs = []
     contacts = []
     for _ in range(samples):
         ra = radius * max(0.5, 1 + radius_rel_sigma * rng.standard_normal())
         rb = radius * max(0.5, 1 + radius_rel_sigma * rng.standard_normal())
-        f = math.exp(gamma_log_sigma * rng.standard_normal())
-        ma = replace(ma0, gamma=ma0.gamma * f)
-        mb = replace(mb0, gamma=mb0.gamma * f)
-        m_eff = 1 / (1 / sphere_mass(ma, ra) + 1 / sphere_mass(mb, rb))
-        contacts.append((JKRContact(pair_props(ma, ra, mb, rb)), m_eff))
+        f_pair = math.sqrt(math.exp(gamma_log_sigma * rng.standard_normal())
+                           * math.exp(gamma_log_sigma * rng.standard_normal()))
+        m_eff = 1 / (1 / sphere_mass(ma0, ra) + 1 / sphere_mass(mb0, rb))
+        contacts.append((JKRContact(pair_props(ma0, ra, mb0, rb, adhesion_factor=f_pair)), m_eff))
     for v in velocities:
         probs.append(np.mean([c.resolve(v, me).stuck for c, me in contacts]))
     return np.asarray(probs)
