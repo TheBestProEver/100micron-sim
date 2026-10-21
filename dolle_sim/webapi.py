@@ -174,3 +174,16 @@ def scale_config(cfg_json, factor):
         for g in ch["particles"]:
             g["count"] = max(1, int(round(g["count"] * float(factor))))
     return json.dumps(cfg)
+
+
+def thresholds(args_json):
+    """Predicted grain-grain sticking speed for each material (same material pairs) at one grain size."""
+    a = json.loads(args_json)
+    ov = a.get("materials", {})
+    r = float(a.get("diameter_um", 100)) * 0.5e-6
+    out = {}
+    for name in a["materials_list"]:
+        m = get_material(name, ov)
+        c = JKRContact(pair_props(m, r, m, r))
+        out[name] = c.threshold(sphere_mass(m, r) / 2)
+    return _dump(out)

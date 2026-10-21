@@ -42,9 +42,10 @@ function bootMsg(msg, cls) {
 
 async function onReady(version) {
   INFO = await call('info', null);
-  bootMsg(`Python simulator ready (dolle_sim v${INFO.version}, running locally in your browser).`, 'ok');
+  bootMsg(`Ready. The simulator is running in your browser (v${INFO.version}).`, 'ok');
   TEMPLATE = await (await fetch('py/dolle_sim/viewer_template.html')).text();
   fillSelects();
+  fillQuick();
   if (!CFG) setConfig(INFO.default_config);
   buildVerifyTable();
   ['btn-run', 'btn-preflight', 'btn-stick', 'btn-inv', 'btn-verify'].forEach((b) => ($(b).disabled = false));
@@ -53,7 +54,7 @@ async function onReady(version) {
 /* ------------------------------------------------------------------ tabs */
 function showTab() {
   const t = (location.hash || '#simulate').slice(1);
-  const tab = ['simulate', 'sticking', 'verify', 'help'].includes(t) ? t : 'simulate';
+  const tab = ['simulate', 'sticking', 'verify'].includes(t) ? t : 'simulate';
   document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === tab));
   document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.id === 'pane-' + tab));
 }
@@ -215,19 +216,71 @@ function setConfig(cfg) {
   CH2 = CFG.chambers[1] || CH2 || JSON.parse(JSON.stringify(INFO.default_config.chambers[1]));
   buildForm();
   refreshForm();
-  estimate();
+  if ($('qs-a').options.length) {
+    $('qs-a').value = CFG.chambers[0].particles[0].material;
+    $('qs-b').value = CFG.chambers[1] ? CFG.chambers[1].particles[0].material : '';
+    $('qs-d').value = fmt(CFG.chambers[0].particles[0].radius_m * 2e6);
+    $('qs-n').value = CFG.chambers[0].particles[0].count;
+    $('qs-t').value = CFG.duration_s;
+    $('qs-p').value = CFG.environment.pressure_pa;
+  }
+  quickEstimate();
 }
 
 function onConfigEdited() {
   $('cfgjson').value = JSON.stringify(CFG, null, 2);
-  estimate();
 }
 
-function estimate() {
-  let gs = 0;
-  for (const ch of CFG.chambers) for (const g of ch.particles) gs += g.count;
-  const secs = 0.05 * gs * CFG.duration_s * (CFG.contact?.steps_per_contact ?? 300) / 100;
-  $('estimate').textContent = `${gs} grains, ${CFG.duration_s} s simulated: roughly ${secs < 90 ? Math.round(secs) + ' s' : (secs / 60).toFixed(1) + ' min'} in this browser`;
+
+/* ------------------------------------------------------------------ quick setup */
+const PRETTY = { graphite: 'Graphite (carbon)', amorphous_carbon: 'Amorphous carbon', silica: 'Silica (glass)',
+  forsterite: 'Forsterite (olivine)', alumina: 'Alumina', carbon_silica_50_50: 'Carbon-silica mix', water_ice: 'Water ice' };
+const pretty = (m) => PRETTY[m] || m;
+
+function fillQuick() {
+  const a = $('qs-a'), b = $('qs-b');
+  a.innerHTML = ''; b.innerHTML = '';
+  b.add(new Option('nothing (one dust only)', ''));
+  for (const m of INFO.dust_materials) { a.add(new Option(pretty(m), m)); b.add(new Option(pretty(m), m)); }
+  a.value = 'graphite'; b.value = 'silica';
+  for (const id of ['qs-a', 'qs-b', 'qs-d', 'qs-mode', 'qs-speed', 'qs-n', 'qs-t', 'qs-p'])
+    $(id).addEventListener('change', () => { $('qs-speed-box').style.display = $('qs-mode').value === 'custom' ? '' : 'none'; quickEstimate(); });
+}
+
+function quickEstimate() {
+  const n = (+$('qs-n').value || 0) * ($('qs-b').value ? 2 : 1);
+  const secs = 0.05 * n * (+$('qs-t').value || 0) * (CFG?.contact?.steps_per_contact ?? 100) / 100;
+  $('estimate').textContent = `takes about ${secs < 90 ? Math.max(5, Math.round(secs / 5) * 5) + ' seconds' : (secs / 60).toFixed(1) + ' minutes'}`;
+}
+
+async function applyQuick() {
+  const mats = [$('qs-a').value, $('qs-b').value].filter(Boolean);
+  const d = +$('qs-d').value, n = Math.round(+$('qs-n').value), T = +$('qs-t').value, P = +$('qs-p').value;
+  let speeds;
+  if ($('qs-mode').value === 'auto') {
+    const th = await call('thresholds', { materials_list: mats, diameter_um: d, materials: CFG.materials });
+    speeds = mats.map((m) => 0.9 * th[m]);             // launch around each material's sticking speed
+  } else {
+    speeds = mats.map(() => +$('qs-speed').value / 1e3);
+  }
+  const base = CFG.chambers[0];
+  const chambers = mats.map((m, i) => {
+    const ch = JSON.parse(JSON.stringify(CFG.chambers[i] || (i === 1 ? CH2 : null) || base));
+    ch.name = m;
+    const g = ch.particles[0];
+    g.material = m; g.count = n; g.radius_m = d * 0.5e-6;
+    g.velocity = g.velocity || {};
+    g.velocity.speed_mean_m_s = speeds[i]; g.velocity.speed_sigma_m_s = 0.55 * speeds[i];
+    ch.wall_vibration = ch.wall_vibration || { frequency_hz: 200, axes: [0, 1, 2] };
+    const f = ch.wall_vibration.frequency_hz || 200;
+    ch.wall_vibration.amplitude_m = 0.8 * speeds[i] / (2 * Math.PI * f);   // walls re-energise grains at ~ the same speed
+    return ch;
+  });
+  CFG.chambers = chambers;
+  CFG.duration_s = T;
+  CFG.environment.pressure_pa = P;
+  refreshForm();
+  onConfigEdited();
 }
 
 /* ------------------------------------------------------------------ materials editor */
@@ -303,6 +356,7 @@ $('btn-preflight').addEventListener('click', async () => {
 
 function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 function mm(v) { return v == null ? '–' : fmt(v * 1e3); }
+function mm3(v) { return v == null ? '–' : String(+(v * 1e3).toPrecision(3)); }
 
 function renderPreflight(pfs) {
   let h = '<h2>Pre-flight check</h2><div class="grid c2">';
@@ -338,17 +392,19 @@ $('btn-run').addEventListener('click', async () => {
   $('runmsg').textContent = 'Starting…';
   const t0 = performance.now();
   try {
+    await applyQuick();
     const res = await call('run', CFG, (p) => {
       const frac = (p.chamber + p.t / p.T) / p.n_chambers;
       $('bar').style.width = (100 * frac).toFixed(1) + '%';
       const el = (performance.now() - t0) / 1000;
       const eta = frac > 0.02 ? Math.max(0, el / frac - el) : NaN;
       const e = p.events;
-      $('runmsg').textContent = `${p.name}: t = ${p.t.toFixed(2)} / ${p.T} s · grain–grain sticks ${e.stick}, bounces ${e.bounce} · ` +
-        `wall ${e.wall_stick} stuck / ${e.wall_bounce} bounced · ${el.toFixed(0)} s elapsed` + (Number.isFinite(eta) ? `, ~${eta.toFixed(0)} s left` : '');
+      $('runmsg').textContent = `Simulating ${pretty(p.name)}: ${p.t.toFixed(1)} of ${p.T} s · ${e.stick + e.bounce} collisions so far` +
+        (Number.isFinite(eta) ? ` · about ${Math.max(1, Math.round(eta))} s left` : '');
     });
     $('bar').style.width = '100%';
     $('runmsg').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(0)} s.`;
+    setTimeout(() => ($('run-progress').style.display = 'none'), 1500);
     renderResults(res);
   } catch (e) {
     $('results').innerHTML = `<p class="fail">Simulation error: ${esc(e.message)}</p>`;
@@ -359,7 +415,25 @@ $('btn-run').addEventListener('click', async () => {
 function fitTxt(f) { return f ? `<b>${mm(f.v50_m_s)}</b> <span class="muted">[${mm(f.v50_lo_1sigma)}–${mm(f.v50_hi_1sigma)}]</span>` : '<span class="muted">no fit</span>'; }
 
 function renderResults(res) {
-  let h = '<h2>Results</h2><div class="grid c2">';
+  let h = '<h2>Result</h2><div class="grid c2">';
+  res.chambers.forEach((c) => {
+    const m = c.measurement, g = c.preflight.groups[0], s = c.stats;
+    const tr = m.threshold_truth_normal_speed, st = m.threshold_stereo_normal, one = m.threshold_2d_relative;
+    const v = tr ? tr.v50_m_s : g.v_stick_pp_DEM_m_s;
+    h += `<div class="card answer"><div class="muted">${esc(pretty(g.material))} grains, ${fmt(2e6 * g.radius_m)} µm</div>
+      <div class="headline">stick below ${mm3(v)} <small>mm/s</small></div>
+      <p>${tr ? `Found from ${s.monomer_monomer_collisions} simulated collisions` +
+                (s.monomer_monomer_collisions < 50 ? ' (a rough number: run longer or with more grains to sharpen it)' : '') +
+                `. The theory predicts ${mm3(g.v_stick_pp_DEM_m_s)} mm/s.`
+              : `Too few collisions to measure: run longer or with more grains. The theory predicts ${mm3(g.v_stick_pp_DEM_m_s)} mm/s.`}</p>
+      <p>Two cameras (stereo) would measure <b>${st ? mm3(st.v50_m_s) + ' mm/s' : 'not enough data'}</b>;
+        a single camera ${one ? mm3(one.v50_m_s) + ' mm/s' : 'not enough data'}${one && tr && Math.abs(one.v50_m_s / tr.v50_m_s - 1) > 0.2 ? ' (unreliable)' : ''}.</p>
+      <p class="small muted">${s.grain_grain_collisions} collisions, ${s.grain_grain_sticks} stuck · ${s.free_monomers} of ${s.n_grains} grains still floating free at the end.</p></div>`;
+  });
+  h += '</div><div class="grid c2" style="margin-top:16px">';
+  res.chambers.forEach((c, k) => { h += `<canvas class="chart" id="stk${k}"></canvas>`; });
+  h += '</div><h2>Watch it</h2><iframe class="viewer" id="viewer"></iframe>';
+  h += '<details><summary>Detailed numbers, charts and downloads</summary><div class="inner"><div class="grid c2">';
   res.chambers.forEach((c, k) => {
     const s = c.stats, m = c.measurement, g = c.preflight.groups[0];
     h += `<div class="card"><h3>${esc(c.name)}: ${esc(g.material)}</h3><table>
@@ -375,13 +449,11 @@ function renderResults(res) {
       <tr><td>1 camera, 2D relative speed</td><td class="num">${fitTxt(m.threshold_2d_relative)}</td></tr>
       <tr><td>1 camera, 2D normal component</td><td class="num">${fitTxt(m.threshold_2d_normal)}</td></tr>
       <tr><td>Impacts onto wall-bound grains</td><td class="num">${fitTxt(m.threshold_truth_on_wall_bound_grains)}</td></tr></table>
-      <canvas class="chart" id="stk${k}" style="margin-top:12px"></canvas>
       <canvas class="chart" id="ts${k}" style="margin-top:12px;height:240px"></canvas>
       <div class="btns"><button class="btn ghost" data-dl="${k}" data-kind="collisions">collisions.csv</button>
       <button class="btn ghost" data-dl="${k}" data-kind="camera">camera_measurements.csv</button></div></div>`;
   });
-  h += '</div><div class="btns"><button class="btn ghost" id="dl-summary">Download summary JSON</button></div>';
-  h += '<h2>3D replay</h2><iframe class="viewer" id="viewer"></iframe>';
+  h += '</div><div class="btns"><button class="btn ghost" id="dl-summary">Download summary JSON</button></div></div></details>';
   $('results').innerHTML = h;
   res.chambers.forEach((c, k) => {
     const series = [];
@@ -397,11 +469,11 @@ function renderResults(res) {
           const x = lo * Math.pow(hi / lo, i / 120);
           line.push([x, 1 / (1 + Math.exp((Math.log(x / 1e3) - Math.log(f.v50_m_s)) / f.log_width))]);
         }
-        series.push({ pts: line, color: COLORS[key], type: 'line', label: `${LABELS[key]}: ${mm(f.v50_m_s)} mm/s` });
+        series.push({ pts: line, color: COLORS[key], type: 'line', label: `${LABELS[key]}: ${mm3(f.v50_m_s)} mm/s` });
       } else series.push({ pts: [], color: COLORS[key], type: 'line', label: `${LABELS[key]}: no fit` });
     }
-    plot($('stk' + k), { series, xlog: true, ylim: [-0.03, 1.03], xlabel: 'impact speed [mm/s]', ylabel: 'fraction that stick',
-      vlines: [{ x: c.preflight.groups[0].v_stick_pp_DEM_m_s * 1e3, color: '#cfd6e2', label: 'model' }], title: `${c.name}: sticking threshold` });
+    plot($('stk' + k), { series, xlog: true, ylim: [-0.03, 1.03], xlabel: 'collision speed [mm/s]', ylabel: 'fraction that stick',
+      vlines: [{ x: c.preflight.groups[0].v_stick_pp_DEM_m_s * 1e3, color: '#cfd6e2', label: 'theory' }], title: `${pretty(c.name)}: which collisions stick` });
     const ts = c.timeseries, n = c.stats.n_grains;
     plot($('ts' + k), { series: [
       { pts: ts.map((r) => [r.t, r.free_monomers / n]), color: '#5b9dff', type: 'line', label: 'free grains (fraction)' },
@@ -472,7 +544,7 @@ $('btn-inv').addEventListener('click', async () => {
 /* ------------------------------------------------------------------ verification */
 function buildVerifyTable() {
   const tb = document.querySelector('#vtable tbody');
-  tb.innerHTML = INFO.checks.map((c) => `<tr id="v-${c}"><td>${c.replace(/^check_/, '').replace(/_/g, ' ')}</td><td class="muted small">not run yet</td><td></td><td></td><td></td><td></td></tr>`).join('');
+  tb.innerHTML = INFO.checks.map((c) => `<tr id="v-${c}"><td>${c.replace(/^check_/, '').replace(/_/g, ' ')}</td><td class="muted small">not run yet</td><td></td></tr>`).join('');
   fetch('../data/rebound_check.json').then((r) => r.json()).then(renderRebound).catch(() => {});
 }
 
@@ -484,17 +556,17 @@ $('btn-verify').addEventListener('click', async () => {
   for (const [i, c] of INFO.checks.entries()) {
     $('vmsg').textContent = `Running ${i + 1}/${INFO.checks.length}: ${c}…`;
     const row = $('v-' + c);
-    row.children[4].innerHTML = '<span class="muted">…</span>';
+    row.children[2].innerHTML = '<span class="muted">running…</span>';
     try {
       const r = await call('verify', c);
-      row.innerHTML = `<td><b>${esc(r.name)}</b></td><td class="small">${esc(r.what)}${r.details ? `<br><span class="muted">${esc(r.details)}</span>` : ''}</td>
-        <td class="num small">${esc(r.value)}</td><td class="small">${esc(r.criterion)}</td>
-        <td class="${r.passed ? 'pass' : 'fail'}">${r.passed ? 'PASS' : 'FAIL'}</td><td class="num small">${r.seconds}</td>`;
+      row.innerHTML = `<td><b>${esc(r.name)}</b><br><span class="small muted">${esc(r.what)}</span></td>
+        <td class="small">${esc(r.value)}<br><span class="muted">required: ${esc(r.criterion)}</span></td>
+        <td class="${r.passed ? 'pass' : 'fail'}">${r.passed ? 'PASS' : 'FAIL'}</td>`;
       if (r.passed) ok++;
-    } catch (e) { row.children[4].innerHTML = '<span class="fail">ERROR</span>'; row.children[2].textContent = e.message; }
+    } catch (e) { row.children[2].innerHTML = '<span class="fail">ERROR</span>'; row.children[1].textContent = e.message; }
   }
   const tot = INFO.checks.length;
-  $('vmsg').innerHTML = `<span class="${ok === tot ? 'pass' : 'fail'}">${ok}/${tot} checks passed</span> in ${((performance.now() - t0) / 1000).toFixed(0)} s, in your browser.`;
+  $('vmsg').innerHTML = `<span class="${ok === tot ? 'pass' : 'fail'}">${ok} of ${tot} tests passed</span> (${((performance.now() - t0) / 1000).toFixed(0)} s, in your browser).`;
   setBusy(false);
 });
 
@@ -536,7 +608,7 @@ function plot(cv, o) {
   const pts = o.series.flatMap((s) => s.pts).filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]) && (!o.xlog || p[0] > 0));
   let [x0, x1] = o.xlim || [Math.min(...pts.map((p) => p[0])), Math.max(...pts.map((p) => p[0]))];
   for (const v of o.vlines || []) if (Number.isFinite(v.x) && (!o.xlog || v.x > 0)) { x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x); }
-  if (!pts.length || !Number.isFinite(x0)) { ctx.fillStyle = '#8f98a8'; ctx.fillText('no data', W / 2 - 20, H / 2); return; }
+  if (!pts.length || !Number.isFinite(x0)) { ctx.fillStyle = '#8f98a8'; ctx.fillText('not enough collisions to plot yet: run longer or with more grains', 20, H / 2); return; }
   let [y0, y1] = o.ylim || [Math.min(...pts.map((p) => p[1])), Math.max(...pts.map((p) => p[1]))];
   if (x0 === x1) { x0 *= 0.9; x1 *= 1.1; } if (y0 === y1) { y0 -= 1; y1 += 1; }
   if (o.xlog) { x0 = Math.log10(x0) - 0.05; x1 = Math.log10(x1) + 0.05; }
