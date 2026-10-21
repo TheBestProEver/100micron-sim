@@ -26,6 +26,27 @@ dynamics, specialised to adhesive micro-contacts):
   from a lookup table. The bounce impulse uses the full 3×3 collision matrix of
   the two rigid bodies, inside a Coulomb friction cone.
 
+## Use it online
+
+**https://thebestproever.github.io/100micron-sim/** (GitHub Pages, served from `docs/`)
+
+* **Run in browser:** the real simulator running locally in your browser via
+  [Pyodide](https://pyodide.org) (Python on WebAssembly). Nothing to install and
+  nothing is uploaded. You can edit every parameter in a form, every material
+  property in a table, or the full config as JSON. Run the pre-flight check or a
+  simulation, then get charts, a 3D replay and CSV downloads. Configs can be
+  saved and loaded.
+* **Sticking calculator:** threshold and sticking-probability curves for any
+  material pair, plus inferring γ from a measured sticking speed.
+* **Verify:** runs the 16-check physics verification suite in your browser,
+  with PASS/FAIL, measured values and tolerances, plus the REBOUND cross-check.
+* **Replays:** 3D replays of the full desktop flight simulations.
+
+The browser version is the same code without numba. It uses 100 instead of 300
+contact sub-steps (< 0.4% change in impact outcomes), so keep browser runs to a
+few hundred grains and a few seconds; run the full flight locally. The site is
+rebuilt with `python tools/build_site.py --replays`.
+
 ---
 
 ## Quick start
@@ -39,7 +60,8 @@ python -m dolle_sim sweep                                               # sticki
 python -m dolle_sim invert --material graphite --vstick 0.08            # measured v_stick -> effective surface energy
 python -m dolle_sim rebound-check configs/rocksat_x_carbon_vs_silica.json --duration 10   # cross-check vs REBOUND
 python -m dolle_sim materials                                           # material database
-python -m pytest -q                                                     # physics validation tests
+python -m dolle_sim verify                                              # 16-check physics verification suite
+python -m pytest -q                                                     # all tests (includes the verification suite)
 ```
 
 `run` writes to `results/<name>/`:
@@ -210,7 +232,7 @@ geometry and cannot be calibrated away.
 
 ## Validation
 
-`python -m pytest -q` runs 20 tests:
+`python -m dolle_sim verify` runs the 16-check verification suite (the same suite runs in the browser app). `python -m pytest -q` runs it plus 20 unit tests:
 
 | test | checks |
 |---|---|

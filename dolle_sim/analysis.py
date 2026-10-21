@@ -161,15 +161,18 @@ def fit_threshold(v, stuck, n_boot=200, seed=0):
         return -(yy * np.log(p) + (1 - yy) * np.log(1 - p)).sum()
 
     lv = np.log(v)
-    x0 = [np.median(lv), math.log(0.3)]
-    best = minimize(nll, x0, args=(lv, y), method="Nelder-Mead")
+    # bounded fit: the threshold stays within the sampled speed range and the width within sane limits
+    # (perfectly separated samples would otherwise drive the width to 0 and the fit to overflow)
+    bounds = [(lv.min() - 1.0, lv.max() + 1.0), (math.log(1e-3), math.log(5.0))]
+    x0 = [float(np.median(lv)), math.log(0.3)]
+    best = minimize(nll, x0, args=(lv, y), method="L-BFGS-B", bounds=bounds)
     rng = np.random.default_rng(seed)
     boots = []
     for _ in range(n_boot):
         k = rng.integers(0, len(v), len(v))
         if y[k].min() == y[k].max():
             continue
-        r = minimize(nll, best.x, args=(lv[k], y[k]), method="Nelder-Mead")
+        r = minimize(nll, best.x, args=(lv[k], y[k]), method="L-BFGS-B", bounds=bounds)
         boots.append(math.exp(r.x[0]))
     lo, hi = (np.percentile(boots, [16, 84]) if len(boots) > 10 else (math.nan, math.nan))
     return {"v50_m_s": math.exp(best.x[0]), "v50_lo_1sigma": float(lo), "v50_hi_1sigma": float(hi),

@@ -1,0 +1,162 @@
+[
+  {
+    "id": "elastic",
+    "name": "Elastic limit conserves energy",
+    "what": "No adhesion, no damping, no plasticity: restitution must be 1.",
+    "value": "e = 0.99990",
+    "criterion": "|e - 1| < 1e-3",
+    "passed": true,
+    "details": "",
+    "seconds": 5.45
+  },
+  {
+    "id": "damping",
+    "name": "Viscoelastic damping calibration",
+    "what": "Non-adhesive impact must reproduce the material's dry restitution e_dry = 0.85.",
+    "value": "e = 0.8501",
+    "criterion": "|e - 0.85| < 0.005",
+    "passed": true,
+    "details": "",
+    "seconds": 0.0
+  },
+  {
+    "id": "thornton_ning",
+    "name": "Plastic restitution (Thornton & Ning 1998)",
+    "what": "Elastic-plastic impacts must follow the analytic Thornton-Ning restitution.",
+    "value": "max |e - e_TN| = 0.0001",
+    "criterion": "< 0.005",
+    "passed": true,
+    "details": "v=1: 0.6957 vs 0.6957; v=3: 0.5340 vs 0.5340; v=10: 0.3965 vs 0.3966",
+    "seconds": 0.0
+  },
+  {
+    "id": "plastic_damping",
+    "name": "Plasticity with damping",
+    "what": "With realistic damping (e_dry = 0.7) plastic impacts must give ~ e_TN x e_dry (no damping of a separated contact).",
+    "value": "max relative deviation = 2.1%",
+    "criterion": "< 5%",
+    "passed": true,
+    "details": "v=3: 0.607 vs 0.598; v=10: 0.459 vs 0.456; v=30: 0.342 vs 0.349",
+    "seconds": 0.0
+  },
+  {
+    "id": "energy_scaling",
+    "name": "Outcome depends only on impact energy",
+    "what": "Same 1/2 m v^2 with twice the mass must give the same restitution (dimensional analysis of the contact law).",
+    "value": "max |delta e| = 1.2e-15",
+    "criterion": "< 1e-4",
+    "passed": true,
+    "details": "",
+    "seconds": 0.0
+  },
+  {
+    "id": "threshold",
+    "name": "Sticking threshold limits",
+    "what": "Without damping the DEM threshold equals the JKR hysteresis energy estimate; grains stick below / bounce above it; carbon stickier than silica.",
+    "value": "undamped 3.825 vs JKR 3.827 mm/s; damped silica 6.18 mm/s",
+    "criterion": "within 2%, stick/bounce consistent",
+    "passed": true,
+    "details": "",
+    "seconds": 0.0
+  },
+  {
+    "id": "free_flight",
+    "name": "Free flight with gas drag",
+    "what": "Residual acceleration + drag vs the exact analytic trajectory over 1 s.",
+    "value": "error = 0.06 nm",
+    "criterion": "< 10 nm",
+    "passed": true,
+    "details": "",
+    "seconds": 0.18
+  },
+  {
+    "id": "rotating_frame",
+    "name": "Spinning payload frame (Coriolis + centrifugal + drag)",
+    "what": "Grain trajectory vs a 1e-12-tolerance ODE solution: exact at 1 rpm, 2nd-order convergence at 30x spin.",
+    "value": "1 rpm: 0.279 nm; 0.5 Hz: 26.76 um, convergence ratio 4.00",
+    "criterion": "< 1 nm; ratio > 3.5",
+    "passed": true,
+    "details": "",
+    "seconds": 5.19
+  },
+  {
+    "id": "rigid_body",
+    "name": "Free rotation of an aggregate",
+    "what": "Spinning linear trimer in vacuum for 5 s: angular momentum conserved, rotational energy bounded (no pumping).",
+    "value": "|dE/E| = 1.5e-05, |dL/L| = 5.0e-12",
+    "criterion": "dE < 1e-3, dL < 1e-10",
+    "passed": true,
+    "details": "",
+    "seconds": 1.57
+  },
+  {
+    "id": "impulse",
+    "name": "Rigid-body collision impulse",
+    "what": "200 random oblique impacts on a trimer: post-impact normal velocity = -e v_n exactly; friction stays inside the Coulomb cone.",
+    "value": "normal error 6.5e-16, cone excess 8.9e-16",
+    "criterion": "< 1e-9",
+    "passed": true,
+    "details": "",
+    "seconds": 0.03
+  },
+  {
+    "id": "conservation",
+    "name": "Momentum through sticking and fragmentation",
+    "what": "Merging three grains into an aggregate and splitting one off conserve linear and angular momentum.",
+    "value": "dP/P = 5.7e-17, dL/L = 1.6e-16",
+    "criterion": "< 1e-6",
+    "passed": true,
+    "details": "",
+    "seconds": 0.0
+  },
+  {
+    "id": "walls",
+    "name": "Vibrating walls never let grains out",
+    "what": "150 grains against 25 um / 200 Hz vibrating walls for 1 s: no grain surface may ever cross a wall.",
+    "value": "worst penetration = 0.00 nm over 502 wall bounces",
+    "criterion": "< 1 nm",
+    "passed": true,
+    "details": "",
+    "seconds": 1.03
+  },
+  {
+    "id": "no_overlap",
+    "name": "No missed collisions in a dense gas",
+    "what": "300 grains in a 6 mm box for 0.5 s: at the end of every step no two separate bodies may interpenetrate.",
+    "value": "worst overlap = 0.0e+00 R over 265 grain-grain impacts",
+    "criterion": "< 1e-3 R",
+    "passed": true,
+    "details": "",
+    "seconds": 1.79
+  },
+  {
+    "id": "space_charge",
+    "name": "Long-range electrostatics (Ewald mesh)",
+    "what": "Short-range pairs + grounded-box particle-mesh field vs Coulomb's law, and the image force near a grounded wall.",
+    "value": "max |F/F_Coulomb - 1| = 1.3%; image ratio 0.92",
+    "criterion": "< 6%; image within 10%",
+    "passed": true,
+    "details": "1 mm: 0.987; 2 mm: 0.994; 3 mm: 1.009; 5 mm: 1.011",
+    "seconds": 0.2
+  },
+  {
+    "id": "charging",
+    "name": "Contact charging saturates",
+    "what": "Repeated wall contacts drive the grain to the potential that cancels the work-function difference.",
+    "value": "q = 6.95e+03 e (expected 6.95e+03 e)",
+    "criterion": "within 0.1%",
+    "passed": true,
+    "details": "",
+    "seconds": 0.01
+  },
+  {
+    "id": "threshold_fit",
+    "name": "Sticking-threshold estimator",
+    "what": "Logistic fit + bootstrap on synthetic impacts with a known 30 mm/s threshold: unbiased, honest 1-sigma intervals, robust to perfectly separated data.",
+    "value": "max error 4.5%, 1-sigma coverage 13/20",
+    "criterion": "< 5%; coverage 40-95%",
+    "passed": true,
+    "details": "",
+    "seconds": 6.27
+  }
+]

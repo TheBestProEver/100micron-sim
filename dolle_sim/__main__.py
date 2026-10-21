@@ -202,6 +202,23 @@ def cmd_rebound_check(a):
     print(f"Wrote {out.resolve()}")
 
 
+def cmd_verify(a):
+    from .verification import run_all
+    print("DOLL-E verification suite (analytic benchmarks and conservation laws)")
+    n_ok = 0
+
+    def show(r):
+        nonlocal n_ok
+        n_ok += r["passed"]
+        print(f"  {'PASS' if r['passed'] else 'FAIL'}  {r['seconds']:6.1f}s  {r['name']}: {r['value']}  [{r['criterion']}]",
+              flush=True)
+    results = run_all(show)
+    print(f"{n_ok}/{len(results)} checks passed")
+    if a.json:
+        Path(a.json).write_text(json.dumps(results, indent=2))
+    return 0 if n_ok == len(results) else 1
+
+
 def cmd_materials(a):
     print(f"{'name':22s} {'rho':>7s} {'E [GPa]':>8s} {'nu':>5s} {'gamma':>7s} {'e_dry':>6s} {'phi[eV]':>7s}")
     for m in MATERIALS.values():
@@ -253,10 +270,13 @@ def main(argv=None):
     rc.add_argument("--max-grains", type=int, default=400)
     rc.add_argument("--out", default="results/rebound_check")
     rc.set_defaults(fn=cmd_rebound_check)
+    v = sub.add_parser("verify", help="run the physics verification suite")
+    v.add_argument("--json", help="also write the results to this JSON file")
+    v.set_defaults(fn=cmd_verify)
     m = sub.add_parser("materials", help="list the material database")
     m.set_defaults(fn=cmd_materials)
     a = p.parse_args(argv)
-    a.fn(a)
+    return a.fn(a)
 
 
 if __name__ == "__main__":

@@ -98,6 +98,7 @@ class ChamberSim:
         self.z0 = float(cc.get("charging_cutoff_distance_m", 5e-10))
         self.fragmentation = bool(cc.get("fragmentation", True))
         self.skin = float(cc.get("neighbor_skin_m", 1e-3))
+        self.contact_steps = int(cc.get("steps_per_contact", 300))
         # wall roughness / coating: scales the work of adhesion of grain-wall contacts
         self.wall_adh = float(chamber.get("wall_adhesion_factor", 1.0))
         vib = chamber.get("wall_vibration", {}) or {}
@@ -272,7 +273,8 @@ class ChamberSim:
         if c is None:
             m2 = self.wall_mat if mj is None else self.mats[mj]
             f_r = math.exp(key[-1] / 50)
-            c = self._contacts[key] = JKRContact(pair_props(self.mats[mi], ri, m2, rj, adhesion_factor=f_r))
+            c = self._contacts[key] = JKRContact(pair_props(self.mats[mi], ri, m2, rj, adhesion_factor=f_r),
+                                                 steps=self.contact_steps)
         return c
 
     def _static_forces(self):
@@ -1030,18 +1032,23 @@ class ChamberSim:
             mean_abs_charge_e=float(np.abs(self.q).mean() / Q_E),
             net_charge_e=float(self.q.sum() / Q_E)))
 
-    def run(self, progress=True):
+    def run(self, progress=True, callback=None, callback_interval_s=0.5):
+        """Run the whole window. callback(t, duration, n_events) is called every callback_interval_s of
+        wall-clock time (used by the browser app for its progress bar)."""
         self._build_neighbors()
         t, next_out = 0.0, 0.0
         n_steps = int(round(self.duration / self.dt))
         t0 = time.time()
-        last = t0
+        last = last_cb = t0
         for s in range(n_steps):
             if t >= next_out - 1e-12:
                 self._record(t)
                 next_out += self.out_dt
             self.step(t)
             t = (s + 1) * self.dt
+            if callback is not None and time.time() - last_cb > callback_interval_s:
+                last_cb = time.time()
+                callback(t, self.duration, dict(self.n_events))
             if progress and time.time() - last > 2.0:
                 last = time.time()
                 ev = self.n_events

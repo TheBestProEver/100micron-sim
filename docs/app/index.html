@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DOLL-E simulator: run in your browser</title>
+<link rel="stylesheet" href="../style.css">
+<style>
+  .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); margin: 8px 0 18px; flex-wrap: wrap; }
+  .tabs a { padding: 9px 14px; color: var(--muted); border-bottom: 2px solid transparent; }
+  .tabs a.on { color: var(--text); border-color: var(--accent); text-decoration: none; }
+  .pane { display: none; } .pane.on { display: block; }
+  #boot { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin: 10px 0; }
+  #boot.ok { border-color: #2c6b48; }
+  fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px 12px; margin: 0; background: var(--panel); }
+  legend { color: var(--muted); font-size: 12.5px; text-transform: uppercase; letter-spacing: .05em; padding: 0 6px; }
+  .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+  .row { display: grid; grid-template-columns: 1fr 130px; gap: 8px; align-items: center; margin: 5px 0; font-size: 14px; }
+  .row.two { grid-template-columns: 1fr 160px 160px; }
+  fieldset.wide { grid-column: 1 / -1; }
+  .row label { color: var(--text); }
+  .row .u { color: var(--muted); font-size: 12px; }
+  input, select, textarea { background: #0c0f14; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 7px; font: inherit; font-size: 14px; width: 100%; }
+  input[type=checkbox] { width: auto; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; min-height: 340px; }
+  .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 4px 12px; font-size: 14px; }
+  .checks label { display: flex; gap: 8px; align-items: center; }
+  details { margin: 14px 0; } summary { cursor: pointer; color: var(--accent); }
+  .mat { overflow-x: auto; } .mat input { width: 84px; padding: 3px 5px; font-size: 13px; }
+  .mat td, .mat th { padding: 4px 5px; white-space: nowrap; }
+  .progress { height: 8px; background: var(--panel2); border-radius: 4px; overflow: hidden; margin: 8px 0; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  canvas.chart { width: 100%; height: 340px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  iframe.viewer { width: 100%; height: 640px; border: 1px solid var(--line); border-radius: 8px; background: #0f1218; }
+  .warnings li { color: var(--warn); margin: 4px 0; }
+  .status { font-size: 14px; color: var(--muted); }
+  .flex { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<header class="top"><div class="in">
+  <a class="brand" href="../">DOLL-E sim</a>
+  <nav>
+    <a href="../">Overview</a>
+    <a class="on" href="./">Run in browser</a>
+    <a href="#verify">Verification</a>
+    <a href="../replays/mission.html">Replay: mission</a>
+    <a href="../replays/clouds.html">Replay: colliding clouds</a>
+    <a href="https://github.com/TheBestProEver/100micron-sim">GitHub</a>
+  </nav>
+</div></header>
+<main>
+  <h1>Run the simulator in your browser</h1>
+  <p class="lead">The real DOLL-E Python code running locally in your browser (WebAssembly). Nothing is uploaded.
+    Change any parameter or material property, run the pre-flight check or a full simulation, and verify the physics.</p>
+  <div id="boot"><span id="bootmsg">Starting…</span></div>
+
+  <div class="tabs">
+    <a href="#simulate" data-tab="simulate">Simulate</a>
+    <a href="#sticking" data-tab="sticking">Sticking calculator</a>
+    <a href="#verify" data-tab="verify">Verify</a>
+    <a href="#help" data-tab="help">How it works</a>
+  </div>
+
+  <!-- ================================================================ SIMULATE -->
+  <section class="pane" id="pane-simulate">
+    <div class="btns">
+      <button class="btn" id="btn-run" disabled>Run simulation</button>
+      <button class="btn ghost" id="btn-preflight" disabled>Pre-flight check only</button>
+      <button class="btn ghost" id="btn-reset">Reset to defaults</button>
+      <button class="btn ghost" id="btn-download-cfg">Download config</button>
+      <label class="btn ghost" style="cursor:pointer">Upload config<input type="file" id="file-cfg" accept=".json" hidden></label>
+      <span class="status" id="estimate"></span>
+    </div>
+    <div class="form" id="form"></div>
+
+    <details>
+      <summary>Edit material properties (overrides the built-in database)</summary>
+      <p class="small muted">Edit any value and it is applied to the run. Surface energy γ is the most uncertain number:
+        it is what the flight measures. Units: ρ kg/m³, E GPa, γ J/m², φ eV, p_y GPa, k W/m/K.</p>
+      <div class="mat" id="mattable"></div>
+    </details>
+    <details>
+      <summary>Advanced: edit the full configuration JSON</summary>
+      <p class="small muted">Every option of the simulator (see the README). The form above writes into this; press <b>Apply JSON</b> to
+        use your edits (fields the form does not show are kept).</p>
+      <textarea id="cfgjson" spellcheck="false"></textarea>
+      <div class="btns"><button class="btn ghost" id="btn-apply-json">Apply JSON</button><span class="status" id="jsonmsg"></span></div>
+    </details>
+
+    <div id="run-progress" style="display:none">
+      <div class="progress"><div id="bar"></div></div><div class="status" id="runmsg"></div>
+    </div>
+    <div id="preflight-out"></div>
+    <div id="results"></div>
+  </section>
+
+  <!-- ================================================================ STICKING -->
+  <section class="pane" id="pane-sticking">
+    <div class="form">
+      <fieldset><legend>Impact</legend>
+        <div class="row"><label>Grain A</label><select id="st-a"></select></div>
+        <div class="row"><label>Grain B</label><select id="st-b"></select></div>
+        <div class="row"><label>Grain diameter <span class="u">µm</span></label><input id="st-d" type="number" value="100" step="any"></div>
+        <div class="row"><label>Surface-energy scatter <span class="u">ln σ</span></label><input id="st-gs" type="number" value="0.3" step="any"></div>
+        <div class="row"><label>Size scatter <span class="u">rel.</span></label><input id="st-rs" type="number" value="0.05" step="any"></div>
+        <div class="row"><label>Monte-Carlo samples</label><input id="st-n" type="number" value="40" step="1"></div>
+        <div class="btns"><button class="btn" id="btn-stick" disabled>Compute</button></div>
+      </fieldset>
+      <fieldset><legend>Infer surface energy from a measurement</legend>
+        <div class="row"><label>Material</label><select id="inv-m"></select></div>
+        <div class="row"><label>Partner (blank = same)</label><select id="inv-p"></select></div>
+        <div class="row"><label>Grain diameter <span class="u">µm</span></label><input id="inv-d" type="number" value="100" step="any"></div>
+        <div class="row"><label>Measured sticking speed <span class="u">mm/s</span></label><input id="inv-v" type="number" value="80" step="any"></div>
+        <div class="btns"><button class="btn" id="btn-inv" disabled>Infer γ</button></div>
+        <div id="inv-out" class="small"></div>
+      </fieldset>
+    </div>
+    <div id="st-out"></div>
+  </section>
+
+  <!-- ================================================================ VERIFY -->
+  <section class="pane" id="pane-verify">
+    <p>These benchmarks test the simulator against analytic solutions and conservation laws. They run the real code in
+      <b>your browser</b>, so you can check it yourself. They are the same checks as <code>python -m dolle_sim verify</code>.</p>
+    <div class="btns"><button class="btn" id="btn-verify" disabled>Run all checks</button><span class="status" id="vmsg"></span></div>
+    <table id="vtable"><thead><tr><th>Check</th><th>What is tested</th><th>Result</th><th>Criterion</th><th></th><th>s</th></tr></thead><tbody></tbody></table>
+    <h2>Cross-check against REBOUND</h2>
+    <p class="muted">The same chamber run in this engine and in the independent <a href="https://rebound.readthedocs.io">REBOUND</a> N-body code
+      (desktop run; REBOUND is a C library that does not run in the browser).
+      Reproduce with <code>python -m dolle_sim rebound-check configs/rocksat_x_carbon_vs_silica.json --duration 20 --max-grains 600</code>.</p>
+    <div id="rebound"></div>
+    <img class="fig" src="../figures/rebound_check_carbon.png" alt="REBOUND cross-check" style="margin-top:12px">
+  </section>
+
+  <!-- ================================================================ HELP -->
+  <section class="pane" id="pane-help">
+    <div class="grid c2">
+      <div class="card"><h3>What runs here</h3>
+        The full simulator (<code>dolle_sim</code>) runs on <a href="https://pyodide.org">Pyodide</a>, which is CPython compiled to
+        WebAssembly, with numpy and scipy. The physics is identical to the desktop version. Two speed settings differ: there is no
+        numba JIT, and contacts are integrated with 100 instead of 300 sub-steps per impact, which changes outcomes by &lt; 0.4%.
+        Keep runs to a few hundred grains and a few seconds. For the full 2000-grain, 120 s flight, run it locally.</div>
+      <div class="card"><h3>Reading the results</h3>
+        <b>Truth</b> is the sticking threshold from the exact 3D normal impact speeds of free single grains.
+        <b>Stereo</b> is what two orthogonal cameras would measure, <b>1 camera</b> what a single view would.
+        Impacts onto grains stuck to a wall (twice the effective mass) are reported separately.</div>
+      <div class="card"><h3>Runtime</h3>
+        Loading takes ~10–20 s the first time (cached afterwards). The default run (2 × 200 grains, 4 s) takes about a minute on a
+        laptop. Time grows roughly with grains × seconds and with the number of wall impacts.</div>
+      <div class="card"><h3>Save and share</h3>
+        <b>Download config</b> saves every setting as JSON. Upload it here again, or run it locally:
+        <code>python -m dolle_sim run my_config.json</code>. Each result card has CSV downloads of every collision.</div>
+    </div>
+  </section>
+</main>
+<footer>DOLL-E · University of Chicago · NASA RockSat · <a href="https://github.com/TheBestProEver/100micron-sim">source on GitHub</a></footer>
+<script src="app.js"></script>
+</body>
+</html>

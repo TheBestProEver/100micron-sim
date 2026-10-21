@@ -57,8 +57,9 @@ class ContactResult:
 class JKRContact:
     """Normal-direction JKR contact for one material/size pair."""
 
-    def __init__(self, props: PairProps):
+    def __init__(self, props: PairProps, steps: int = 300):
         p = self.p = props
+        self.steps = int(steps)            # integration sub-steps per contact time (300: ~0.06% accuracy)
         e = max(min(props.e_dry, 0.9999), 1e-4)
         ln_e = math.log(e)
         self.beta = ln_e / math.sqrt(ln_e ** 2 + math.pi ** 2)   # negative
@@ -135,7 +136,8 @@ class JKRContact:
         dy = self.delta_y if math.isfinite(self.delta_y) else 1e30
         py = p.p_y if math.isfinite(p.p_y) else 1e30
         out = _resolve_core(p.R_star, self.C, self.A, self.B, self.a_c, self.G_c, self.a_snap,
-                            self.U0, p.delta_c, p.E_star, p.a0, self.beta, abs(v_in), m_eff, dy, py)
+                            self.U0, p.delta_c, p.E_star, p.a0, self.beta, abs(v_in), m_eff, dy, py,
+                            float(self.steps))
         stuck, v_out, d_peak, F_peak, t, a_peak, yielded = out
         v_in = max(abs(v_in), 1e-12)
         return ContactResult(bool(stuck), v_in, v_out, v_out / v_in, d_peak, F_peak, t, a_peak, bool(yielded))
@@ -190,12 +192,13 @@ def _G(a, A, B, C, R):
 
 
 @njit(cache=True)
-def _resolve_core(R, C, A, B, a_c, G_c, a_snap, U0, delta_c, E_star, a0, beta, v_in, m_eff, delta_y, p_y):
+def _resolve_core(R, C, A, B, a_c, G_c, a_snap, U0, delta_c, E_star, a0, beta, v_in, m_eff, delta_y, p_y,
+                  n_sub=300.0):
     v_in = max(v_in, 1e-12)
     # time step from the faster of the Hertz impact time and the JKR well oscillation
     t_hz = 2.87 * (m_eff ** 2 / (R * E_star ** 2 * v_in)) ** 0.2
     t_osc = 2 * math.pi * math.sqrt(m_eff / (2 * E_star * a0))
-    dt = min(t_hz, t_osc) / 300.0
+    dt = min(t_hz, t_osc) / n_sub
     damp_c = -2 * math.sqrt(5.0 / 6.0) * beta * math.sqrt(m_eff * 2 * E_star)
     kH = 4.0 / 3.0 * E_star * math.sqrt(R)
     F_y = kH * delta_y ** 1.5

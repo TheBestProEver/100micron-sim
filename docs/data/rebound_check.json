@@ -1,0 +1,76 @@
+{
+ "carbon": {
+  "chamber": "carbon",
+  "n_grains": 600,
+  "duration_s": 20.0,
+  "dt_s": 0.004,
+  "ballistic_check": {
+   "t_s": 0.2,
+   "grains_compared": 412,
+   "max_position_difference_m": 3.1502037727703826e-10,
+   "median_position_difference_m": 8.962706650489204e-11
+  },
+  "dolle_engine": {
+   "grain_grain_impacts": 46,
+   "grain_grain_impacts_err": 6.782329983125268,
+   "grain_grain_sticks": 42,
+   "free_monomer_impacts": 38,
+   "free_monomer_stick_fraction": 0.8947368421052632,
+   "free_monomer_stick_fraction_err": 0.049784489627732485,
+   "median_impact_speed_m_s": 0.011012016746742508,
+   "wall_impacts": 5471,
+   "wall_sticks": 245,
+   "run_time_s": 14.812615633010864
+  },
+  "rebound_engine": {
+   "grain_grain_impacts": 53,
+   "grain_grain_impacts_err": 7.280109889280518,
+   "grain_grain_sticks": 49,
+   "free_monomer_impacts": 44,
+   "free_monomer_stick_fraction": 0.9090909090909091,
+   "free_monomer_stick_fraction_err": 0.04333920860207238,
+   "median_impact_speed_m_s": 0.00708032495027045,
+   "wall_impacts": 5423,
+   "wall_sticks": 243,
+   "run_time_s": 42.79944705963135,
+   "rebound_version": "5.2.2"
+  }
+ },
+ "silica": {
+  "chamber": "silica",
+  "n_grains": 600,
+  "duration_s": 20.0,
+  "dt_s": 0.004,
+  "ballistic_check": {
+   "t_s": 0.2,
+   "grains_compared": 554,
+   "max_position_difference_m": 8.273492742677364e-11,
+   "median_position_difference_m": 2.7644815434704403e-11
+  },
+  "dolle_engine": {
+   "grain_grain_impacts": 106,
+   "grain_grain_impacts_err": 10.295630140987,
+   "grain_grain_sticks": 95,
+   "free_monomer_impacts": 62,
+   "free_monomer_stick_fraction": 0.8709677419354839,
+   "free_monomer_stick_fraction_err": 0.04257496887716709,
+   "median_impact_speed_m_s": 0.002795626476229298,
+   "wall_impacts": 3787,
+   "wall_sticks": 142,
+   "run_time_s": 10.678784847259521
+  },
+  "rebound_engine": {
+   "grain_grain_impacts": 99,
+   "grain_grain_impacts_err": 9.9498743710662,
+   "grain_grain_sticks": 89,
+   "free_monomer_impacts": 64,
+   "free_monomer_stick_fraction": 0.875,
+   "free_monomer_stick_fraction_err": 0.04133986423538423,
+   "median_impact_speed_m_s": 0.002654834928950552,
+   "wall_impacts": 3743,
+   "wall_sticks": 143,
+   "run_time_s": 29.936396598815918,
+   "rebound_version": "5.2.2"
+  }
+ }
+}

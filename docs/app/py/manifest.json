@@ -1,0 +1,17 @@
+{
+ "version": "0.2.0",
+ "files": [
+  "__init__.py",
+  "analysis.py",
+  "contact.py",
+  "design.py",
+  "electrostatics.py",
+  "environment.py",
+  "materials.py",
+  "results.py",
+  "simulation.py",
+  "verification.py",
+  "webapi.py",
+  "viewer_template.html"
+ ]
+}

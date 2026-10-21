@@ -1,0 +1,604 @@
+'use strict';
+/* DOLL-E in-browser app: form + JSON editing of the full config, pre-flight checks, simulation runs,
+   sticking calculator and the verification suite. The physics runs in worker.js (Pyodide). */
+
+const $ = (id) => document.getElementById(id);
+const COLORS = { truth: '#5b9dff', stereo: '#3ccf7e', '2d_relative': '#ff8a3d', '2d_normal': '#d36bd0' };
+const LABELS = { truth: 'truth (3D normal speed)', stereo: 'stereo cameras', '2d_relative': '1 camera: 2D relative speed',
+                 '2d_normal': '1 camera: 2D normal component' };
+
+/* ------------------------------------------------------------------ worker RPC */
+const worker = new Worker('worker.js');
+let nextId = 1;
+const pending = new Map();
+let INFO = null, CFG = null, CH2 = null, TEMPLATE = null, BUSY = false;
+
+worker.onmessage = (ev) => {
+  const m = ev.data;
+  if (m.type === 'status') return bootMsg(m.msg);
+  if (m.type === 'fatal') return bootMsg('Could not start Python in this browser: ' + m.msg, 'bad');
+  if (m.type === 'ready') return onReady(m.version);
+  const p = pending.get(m.id);
+  if (!p) return;
+  if (m.type === 'progress') { if (p.onProgress) p.onProgress(JSON.parse(m.data)); return; }
+  pending.delete(m.id);
+  if (m.type === 'result') p.resolve(JSON.parse(m.data));
+  else p.reject(new Error(m.msg));
+};
+
+function call(fn, arg, onProgress) {
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject, onProgress });
+    worker.postMessage({ id, fn, arg: typeof arg === 'string' ? arg : JSON.stringify(arg ?? null) });
+  });
+}
+
+function bootMsg(msg, cls) {
+  $('bootmsg').textContent = msg;
+  $('boot').className = cls === 'ok' ? 'ok' : '';
+  if (cls === 'bad') $('bootmsg').classList.add('fail');
+}
+
+async function onReady(version) {
+  INFO = await call('info', null);
+  bootMsg(`Python simulator ready (dolle_sim v${INFO.version}, running locally in your browser).`, 'ok');
+  TEMPLATE = await (await fetch('py/dolle_sim/viewer_template.html')).text();
+  fillSelects();
+  if (!CFG) setConfig(INFO.default_config);
+  buildVerifyTable();
+  ['btn-run', 'btn-preflight', 'btn-stick', 'btn-inv', 'btn-verify'].forEach((b) => ($(b).disabled = false));
+}
+
+/* ------------------------------------------------------------------ tabs */
+function showTab() {
+  const t = (location.hash || '#simulate').slice(1);
+  const tab = ['simulate', 'sticking', 'verify', 'help'].includes(t) ? t : 'simulate';
+  document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === tab));
+  document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.id === 'pane-' + tab));
+}
+window.addEventListener('hashchange', showTab);
+showTab();
+
+/* ------------------------------------------------------------------ config paths */
+const key = (k) => (/^\d+$/.test(k) ? +k : k);
+function getp(o, path) { return path.split('.').reduce((a, k) => (a == null ? undefined : a[key(k)]), o); }
+function setp(o, path, v) {
+  const ks = path.split('.');
+  let a = o;
+  for (let i = 0; i < ks.length - 1; i++) {
+    const k = key(ks[i]);
+    if (a[k] == null) a[k] = /^\d+$/.test(ks[i + 1]) ? [] : {};
+    a = a[k];
+  }
+  a[key(ks[ks.length - 1])] = v;
+}
+function fmt(v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return '';
+  if (typeof v !== 'number') return String(v);
+  if (v === 0) return '0';
+  const a = Math.abs(v);
+  if (a < 1e-3 || a >= 1e6) return v.toExponential(3).replace(/\.?0+e/, 'e');
+  return String(+v.toPrecision(5));
+}
+
+/* ------------------------------------------------------------------ form schema */
+const GROUPS = [
+  { title: 'Run', fields: [
+    ['duration_s', 'Duration', 's'], ['dt_s', 'Time step', 'ms', 1e3], ['seed', 'Random seed', ''],
+    ['contact.steps_per_contact', 'Contact sub-steps', 'per impact'], ['output_fps', 'Replay frame rate', 'fps']] },
+  { title: 'Flight environment', fields: [
+    ['environment.pressure_pa', 'Gas pressure', 'Pa'], ['environment.temperature_k', 'Gas temperature', 'K'],
+    ['environment.gas', 'Gas', '', 1, 'sel', ['air', 'nitrogen', 'argon', 'helium']],
+    ['environment.residual_accel_g.2', 'Residual acceleration (z)', 'g'], ['environment.jitter_rms_g', 'g-jitter rms', 'g'],
+    ['environment.spin_rate_hz', 'Payload spin rate', 'Hz'], ['environment.temperature_gradient_k_m.2', 'Temperature gradient (z)', 'K/m'],
+    ['environment.illumination.intensity_w_m2', 'Camera illumination', 'W/m²'], ['environment.altitude_m', 'Altitude', 'km', 1e-3]] },
+  { title: 'Contacts', fields: [
+    ['contact.wall_sticking', 'Wall sticking', '', 1, 'sel', ['jkr', 'never', 'always']],
+    ['contact.friction_coefficient', 'Friction coefficient', ''], ['contact.tangential_restitution', 'Tangential restitution', ''],
+    ['contact.contact_charging', 'Contact (tribo-)charging', '', 1, 'chk'], ['contact.fragmentation', 'Aggregate fragmentation', '', 1, 'chk']] },
+  { title: 'Camera', fields: [
+    ['camera.fps', 'Frame rate', 'fps'], ['camera.position_noise_m', 'Centroid noise', 'µm', 1e6],
+    ['camera.track_frames', 'Frames tracked per side', ''], ['camera.depth_of_field_m', 'Depth of field', 'mm', 1e3]] },
+  { title: 'Forces', checks: [
+    ['forces.coulomb', 'Coulomb'], ['forces.space_charge', 'Space-charge field'], ['forces.polarization', 'Polarisation'],
+    ['forces.image_charges', 'Image charges'], ['forces.self_gravity', 'Mutual gravity'], ['forces.lorentz', 'Lorentz (q v×B)'],
+    ['forces.external_e_field', 'External E field'], ['forces.thermophoresis', 'Thermophoresis'], ['forces.photophoresis', 'Photophoresis'],
+    ['forces.radiation_pressure', 'Radiation pressure'], ['forces.brownian', 'Brownian motion'], ['environment.gravity_gradient', 'Gravity gradient']] },
+];
+const CH_FIELDS = [
+  ['name', 'Name', '', 1, 'text'], ['size_m', 'Chamber size (cube)', 'mm', 1e3, 'cube'],
+  ['wall_material', 'Wall material', '', 1, 'selwall'], ['wall_adhesion_factor', 'Wall adhesion factor', '×'],
+  ['wall_vibration.amplitude_m', 'Wall vibration amplitude', 'µm', 1e6], ['wall_vibration.frequency_hz', 'Wall vibration frequency', 'Hz'],
+  ['particles.0.material', 'Dust material', '', 1, 'seldust'], ['particles.0.count', 'Number of grains', ''],
+  ['particles.0.radius_m', 'Grain diameter', 'µm', 2e6], ['particles.0.radius_rel_sigma', 'Size scatter', 'rel.'],
+  ['particles.0.surface_energy_log_sigma', 'Surface-energy scatter', 'ln σ'],
+  ['particles.0.velocity.mode', 'Launch pattern', '', 1, 'sel', ['isotropic', 'jet']],
+  ['particles.0.velocity.speed_mean_m_s', 'Launch speed mean', 'mm/s', 1e3], ['particles.0.velocity.speed_sigma_m_s', 'Launch speed σ', 'mm/s', 1e3],
+  ['particles.0.spin.rate_hz_mean', 'Initial grain spin', 'Hz'], ['particles.0.charge_e_sigma', 'Initial charge σ', 'e'],
+];
+
+function inputFor(path, type, opts, scale) {
+  let el;
+  if (type === 'sel' || type === 'selwall' || type === 'seldust') {
+    el = document.createElement('select');
+    const list = type === 'selwall' ? INFO.wall_materials : type === 'seldust' ? INFO.dust_materials : opts;
+    for (const o of list) el.add(new Option(o, o));
+  } else if (type === 'chk') {
+    el = document.createElement('input'); el.type = 'checkbox';
+  } else {
+    el = document.createElement('input'); el.type = type === 'text' ? 'text' : 'number'; el.step = 'any';
+  }
+  el.dataset.path = path; el.dataset.type = type || 'num'; el.dataset.scale = scale || 1;
+  el.addEventListener('change', () => { readField(el); onConfigEdited(); });
+  return el;
+}
+
+function readField(el) {
+  const path = el.dataset.path, type = el.dataset.type, sc = +el.dataset.scale;
+  if (path.startsWith('chambers.1') && !CFG.chambers[1]) return;
+  let v;
+  if (type === 'chk') v = el.checked;
+  else if (type === 'num' || type === 'cube') { v = parseFloat(el.value) / sc; if (!Number.isFinite(v)) return; }
+  else v = el.value;
+  if (type === 'cube') v = [v, v, v];
+  if (/(count|seed|track_frames|steps_per_contact)$/.test(path)) v = Math.round(v);
+  setp(CFG, path, v);
+}
+
+function writeField(el) {
+  const path = el.dataset.path, type = el.dataset.type, sc = +el.dataset.scale;
+  const holder = path.startsWith('chambers.1') ? (CFG.chambers[1] ? CFG : { chambers: [null, CH2] }) : CFG;
+  let v = getp(holder, path);
+  if (type === 'cube' && Array.isArray(v)) v = v[0];
+  if (type === 'chk') el.checked = !!v;
+  else if (type === 'num' || type === 'cube') el.value = v === undefined ? '' : fmt(v * sc);
+  else el.value = v ?? '';
+  el.disabled = path.startsWith('chambers.1') && !CFG.chambers[1];
+}
+
+function buildForm() {
+  const form = $('form');
+  form.innerHTML = '';
+  // chambers first (two columns)
+  const fs = document.createElement('fieldset');
+  fs.className = 'wide';
+  fs.innerHTML = '<legend>Chambers (one per dust material)</legend>';
+  const hdr = document.createElement('div'); hdr.className = 'row two';
+  hdr.innerHTML = '<span></span><b>Chamber 1</b>';
+  const lab = document.createElement('label'); lab.className = 'flex';
+  const en = document.createElement('input'); en.type = 'checkbox'; en.id = 'ch2-on'; en.checked = !!CFG.chambers[1];
+  en.addEventListener('change', () => {
+    if (en.checked) { CFG.chambers[1] = CH2 || JSON.parse(JSON.stringify(CFG.chambers[0])); }
+    else { CH2 = CFG.chambers[1]; CFG.chambers.length = 1; }
+    refreshForm(); onConfigEdited();
+  });
+  lab.append(en, document.createTextNode(' Chamber 2'));
+  hdr.append(lab); fs.append(hdr);
+  for (const [p, label, unit, scale, type, opts] of CH_FIELDS) {
+    const row = document.createElement('div'); row.className = 'row two';
+    row.innerHTML = `<label>${label} <span class="u">${unit}</span></label>`;
+    row.append(inputFor('chambers.0.' + p, type, opts, scale), inputFor('chambers.1.' + p, type, opts, scale));
+    fs.append(row);
+  }
+  form.append(fs);
+  for (const g of GROUPS) {
+    const f = document.createElement('fieldset');
+    f.innerHTML = `<legend>${g.title}</legend>`;
+    if (g.fields) for (const [p, label, unit, scale, type, opts] of g.fields) {
+      const row = document.createElement('div'); row.className = 'row';
+      row.innerHTML = `<label>${label} <span class="u">${unit}</span></label>`;
+      row.append(inputFor(p, type || 'num', opts, scale)); f.append(row);
+    }
+    if (g.checks) {
+      const box = document.createElement('div'); box.className = 'checks';
+      for (const [p, label] of g.checks) {
+        const l = document.createElement('label'); l.append(inputFor(p, 'chk'), document.createTextNode(label)); box.append(l);
+      }
+      f.append(box);
+    }
+    form.append(f);
+  }
+}
+
+function refreshForm() {
+  if (!$('ch2-on')) buildForm();
+  $('ch2-on').checked = !!CFG.chambers[1];
+  document.querySelectorAll('#form [data-path]').forEach(writeField);
+  buildMaterialTable();
+  $('cfgjson').value = JSON.stringify(CFG, null, 2);
+}
+
+function setConfig(cfg) {
+  CFG = JSON.parse(JSON.stringify(cfg));
+  CFG.materials = CFG.materials || {};
+  CH2 = CFG.chambers[1] || CH2 || JSON.parse(JSON.stringify(INFO.default_config.chambers[1]));
+  buildForm();
+  refreshForm();
+  estimate();
+}
+
+function onConfigEdited() {
+  $('cfgjson').value = JSON.stringify(CFG, null, 2);
+  estimate();
+}
+
+function estimate() {
+  let gs = 0;
+  for (const ch of CFG.chambers) for (const g of ch.particles) gs += g.count;
+  const secs = 0.05 * gs * CFG.duration_s * (CFG.contact?.steps_per_contact ?? 300) / 100;
+  $('estimate').textContent = `${gs} grains, ${CFG.duration_s} s simulated: roughly ${secs < 90 ? Math.round(secs) + ' s' : (secs / 60).toFixed(1) + ' min'} in this browser`;
+}
+
+/* ------------------------------------------------------------------ materials editor */
+const MAT_COLS = [['rho', 'ρ', 1], ['E', 'E', 1e-9], ['nu', 'ν', 1], ['gamma', 'γ', 1], ['e_dry', 'e_dry', 1],
+  ['work_function', 'φ', 1], ['permittivity', 'ε', 1], ['yield_pressure', 'p_y', 1e-9], ['thermal_conductivity', 'k', 1],
+  ['absorptivity', 'absorb', 1]];
+function buildMaterialTable() {
+  const names = [...INFO.dust_materials, ...INFO.wall_materials];
+  let h = '<table><thead><tr><th>material</th>' + MAT_COLS.map((c) => `<th>${c[1]}</th>`).join('') + '<th></th></tr></thead><tbody>';
+  for (const n of names) {
+    h += `<tr><td>${n}${INFO.wall_materials.includes(n) ? ' <span class="muted small">(wall)</span>' : ''}</td>`;
+    for (const [f, , sc] of MAT_COLS) {
+      const base = INFO.materials[n][f];
+      const ov = CFG.materials?.[n]?.[f];
+      const v = ov ?? base;
+      h += `<td><input data-mat="${n}" data-f="${f}" data-sc="${sc}" value="${v === null ? 'inf' : fmt(v * sc)}"${ov !== undefined ? ' style="border-color:#ffb547"' : ''}></td>`;
+    }
+    h += `<td><a href="#" data-reset="${n}" class="small">reset</a></td></tr>`;
+  }
+  $('mattable').innerHTML = h + '</tbody></table><p class="small muted">Edited values are outlined in orange.</p>';
+  $('mattable').querySelectorAll('input').forEach((el) => el.addEventListener('change', () => {
+    const n = el.dataset.mat, f = el.dataset.f, sc = +el.dataset.sc;
+    const raw = el.value.trim().toLowerCase();
+    const v = raw === 'inf' ? Infinity : parseFloat(raw) / sc;
+    if (Number.isNaN(v)) return;
+    const base = INFO.materials[n][f] ?? Infinity;
+    CFG.materials[n] = CFG.materials[n] || {};
+    if (Math.abs(v - base) <= 1e-12 * Math.abs(base)) delete CFG.materials[n][f];
+    else CFG.materials[n][f] = Number.isFinite(v) ? v : 1e300;
+    if (!Object.keys(CFG.materials[n]).length) delete CFG.materials[n];
+    buildMaterialTable(); onConfigEdited();
+  }));
+  $('mattable').querySelectorAll('[data-reset]').forEach((a) => a.addEventListener('click', (e) => {
+    e.preventDefault(); delete CFG.materials[a.dataset.reset]; buildMaterialTable(); onConfigEdited();
+  }));
+}
+
+/* ------------------------------------------------------------------ buttons */
+$('btn-apply-json').addEventListener('click', () => {
+  try {
+    const c = JSON.parse($('cfgjson').value);
+    if (!Array.isArray(c.chambers) || !c.chambers.length) throw new Error('config needs a non-empty "chambers" list');
+    setConfig(c); $('jsonmsg').textContent = 'Applied.'; $('jsonmsg').className = 'status pass';
+  } catch (e) { $('jsonmsg').textContent = 'Invalid JSON: ' + e.message; $('jsonmsg').className = 'status fail'; }
+});
+$('btn-reset').addEventListener('click', () => { CH2 = null; setConfig(INFO.default_config); });
+$('btn-download-cfg').addEventListener('click', () => download('dolle_config.json', JSON.stringify(CFG, null, 2), 'application/json'));
+$('file-cfg').addEventListener('change', async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  try { setConfig(JSON.parse(await f.text())); } catch (err) { alert('Could not read config: ' + err.message); }
+});
+
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: type || 'text/plain' }));
+  a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function setBusy(b) {
+  BUSY = b;
+  ['btn-run', 'btn-preflight', 'btn-stick', 'btn-inv', 'btn-verify'].forEach((id) => ($(id).disabled = b));
+}
+
+/* ------------------------------------------------------------------ pre-flight */
+$('btn-preflight').addEventListener('click', async () => {
+  if (BUSY) return;
+  setBusy(true);
+  $('results').innerHTML = '';
+  try { renderPreflight(await call('preflight', CFG)); }
+  catch (e) { $('preflight-out').innerHTML = `<p class="fail">Error: ${esc(e.message)}</p>`; }
+  setBusy(false);
+});
+
+function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+function mm(v) { return v == null ? '–' : fmt(v * 1e3); }
+
+function renderPreflight(pfs) {
+  let h = '<h2>Pre-flight check</h2><div class="grid c2">';
+  pfs.forEach((pf, k) => {
+    const g = pf.groups[0];
+    h += `<div class="card"><h3>${esc(pf.chamber)}: ${esc(g.material)}</h3><table>
+      <tr><td>Predicted sticking speed, grain–grain (DEM)</td><td class="num"><b>${mm(g.v_stick_pp_DEM_m_s)} mm/s</b></td></tr>
+      <tr><td>Chokshi et al. (1993) estimate</td><td class="num">${mm(g.v_stick_pp_Chokshi_m_s)} mm/s</td></tr>
+      <tr><td>Sticking speed on the wall</td><td class="num">${mm(g.v_stick_wall_DEM_m_s)} mm/s</td></tr>
+      <tr><td>Wall hits expected to stick</td><td class="num">${fmt(100 * g.wall_capture_probability_per_hit)} %</td></tr>
+      <tr><td>Gas stopping time / Knudsen number</td><td class="num">${fmt(g.stopping_time_s)} s / ${fmt(g.knudsen_number)}</td></tr>
+      <tr><td>Expected grain–grain collisions</td><td class="num">~${Math.round(g.expected_pp_collisions_total)}</td></tr>
+      <tr><td>Spin-down time / Brownian speed</td><td class="num">${fmt(g.spin_down_time_s)} s / ${fmt(g.brownian_speed_m_s * 1e6)} µm/s</td></tr>
+      </table><canvas class="chart" id="budget${k}" style="height:360px;margin-top:10px"></canvas>`;
+    if (pf.warnings.length) h += '<ul class="warnings">' + pf.warnings.map((w) => `<li>${esc(w)}</li>`).join('') + '</ul>';
+    h += '</div>';
+  });
+  $('preflight-out').innerHTML = h + '</div>';
+  pfs.forEach((pf, k) => {
+    const b = pf.groups[0].acceleration_budget_m_s2;
+    const items = Object.entries(b).filter(([, v]) => v > 0).map(([n, v]) => ({ label: n.replace(/_/g, ' '), value: v / 9.80665 }))
+      .sort((a, c) => c.value - a.value);
+    barChart($('budget' + k), items, 'typical acceleration [g]');
+  });
+}
+
+/* ------------------------------------------------------------------ run */
+$('btn-run').addEventListener('click', async () => {
+  if (BUSY) return;
+  setBusy(true);
+  $('preflight-out').innerHTML = ''; $('results').innerHTML = '';
+  $('run-progress').style.display = 'block'; $('bar').style.width = '0%';
+  $('runmsg').textContent = 'Starting…';
+  const t0 = performance.now();
+  try {
+    const res = await call('run', CFG, (p) => {
+      const frac = (p.chamber + p.t / p.T) / p.n_chambers;
+      $('bar').style.width = (100 * frac).toFixed(1) + '%';
+      const el = (performance.now() - t0) / 1000;
+      const eta = frac > 0.02 ? Math.max(0, el / frac - el) : NaN;
+      const e = p.events;
+      $('runmsg').textContent = `${p.name}: t = ${p.t.toFixed(2)} / ${p.T} s · grain–grain sticks ${e.stick}, bounces ${e.bounce} · ` +
+        `wall ${e.wall_stick} stuck / ${e.wall_bounce} bounced · ${el.toFixed(0)} s elapsed` + (Number.isFinite(eta) ? `, ~${eta.toFixed(0)} s left` : '');
+    });
+    $('bar').style.width = '100%';
+    $('runmsg').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(0)} s.`;
+    renderResults(res);
+  } catch (e) {
+    $('results').innerHTML = `<p class="fail">Simulation error: ${esc(e.message)}</p>`;
+  }
+  setBusy(false);
+});
+
+function fitTxt(f) { return f ? `<b>${mm(f.v50_m_s)}</b> <span class="muted">[${mm(f.v50_lo_1sigma)}–${mm(f.v50_hi_1sigma)}]</span>` : '<span class="muted">no fit</span>'; }
+
+function renderResults(res) {
+  let h = '<h2>Results</h2><div class="grid c2">';
+  res.chambers.forEach((c, k) => {
+    const s = c.stats, m = c.measurement, g = c.preflight.groups[0];
+    h += `<div class="card"><h3>${esc(c.name)}: ${esc(g.material)}</h3><table>
+      <tr><td>Grain–grain impacts (stuck)</td><td class="num">${s.grain_grain_collisions} (${s.grain_grain_sticks})</td></tr>
+      <tr><td>Free single-grain impacts</td><td class="num">${s.monomer_monomer_collisions}</td></tr>
+      <tr><td>Wall impacts / stuck</td><td class="num">${s.wall_collisions} / ${s.wall_sticks}</td></tr>
+      <tr><td>Grains still free at the end</td><td class="num">${s.free_monomers} of ${s.n_grains}</td></tr>
+      <tr><td>Largest aggregate</td><td class="num">${s.max_aggregate_size} grains</td></tr></table>
+      <h3>Sticking speed [mm/s] (50% point, 1σ range)</h3><table>
+      <tr><td>Model prediction (pre-flight)</td><td class="num">${mm(g.v_stick_pp_DEM_m_s)}</td></tr>
+      <tr><td>Truth: 3D normal speed</td><td class="num">${fitTxt(m.threshold_truth_normal_speed)}</td></tr>
+      <tr><td>Stereo cameras</td><td class="num">${fitTxt(m.threshold_stereo_normal)}</td></tr>
+      <tr><td>1 camera, 2D relative speed</td><td class="num">${fitTxt(m.threshold_2d_relative)}</td></tr>
+      <tr><td>1 camera, 2D normal component</td><td class="num">${fitTxt(m.threshold_2d_normal)}</td></tr>
+      <tr><td>Impacts onto wall-bound grains</td><td class="num">${fitTxt(m.threshold_truth_on_wall_bound_grains)}</td></tr></table>
+      <canvas class="chart" id="stk${k}" style="margin-top:12px"></canvas>
+      <canvas class="chart" id="ts${k}" style="margin-top:12px;height:240px"></canvas>
+      <div class="btns"><button class="btn ghost" data-dl="${k}" data-kind="collisions">collisions.csv</button>
+      <button class="btn ghost" data-dl="${k}" data-kind="camera">camera_measurements.csv</button></div></div>`;
+  });
+  h += '</div><div class="btns"><button class="btn ghost" id="dl-summary">Download summary JSON</button></div>';
+  h += '<h2>3D replay</h2><iframe class="viewer" id="viewer"></iframe>';
+  $('results').innerHTML = h;
+  res.chambers.forEach((c, k) => {
+    const series = [];
+    for (const key of ['truth', 'stereo', '2d_relative', '2d_normal']) {
+      const pts = c.measurement_points[key].map((p) => [p[0] * 1e3, p[1]]);
+      series.push({ pts, color: COLORS[key], type: 'scatter', label: null });
+      const f = { truth: c.measurement.threshold_truth_normal_speed, stereo: c.measurement.threshold_stereo_normal,
+        '2d_relative': c.measurement.threshold_2d_relative, '2d_normal': c.measurement.threshold_2d_normal }[key];
+      if (f && pts.length) {
+        const xs = pts.map((p) => p[0]); const lo = Math.min(...xs), hi = Math.max(...xs);
+        const line = [];
+        for (let i = 0; i <= 120; i++) {
+          const x = lo * Math.pow(hi / lo, i / 120);
+          line.push([x, 1 / (1 + Math.exp((Math.log(x / 1e3) - Math.log(f.v50_m_s)) / f.log_width))]);
+        }
+        series.push({ pts: line, color: COLORS[key], type: 'line', label: `${LABELS[key]}: ${mm(f.v50_m_s)} mm/s` });
+      } else series.push({ pts: [], color: COLORS[key], type: 'line', label: `${LABELS[key]}: no fit` });
+    }
+    plot($('stk' + k), { series, xlog: true, ylim: [-0.03, 1.03], xlabel: 'impact speed [mm/s]', ylabel: 'fraction that stick',
+      vlines: [{ x: c.preflight.groups[0].v_stick_pp_DEM_m_s * 1e3, color: '#cfd6e2', label: 'model' }], title: `${c.name}: sticking threshold` });
+    const ts = c.timeseries, n = c.stats.n_grains;
+    plot($('ts' + k), { series: [
+      { pts: ts.map((r) => [r.t, r.free_monomers / n]), color: '#5b9dff', type: 'line', label: 'free grains (fraction)' },
+      { pts: ts.map((r) => [r.t, r.wall_monomers / n]), color: '#8f98a8', type: 'line', label: 'on walls (fraction)', dash: [5, 4] },
+      { pts: ts.map((r) => [r.t, r.stick / Math.max(1, ts[ts.length - 1].stick + ts[ts.length - 1].bounce)]), color: '#3ccf7e', type: 'line', label: 'grain–grain sticks (norm.)' },
+      { pts: ts.map((r) => [r.t, r.bounce / Math.max(1, ts[ts.length - 1].stick + ts[ts.length - 1].bounce)]), color: '#ff8a3d', type: 'line', label: 'grain–grain bounces (norm.)' },
+    ], xlabel: 'time [s]', ylabel: 'fraction', ylim: [0, 1.02], title: 'cloud evolution' });
+  });
+  $('results').querySelectorAll('[data-dl]').forEach((b) => b.addEventListener('click', () => {
+    const c = res.chambers[+b.dataset.dl];
+    if (b.dataset.kind === 'collisions') download(`${c.name}_collisions.csv`, c.collisions_csv, 'text/csv');
+    else download(`${c.name}_camera_measurements.csv`, c.camera_csv, 'text/csv');
+  }));
+  $('dl-summary').addEventListener('click', () => {
+    const slim = { config: CFG, chambers: res.chambers.map((c) => ({ name: c.name, stats: c.stats, measurement: c.measurement, preflight: c.preflight })) };
+    download('dolle_summary.json', JSON.stringify(slim, null, 2), 'application/json');
+  });
+  const html = TEMPLATE.split('__TITLE__').join('Browser run: ' + CFG.name).replace('/*__DATA__*/null', JSON.stringify(res.viewer));
+  $('viewer').src = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+}
+
+/* ------------------------------------------------------------------ sticking calculator */
+function fillSelects() {
+  for (const id of ['st-a', 'st-b', 'inv-m', 'inv-p']) {
+    const s = $(id); s.innerHTML = '';
+    if (id === 'inv-p') s.add(new Option('(same material)', ''));
+    for (const m of [...INFO.dust_materials, ...INFO.wall_materials]) s.add(new Option(m, m));
+  }
+  $('st-a').value = 'graphite'; $('st-b').value = 'graphite'; $('inv-m').value = 'graphite';
+}
+
+$('btn-stick').addEventListener('click', async () => {
+  if (BUSY) return;
+  setBusy(true);
+  $('st-out').innerHTML = '<p class="status">Computing…</p>';
+  try {
+    const r = await call('sticking', { mat_a: $('st-a').value, mat_b: $('st-b').value, diameter_um: +$('st-d').value,
+      gamma_log_sigma: +$('st-gs').value, radius_rel_sigma: +$('st-rs').value, samples: +$('st-n').value, materials: CFG.materials });
+    $('st-out').innerHTML = `<div class="grid c2"><div class="card"><table>
+      <tr><td>Sticking speed (DEM, identical spheres)</td><td class="num"><b>${mm(r.v_stick_dem)} mm/s</b></td></tr>
+      <tr><td>JKR hysteresis energy estimate</td><td class="num">${mm(r.v_stick_jkr_hysteresis)} mm/s</td></tr>
+      <tr><td>Chokshi et al. (1993)</td><td class="num">${mm(r.v_stick_chokshi)} mm/s</td></tr>
+      <tr><td>Plastic yield above</td><td class="num">${r.v_yield == null ? '∞' : fmt(r.v_yield)} m/s</td></tr>
+      <tr><td>Pull-off force / break energy</td><td class="num">${fmt(r.pull_off_force_N)} N / ${fmt(r.break_energy_J)} J</td></tr>
+      </table><p class="small muted">Material edits from the Simulate tab are applied here too.</p></div>
+      <div><canvas class="chart" id="stc1"></canvas><canvas class="chart" id="stc2" style="margin-top:12px;height:240px"></canvas></div></div>`;
+    const v = r.velocities.map((x) => x * 1e3);
+    plot($('stc1'), { series: [{ pts: v.map((x, i) => [x, r.stick_probability[i]]), color: '#3ccf7e', type: 'line', label: 'sticking probability (with scatter)' }],
+      xlog: true, ylim: [-0.03, 1.03], xlabel: 'impact speed [mm/s]', ylabel: 'P(stick)',
+      vlines: [{ x: r.v_stick_dem * 1e3, color: '#cfd6e2', label: 'DEM threshold' }], title: `${$('st-a').value} on ${$('st-b').value}` });
+    plot($('stc2'), { series: [{ pts: v.map((x, i) => [x, r.restitution[i]]), color: '#ff8a3d', type: 'line', label: 'normal restitution (0 = stuck)' }],
+      xlog: true, ylim: [-0.03, 1.03], xlabel: 'impact speed [mm/s]', ylabel: 'e_n', title: 'coefficient of restitution' });
+  } catch (e) { $('st-out').innerHTML = `<p class="fail">${esc(e.message)}</p>`; }
+  setBusy(false);
+});
+
+$('btn-inv').addEventListener('click', async () => {
+  if (BUSY) return;
+  setBusy(true);
+  try {
+    const r = await call('invert', { material: $('inv-m').value, partner: $('inv-p').value, diameter_um: +$('inv-d').value,
+      v_stick_m_s: +$('inv-v').value / 1e3, materials: CFG.materials });
+    $('inv-out').innerHTML = `Effective surface energy <b>γ = ${fmt(r.gamma_eff)} J/m²</b> (database ${fmt(r.gamma_database)}, ratio ${fmt(r.ratio)}).`;
+  } catch (e) { $('inv-out').innerHTML = `<span class="fail">${esc(e.message)}</span>`; }
+  setBusy(false);
+});
+
+/* ------------------------------------------------------------------ verification */
+function buildVerifyTable() {
+  const tb = document.querySelector('#vtable tbody');
+  tb.innerHTML = INFO.checks.map((c) => `<tr id="v-${c}"><td>${c.replace(/^check_/, '').replace(/_/g, ' ')}</td><td class="muted small">not run yet</td><td></td><td></td><td></td><td></td></tr>`).join('');
+  fetch('../data/rebound_check.json').then((r) => r.json()).then(renderRebound).catch(() => {});
+}
+
+$('btn-verify').addEventListener('click', async () => {
+  if (BUSY) return;
+  setBusy(true);
+  let ok = 0;
+  const t0 = performance.now();
+  for (const [i, c] of INFO.checks.entries()) {
+    $('vmsg').textContent = `Running ${i + 1}/${INFO.checks.length}: ${c}…`;
+    const row = $('v-' + c);
+    row.children[4].innerHTML = '<span class="muted">…</span>';
+    try {
+      const r = await call('verify', c);
+      row.innerHTML = `<td><b>${esc(r.name)}</b></td><td class="small">${esc(r.what)}${r.details ? `<br><span class="muted">${esc(r.details)}</span>` : ''}</td>
+        <td class="num small">${esc(r.value)}</td><td class="small">${esc(r.criterion)}</td>
+        <td class="${r.passed ? 'pass' : 'fail'}">${r.passed ? 'PASS' : 'FAIL'}</td><td class="num small">${r.seconds}</td>`;
+      if (r.passed) ok++;
+    } catch (e) { row.children[4].innerHTML = '<span class="fail">ERROR</span>'; row.children[2].textContent = e.message; }
+  }
+  const tot = INFO.checks.length;
+  $('vmsg').innerHTML = `<span class="${ok === tot ? 'pass' : 'fail'}">${ok}/${tot} checks passed</span> in ${((performance.now() - t0) / 1000).toFixed(0)} s, in your browser.`;
+  setBusy(false);
+});
+
+function renderRebound(d) {
+  const keys = [['grain_grain_impacts', 'grain–grain impacts'], ['grain_grain_sticks', 'grain–grain sticks'],
+    ['free_monomer_stick_fraction', 'free single-grain stick fraction'], ['wall_impacts', 'wall impacts'], ['wall_sticks', 'wall sticks']];
+  let h = '<div class="grid c2">';
+  for (const [name, r] of Object.entries(d)) {
+    h += `<div class="card"><h3>${esc(name)} (${r.n_grains} grains, ${r.duration_s} s)</h3><table><tr><th></th><th>DOLL-E</th><th>REBOUND</th></tr>`;
+    for (const [k, lab] of keys) h += `<tr><td>${lab}</td><td class="num">${fmt(r.dolle_engine[k])}</td><td class="num">${fmt(r.rebound_engine[k])}</td></tr>`;
+    h += `<tr><td>ballistic trajectories (vs IAS15)</td><td colspan="2" class="num">max difference ${fmt(r.ballistic_check.max_position_difference_m * 1e9)} nm</td></tr></table></div>`;
+  }
+  $('rebound').innerHTML = h + '</div>';
+}
+
+/* ------------------------------------------------------------------ charts (small canvas plotting) */
+function setupCanvas(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 600, H = cv.clientHeight || 300;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = '12px system-ui, sans-serif';
+  return { ctx, W, H };
+}
+
+function niceTicks(lo, hi, n = 6) {
+  const span = hi - lo || 1, step0 = span / n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map((f) => f * mag).find((s) => span / s <= n) || 10 * mag;
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-12 * span; v += step) out.push(+v.toPrecision(10));
+  return out;
+}
+
+function plot(cv, o) {
+  const { ctx, W, H } = setupCanvas(cv);
+  const leg = o.series.filter((s) => s.label);
+  const cols = W > 560 ? 2 : 1;
+  const m = { l: 56, r: 16, t: 28 + 16 * Math.ceil(leg.length / cols), b: 40 };
+  const pts = o.series.flatMap((s) => s.pts).filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]) && (!o.xlog || p[0] > 0));
+  let [x0, x1] = o.xlim || [Math.min(...pts.map((p) => p[0])), Math.max(...pts.map((p) => p[0]))];
+  for (const v of o.vlines || []) if (Number.isFinite(v.x) && (!o.xlog || v.x > 0)) { x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x); }
+  if (!pts.length || !Number.isFinite(x0)) { ctx.fillStyle = '#8f98a8'; ctx.fillText('no data', W / 2 - 20, H / 2); return; }
+  let [y0, y1] = o.ylim || [Math.min(...pts.map((p) => p[1])), Math.max(...pts.map((p) => p[1]))];
+  if (x0 === x1) { x0 *= 0.9; x1 *= 1.1; } if (y0 === y1) { y0 -= 1; y1 += 1; }
+  if (o.xlog) { x0 = Math.log10(x0) - 0.05; x1 = Math.log10(x1) + 0.05; }
+  const X = (x) => m.l + ((o.xlog ? Math.log10(x) : x) - x0) / (x1 - x0) * (W - m.l - m.r);
+  const Y = (y) => H - m.b - (y - y0) / (y1 - y0) * (H - m.t - m.b);
+  ctx.strokeStyle = '#2a303c'; ctx.fillStyle = '#8f98a8'; ctx.lineWidth = 1;
+  const xt = o.xlog ? (() => { const t = []; for (let k = Math.floor(x0); k <= Math.ceil(x1); k++) for (const f of [1, 2, 5]) { const v = Math.log10(f) + k; if (v >= x0 && v <= x1) t.push(v); } return t; })() : niceTicks(x0, x1);
+  for (const v of xt) {
+    const px = m.l + (v - x0) / (x1 - x0) * (W - m.l - m.r);
+    ctx.beginPath(); ctx.moveTo(px, m.t); ctx.lineTo(px, H - m.b); ctx.stroke();
+    const val = o.xlog ? Math.pow(10, v) : v;
+    ctx.fillText(fmt(+val.toPrecision(3)), px - 10, H - m.b + 15);
+  }
+  for (const v of niceTicks(y0, y1, 5)) {
+    const py = Y(v); ctx.beginPath(); ctx.moveTo(m.l, py); ctx.lineTo(W - m.r, py); ctx.stroke();
+    ctx.fillText(fmt(v), 6, py + 4);
+  }
+  ctx.fillStyle = '#d8dde6';
+  if (o.xlabel) ctx.fillText(o.xlabel, (W - ctx.measureText(o.xlabel).width) / 2, H - 8);
+  if (o.title) { ctx.font = '600 13px system-ui, sans-serif'; ctx.fillText(o.title, m.l, 16); ctx.font = '12px system-ui, sans-serif'; }
+  if (o.ylabel) { ctx.save(); ctx.translate(14, (H - m.b + m.t) / 2 + ctx.measureText(o.ylabel).width / 2); ctx.rotate(-Math.PI / 2); ctx.fillText(o.ylabel, 0, 0); ctx.restore(); }
+  ctx.save(); ctx.beginPath(); ctx.rect(m.l, m.t, W - m.l - m.r, H - m.t - m.b); ctx.clip();
+  for (const v of o.vlines || []) {
+    if (!Number.isFinite(v.x)) continue;
+    ctx.strokeStyle = v.color; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(X(v.x), m.t); ctx.lineTo(X(v.x), H - m.b); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = v.color; ctx.fillText(v.label || '', X(v.x) + 4, m.t + 12);
+  }
+  for (const s of o.series) {
+    ctx.strokeStyle = s.color; ctx.fillStyle = s.color; ctx.lineWidth = 2; ctx.setLineDash(s.dash || []);
+    const p = s.pts.filter((q) => Number.isFinite(q[1]) && (!o.xlog || q[0] > 0));
+    if (s.type === 'scatter') for (const q of p) { ctx.beginPath(); ctx.arc(X(q[0]), Y(q[1]), 3.2, 0, 6.283); ctx.fill(); }
+    else { ctx.beginPath(); p.forEach((q, i) => (i ? ctx.lineTo(X(q[0]), Y(q[1])) : ctx.moveTo(X(q[0]), Y(q[1])))); ctx.stroke(); }
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+  // legend: rows above the plot area
+  const colW = (W - m.l - m.r) / cols;
+  leg.forEach((s, i) => {
+    const x = m.l + (i % cols) * colW, y = 32 + 16 * Math.floor(i / cols);
+    ctx.fillStyle = s.color; ctx.fillRect(x, y - 4, 14, 3);
+    ctx.fillStyle = '#d8dde6';
+    let txt = s.label;
+    while (ctx.measureText(txt).width > colW - 24 && txt.length > 4) txt = txt.slice(0, -2);
+    ctx.fillText(txt === s.label ? txt : txt + '…', x + 18, y + 1);
+  });
+}
+
+function barChart(cv, items, xlabel) {
+  const { ctx, W, H } = setupCanvas(cv);
+  const m = { l: 190, r: 16, t: 10, b: 34 };
+  const vals = items.map((i) => Math.log10(i.value));
+  const x0 = Math.floor(Math.min(...vals)), x1 = Math.ceil(Math.max(...vals));
+  const X = (v) => m.l + (v - x0) / (x1 - x0) * (W - m.l - m.r);
+  const bh = (H - m.t - m.b) / items.length;
+  ctx.strokeStyle = '#2a303c'; ctx.fillStyle = '#8f98a8';
+  for (let k = x0; k <= x1; k++) { ctx.beginPath(); ctx.moveTo(X(k), m.t); ctx.lineTo(X(k), H - m.b); ctx.stroke(); if ((k - x0) % 2 === 0 || x1 - x0 < 10) ctx.fillText('1e' + k, X(k) - 10, H - m.b + 14); }
+  items.forEach((it, i) => {
+    const y = m.t + i * bh;
+    ctx.fillStyle = it.label.includes('residual') ? '#ffb547' : '#5b9dff';
+    ctx.fillRect(m.l, y + 2, Math.max(1, X(Math.log10(it.value)) - m.l), bh - 4);
+    ctx.fillStyle = '#d8dde6'; ctx.fillText(it.label, 6, y + bh / 2 + 4);
+  });
+  ctx.fillStyle = '#d8dde6'; ctx.fillText(xlabel, (W - ctx.measureText(xlabel).width) / 2 + m.l / 2, H - 6);
+}
+

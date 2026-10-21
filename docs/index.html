@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DOLL-E dust-collision simulator</title>
+<meta name="description" content="Open microgravity dust-collision simulator for 100 micron carbon and silicate grains on a NASA RockSat flight. Runs in your browser.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><div class="in">
+  <a class="brand" href="./">DOLL-E sim</a>
+  <nav>
+    <a class="on" href="./">Overview</a>
+    <a href="app/">Run in browser</a>
+    <a href="app/#verify">Verification</a>
+    <a href="replays/mission.html">Replay: mission</a>
+    <a href="replays/clouds.html">Replay: colliding clouds</a>
+    <a href="https://github.com/TheBestProEver/100micron-sim">GitHub</a>
+  </nav>
+</div></header>
+<main>
+  <h1>DOLL-E: Dust Observations in Low-gravity and Low-pressure Environments</h1>
+  <p class="lead">An open simulator for ~100&nbsp;µm dust grains colliding in microgravity inside a low-pressure chamber
+    on a NASA RockSat sounding rocket (University of Chicago). It predicts at what impact velocity
+    astrophysically relevant grains (carbon vs. silicates) stick, and whether the payload can measure it.</p>
+  <div class="btns">
+    <a class="btn" href="app/">Run the simulator in your browser</a>
+    <a class="btn ghost" href="replays/mission.html">Watch a 3D flight replay</a>
+    <a class="btn ghost" href="app/#verify">Run the verification suite</a>
+  </div>
+
+  <div class="grid c3">
+    <div class="card"><div class="kpi">39.2 <small>mm/s</small></div>predicted sticking speed, graphite on graphite (100 µm)</div>
+    <div class="card"><div class="kpi">6.2 <small>mm/s</small></div>predicted sticking speed, silica on silica (100 µm)</div>
+    <div class="card"><div class="kpi">±2–8 <small>%</small></div>accuracy of a stereo-camera measurement in the simulated flight (1 camera: off by up to 6×)</div>
+  </div>
+
+  <h2>What it simulates</h2>
+  <div class="grid c2">
+    <div class="card">
+      <h3>Grains and impacts</h3>
+      Every grain and aggregate is a spinning rigid body. Each impact is resolved by integrating the
+      adhesive JKR contact law with plastic yield (Thornton &amp; Ning) and viscoelastic damping at
+      nanosecond resolution, so stick or bounce, restitution, charging and fragmentation all come out
+      of the contact mechanics. Aggregates grow, spin, erode and shatter.
+    </div>
+    <div class="card">
+      <h3>The flight environment</h3>
+      Residual microgravity and g-jitter (or a flight IMU file), 1&nbsp;rpm payload roll (centrifugal and
+      Coriolis), tidal gravity, gas drag and torque, Brownian motion, thermophoresis, photophoresis,
+      radiation pressure, Coulomb forces with the long-range space-charge field, polarisation, image
+      charges, Lorentz force and contact charging. Anti-stick, vibrating walls.
+    </div>
+    <div class="card">
+      <h3>The measurement</h3>
+      A synthetic camera decides which impacts the payload would record, adds centroiding noise, and fits
+      the sticking threshold with error bars. It compares one camera against stereo cameras, so you can
+      size the optics before building hardware.
+    </div>
+    <div class="card">
+      <h3>Verified</h3>
+      16 benchmarks against analytic solutions and conservation laws run in your browser
+      (<a href="app/#verify">Verify tab</a>). The engine is also cross-checked against the independent
+      <a href="https://rebound.readthedocs.io">REBOUND</a> N-body code, and v0.2 went through an
+      adversarial physics review.
+    </div>
+  </div>
+
+  <h2>Results from the full mission simulation</h2>
+  <p class="muted">2 chambers × 2000 grains, 120 s, 1 Pa, 1e-4 g, 1 rpm roll, all forces on (desktop run).</p>
+  <div class="grid c2">
+    <div><img class="fig" src="figures/sticking_measurement_isotropic.png" alt="sticking measurement">
+      <p class="small muted">Fraction of impacts that stick vs impact speed. Blue: truth. Green: stereo cameras.
+        Orange and purple: a single camera.</p></div>
+    <div><img class="fig" src="figures/timeseries_isotropic.png" alt="time series">
+      <p class="small muted">With anti-stick vibrating walls, ~90% of grains stay free for the whole flight.</p></div>
+    <div><img class="fig" src="figures/sticking_sweep.png" alt="sticking sweep">
+      <p class="small muted">Model sticking probability and threshold vs grain size.</p></div>
+    <div><img class="fig" src="figures/rebound_check_carbon.png" alt="REBOUND cross-check">
+      <p class="small muted">Same chamber run in this engine and in REBOUND.</p></div>
+  </div>
+
+  <h2>Design findings</h2>
+  <ol>
+    <li><b>Use two orthogonal camera views and ~1 µm centroiding.</b> A single camera misjudges the sticking speed by 1.2–6×, depending on the geometry.</li>
+    <li><b>Anti-stick vibrating walls work:</b> only 0.02–0.09% of wall hits stick.</li>
+    <li><b>Keep the chamber isothermal to ≲ 0.1 K.</b> At 1 Pa each kelvin across it drives ~3.6e-4 g of thermophoresis.</li>
+    <li>The 1 rpm roll adds ~7.5e-4 g of Coriolis acceleration at 3.5 cm/s, and contact charging leaves the cloud all one sign. Both are in the model.</li>
+  </ol>
+
+  <h2>Run it locally</h2>
+<pre>git clone https://github.com/TheBestProEver/100micron-sim.git
+cd 100micron-sim
+pip install -r requirements.txt
+python -m dolle_sim run configs/rocksat_x_carbon_vs_silica.json
+python -m dolle_sim verify</pre>
+  <p class="muted small">The browser version runs the same Python code via <a href="https://pyodide.org">Pyodide</a>
+    (WebAssembly), without numba, at reduced size. Material parameters (especially surface energy) are literature
+    values; the flight experiment exists to measure them.</p>
+</main>
+<footer>DOLL-E · University of Chicago · NASA RockSat · <a href="https://github.com/TheBestProEver/100micron-sim">source on GitHub</a></footer>
+</body>
+</html>
