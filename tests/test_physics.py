@@ -35,7 +35,7 @@ def test_plasticity_matches_thornton_ning(v):
     assert c.resolve(v, me).e_n == pytest.approx(e_tn, abs=0.005)
 
 
-def test_sticking_threshold_brackets_chokshi():
+def test_sticking_threshold_matches_jkr_hysteresis():
     # without damping the DEM threshold equals the JKR hysteresis estimate; with damping it is higher
     c, me = contact("silica", e_dry=0.99999)
     assert c.threshold(me) == pytest.approx(c.v_stick_elastic(me), rel=0.02)

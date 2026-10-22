@@ -15,8 +15,8 @@ let INFO = null, CFG = null, CH2 = null, TEMPLATE = null, BUSY = false;
 
 worker.onmessage = (ev) => {
   const m = ev.data;
-  if (m.type === 'status') return bootMsg(m.msg);
-  if (m.type === 'fatal') return bootMsg('Could not start Python in this browser: ' + m.msg, 'bad');
+  if (m.type === 'status') return loaderStep(m.step);
+  if (m.type === 'fatal') return loaderError(m.msg);
   if (m.type === 'ready') return onReady(m.version);
   const p = pending.get(m.id);
   if (!p) return;
@@ -34,27 +34,50 @@ function call(fn, arg, onProgress) {
   });
 }
 
-function bootMsg(msg, cls) {
-  $('bootmsg').textContent = msg;
-  $('boot').className = cls === 'ok' ? 'ok' : '';
-  if (cls === 'bad') $('bootmsg').classList.add('fail');
+/* ------------------------------------------------------------------ loading screen */
+const LOAD_T0 = performance.now();
+let LOAD_STEP = 0;
+const loadTimer = setInterval(() => {
+  const s = (performance.now() - LOAD_T0) / 1000;
+  $('load-time').textContent = `${s.toFixed(0)} s` + (s > 45 ? ' · still working (a slow connection can take a minute)' : '');
+}, 500);
+
+function loaderStep(step) {
+  LOAD_STEP = step;
+  document.querySelectorAll('#load-steps li').forEach((li) => {
+    const k = +li.dataset.step;
+    li.className = k < step ? 'done' : k === step ? 'active' : '';
+  });
+  $('load-bar').style.width = `${Math.min(100, (step - 1) * 25 + 8)}%`;
+}
+
+function loaderError(msg) {
+  clearInterval(loadTimer);
+  $('loader').classList.add('error');
+  $('load-title').textContent = 'The simulator could not start';
+  $('load-sub').innerHTML = 'Your browser needs WebAssembly and an internet connection to download the Python runtime. ' +
+    'Try reloading the page, or use a recent Chrome, Edge, Firefox or Safari.<br><span class="fail small">' + esc(msg) + '</span>';
 }
 
 async function onReady(version) {
   INFO = await call('info', null);
-  bootMsg(`Ready. The simulator is running in your browser (v${INFO.version}).`, 'ok');
   TEMPLATE = await (await fetch('py/dolle_sim/viewer_template.html')).text();
   fillSelects();
   fillQuick();
   if (!CFG) setConfig(INFO.default_config);
   buildVerifyTable();
   ['btn-run', 'btn-preflight', 'btn-stick', 'btn-inv', 'btn-verify'].forEach((b) => ($(b).disabled = false));
+  document.querySelectorAll('#load-steps li').forEach((li) => (li.className = 'done'));
+  $('load-bar').style.width = '100%';
+  clearInterval(loadTimer);
+  setTimeout(() => { $('loader').style.display = 'none'; $('app').style.display = 'block'; showTab(); }, 350);
 }
 
 /* ------------------------------------------------------------------ tabs */
 function showTab() {
   const t = (location.hash || '#simulate').slice(1);
-  const tab = ['simulate', 'sticking', 'verify'].includes(t) ? t : 'simulate';
+  const tab = ['simulate', 'sticking', 'verify', 'sources'].includes(t) ? t : 'simulate';
+  if (tab === 'sources') loadSources();
   document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === tab));
   document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.id === 'pane-' + tab));
 }
@@ -364,7 +387,7 @@ function renderPreflight(pfs) {
     const g = pf.groups[0];
     h += `<div class="card"><h3>${esc(pf.chamber)}: ${esc(g.material)}</h3><table>
       <tr><td>Predicted sticking speed, grain–grain (DEM)</td><td class="num"><b>${mm(g.v_stick_pp_DEM_m_s)} mm/s</b></td></tr>
-      <tr><td>Chokshi et al. (1993) estimate</td><td class="num">${mm(g.v_stick_pp_Chokshi_m_s)} mm/s</td></tr>
+      <tr><td>Simple energy estimate (no damping)</td><td class="num">${mm(g.v_stick_pp_energy_estimate_m_s)} mm/s</td></tr>
       <tr><td>Sticking speed on the wall</td><td class="num">${mm(g.v_stick_wall_DEM_m_s)} mm/s</td></tr>
       <tr><td>Wall hits expected to stick</td><td class="num">${fmt(100 * g.wall_capture_probability_per_hit)} %</td></tr>
       <tr><td>Gas stopping time / Knudsen number</td><td class="num">${fmt(g.stopping_time_s)} s / ${fmt(g.knudsen_number)}</td></tr>
@@ -389,20 +412,21 @@ $('btn-run').addEventListener('click', async () => {
   setBusy(true);
   $('preflight-out').innerHTML = ''; $('results').innerHTML = '';
   $('run-progress').style.display = 'block'; $('bar').style.width = '0%';
-  $('runmsg').textContent = 'Starting…';
+  $('runpct').textContent = '0%'; $('runmsg').textContent = 'Setting up the chambers…';
   const t0 = performance.now();
   try {
     await applyQuick();
     const res = await call('run', CFG, (p) => {
       const frac = (p.chamber + p.t / p.T) / p.n_chambers;
       $('bar').style.width = (100 * frac).toFixed(1) + '%';
+      $('runpct').textContent = Math.floor(100 * frac) + '%';
       const el = (performance.now() - t0) / 1000;
       const eta = frac > 0.02 ? Math.max(0, el / frac - el) : NaN;
       const e = p.events;
       $('runmsg').textContent = `Simulating ${pretty(p.name)}: ${p.t.toFixed(1)} of ${p.T} s · ${e.stick + e.bounce} collisions so far` +
         (Number.isFinite(eta) ? ` · about ${Math.max(1, Math.round(eta))} s left` : '');
     });
-    $('bar').style.width = '100%';
+    $('bar').style.width = '100%'; $('runpct').textContent = '100%';
     $('runmsg').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(0)} s.`;
     setTimeout(() => ($('run-progress').style.display = 'none'), 1500);
     renderResults(res);
@@ -515,7 +539,7 @@ $('btn-stick').addEventListener('click', async () => {
     $('st-out').innerHTML = `<div class="grid c2"><div class="card"><table>
       <tr><td>Sticking speed (DEM, identical spheres)</td><td class="num"><b>${mm(r.v_stick_dem)} mm/s</b></td></tr>
       <tr><td>JKR hysteresis energy estimate</td><td class="num">${mm(r.v_stick_jkr_hysteresis)} mm/s</td></tr>
-      <tr><td>Chokshi et al. (1993)</td><td class="num">${mm(r.v_stick_chokshi)} mm/s</td></tr>
+      <tr><td>Simple energy estimate (no damping)</td><td class="num">${mm(r.v_stick_energy_estimate)} mm/s</td></tr>
       <tr><td>Plastic yield above</td><td class="num">${r.v_yield == null ? '∞' : fmt(r.v_yield)} m/s</td></tr>
       <tr><td>Pull-off force / break energy</td><td class="num">${fmt(r.pull_off_force_N)} N / ${fmt(r.break_energy_J)} J</td></tr>
       </table><p class="small muted">Material edits from the Simulate tab are applied here too.</p></div>
@@ -544,6 +568,7 @@ $('btn-inv').addEventListener('click', async () => {
 /* ------------------------------------------------------------------ verification */
 function buildVerifyTable() {
   const tb = document.querySelector('#vtable tbody');
+  $('btn-verify').textContent = `Run all ${INFO.checks.length} tests`;
   tb.innerHTML = INFO.checks.map((c) => `<tr id="v-${c}"><td>${c.replace(/^check_/, '').replace(/_/g, ' ')}</td><td class="muted small">not run yet</td><td></td></tr>`).join('');
   fetch('../data/rebound_check.json').then((r) => r.json()).then(renderRebound).catch(() => {});
 }
@@ -572,7 +597,8 @@ $('btn-verify').addEventListener('click', async () => {
 
 function renderRebound(d) {
   const keys = [['grain_grain_impacts', 'grain–grain impacts'], ['grain_grain_sticks', 'grain–grain sticks'],
-    ['free_monomer_stick_fraction', 'free single-grain stick fraction'], ['wall_impacts', 'wall impacts'], ['wall_sticks', 'wall sticks']];
+    ['free_monomer_stick_fraction', 'free single-grain stick fraction'],
+    ['free_monomer_median_speed_m_s', 'median single-grain impact speed (m/s)'], ['wall_impacts', 'wall impacts'], ['wall_sticks', 'wall sticks']];
   let h = '<div class="grid c2">';
   for (const [name, r] of Object.entries(d)) {
     h += `<div class="card"><h3>${esc(name)} (${r.n_grains} grains, ${r.duration_s} s)</h3><table><tr><th></th><th>DOLL-E</th><th>REBOUND</th></tr>`;
@@ -580,6 +606,44 @@ function renderRebound(d) {
     h += `<tr><td>ballistic trajectories (vs IAS15)</td><td colspan="2" class="num">max difference ${fmt(r.ballistic_check.max_position_difference_m * 1e9)} nm</td></tr></table></div>`;
   }
   $('rebound').innerHTML = h + '</div>';
+}
+
+/* ------------------------------------------------------------------ sources (provenance) */
+let SOURCES_LOADED = false;
+async function loadSources() {
+  if (SOURCES_LOADED) return;
+  SOURCES_LOADED = true;
+  try {
+    const d = await (await fetch('../data/provenance.json', { cache: 'no-cache' })).json();
+    $('src-summary').innerHTML = d.summary.map((p) => `<p style="margin:0 0 10px">${p}</p>`).join('') +
+      '<p class="muted small" style="margin:0">Origin: <span class="org published">published</span> equation or value ' +
+      'from the cited paper · <span class="org standard">standard</span> textbook physics or numerics · ' +
+      '<span class="org derived">derived</span> derived for DOLL-E · <span class="org assumed">assumed</span> ' +
+      'a choice we made, not from a source.</p>';
+    let h = '';
+    for (const sec of d.sections) {
+      h += `<h3 style="margin-top:28px">${esc(sec.title)}</h3><table class="src"><thead><tr><th style="width:23%">Component</th>` +
+        `<th style="width:33%">Based on</th><th style="width:22%">How it is checked</th><th>Assumptions and limits</th></tr></thead><tbody>`;
+      for (const c of sec.items) {
+        const reb = c.rebound === 'none' ? '' : `<br><span class="org rebound">REBOUND: ${esc(c.rebound)}</span>`;
+        const chk = c.checks.length ? `<br><span class="muted small">Verify: ${c.checks.map(esc).join(', ')}</span>` : '';
+        h += `<tr><td><b>${esc(c.component)}</b><br><span class="tag">${esc(c.code)}</span><br>` +
+          `<span class="org ${esc(c.origin)}">${esc(c.origin)}</span>${reb}</td><td>${esc(c.basis)}` +
+          (c.refs ? `<br><span class="muted small">${esc(c.refs)}</span>` : '') + `</td><td>${esc(c.checked)}${chk}</td>` +
+          `<td class="muted">${esc(c.limits)}</td></tr>`;
+      }
+      h += '</tbody></table>';
+    }
+    if (d.sensitivity) {
+      h += '<h3 style="margin-top:28px">How much the inputs matter (100 µm grains)</h3><table class="src"><thead><tr>' +
+        '<th style="width:40%">Change</th><th>Effect on the 50% sticking speed</th></tr></thead><tbody>' +
+        d.sensitivity.map((s) => `<tr><td>${esc(s.change)}</td><td>${esc(s.effect)}</td></tr>`).join('') + '</tbody></table>';
+    }
+    $('src-table').innerHTML = h;
+  } catch (e) {
+    SOURCES_LOADED = false;
+    $('src-summary').innerHTML = '<p class="fail">Could not load the source list.</p>';
+  }
 }
 
 /* ------------------------------------------------------------------ charts (small canvas plotting) */

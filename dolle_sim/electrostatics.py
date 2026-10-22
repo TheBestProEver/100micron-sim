@@ -15,6 +15,9 @@ interaction is therefore split (as in Ewald / P3M):
 
 The two parts add up to the full Coulomb interaction plus the long-range image
 charges of grounded walls.
+
+Provenance: Standard Ewald / particle-mesh (P3M) method (Ewald 1921; Hockney &
+Eastwood 1988), implemented for DOLL-E. No REBOUND code.
 """
 from __future__ import annotations
 

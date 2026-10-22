@@ -7,7 +7,7 @@
     "criterion": "|e - 1| < 1e-3",
     "passed": true,
     "details": "",
-    "seconds": 5.45
+    "seconds": 2.45
   },
   {
     "id": "damping",
@@ -33,17 +33,17 @@
     "id": "plastic_damping",
     "name": "Plasticity with damping",
     "what": "With realistic damping (e_dry = 0.7) plastic impacts must give ~ e_TN x e_dry (no damping of a separated contact).",
-    "value": "max relative deviation = 2.1%",
+    "value": "max relative deviation = 2.6%",
     "criterion": "< 5%",
     "passed": true,
-    "details": "v=3: 0.607 vs 0.598; v=10: 0.459 vs 0.456; v=30: 0.342 vs 0.349",
+    "details": "v=3: 0.590 vs 0.582; v=10: 0.443 vs 0.442; v=30: 0.329 vs 0.338",
     "seconds": 0.0
   },
   {
     "id": "energy_scaling",
     "name": "Outcome depends only on impact energy",
     "what": "Same 1/2 m v^2 with twice the mass must give the same restitution (dimensional analysis of the contact law).",
-    "value": "max |delta e| = 1.2e-15",
+    "value": "max |delta e| = 2.5e-15",
     "criterion": "< 1e-4",
     "passed": true,
     "details": "",
@@ -67,7 +67,7 @@
     "criterion": "< 10 nm",
     "passed": true,
     "details": "",
-    "seconds": 0.18
+    "seconds": 0.2
   },
   {
     "id": "rotating_frame",
@@ -77,17 +77,17 @@
     "criterion": "< 1 nm; ratio > 3.5",
     "passed": true,
     "details": "",
-    "seconds": 5.19
+    "seconds": 4.57
   },
   {
     "id": "rigid_body",
     "name": "Free rotation of an aggregate",
-    "what": "Spinning linear trimer in vacuum for 5 s: angular momentum conserved, rotational energy bounded (no pumping).",
-    "value": "|dE/E| = 1.5e-05, |dL/L| = 5.0e-12",
-    "criterion": "dE < 1e-3, dL < 1e-10",
+    "what": "Spinning linear trimer in vacuum for 5 s: angular momentum conserved; the rotational-energy error (sampled every step) stays bounded and does not drift.",
+    "value": "max |dE/E| = 8.2e-05, drift 5.0e-07, |dL/L| = 5.0e-12",
+    "criterion": "max dE < 1e-3, drift < 1e-5, dL < 1e-10",
     "passed": true,
     "details": "",
-    "seconds": 1.57
+    "seconds": 2.05
   },
   {
     "id": "impulse",
@@ -97,7 +97,7 @@
     "criterion": "< 1e-9",
     "passed": true,
     "details": "",
-    "seconds": 0.03
+    "seconds": 0.05
   },
   {
     "id": "conservation",
@@ -107,27 +107,27 @@
     "criterion": "< 1e-6",
     "passed": true,
     "details": "",
-    "seconds": 0.0
+    "seconds": 0.01
   },
   {
     "id": "walls",
     "name": "Vibrating walls never let grains out",
-    "what": "150 grains against 25 um / 200 Hz vibrating walls for 1 s: no grain surface may ever cross a wall.",
-    "value": "worst penetration = 0.00 nm over 502 wall bounces",
-    "criterion": "< 1 nm",
+    "what": "150 grains (forming spinning aggregates) against 25 um / 200 Hz vibrating walls for 1 s: no grain surface may cross a wall, and the position safety net must never be needed.",
+    "value": "worst penetration = 0.00 nm over 501 wall bounces (0 safety-net corrections)",
+    "criterion": "< 1 nm, no corrections",
     "passed": true,
     "details": "",
-    "seconds": 1.03
+    "seconds": 1.94
   },
   {
     "id": "no_overlap",
     "name": "No missed collisions in a dense gas",
     "what": "300 grains in a 6 mm box for 0.5 s: at the end of every step no two separate bodies may interpenetrate.",
-    "value": "worst overlap = 0.0e+00 R over 265 grain-grain impacts",
+    "value": "worst overlap = 0.0e+00 R over 286 grain-grain impacts",
     "criterion": "< 1e-3 R",
     "passed": true,
     "details": "",
-    "seconds": 1.79
+    "seconds": 4.66
   },
   {
     "id": "space_charge",
@@ -137,7 +137,7 @@
     "criterion": "< 6%; image within 10%",
     "passed": true,
     "details": "1 mm: 0.987; 2 mm: 0.994; 3 mm: 1.009; 5 mm: 1.011",
-    "seconds": 0.2
+    "seconds": 0.14
   },
   {
     "id": "charging",
@@ -152,11 +152,71 @@
   {
     "id": "threshold_fit",
     "name": "Sticking-threshold estimator",
-    "what": "Logistic fit + bootstrap on synthetic impacts with a known 30 mm/s threshold: unbiased, honest 1-sigma intervals, robust to perfectly separated data.",
-    "value": "max error 4.5%, 1-sigma coverage 13/20",
+    "what": "Logistic fit + bootstrap on synthetic impacts with a known 30 mm/s threshold: unbiased, robust to perfectly separated data; the coverage of its 1-sigma intervals is reported (nominal 68%).",
+    "value": "max error 3.3%, 1-sigma coverage 9/20",
     "criterion": "< 5%; coverage 40-95%",
     "passed": true,
     "details": "",
-    "seconds": 6.27
+    "seconds": 9.35
+  },
+  {
+    "id": "spin_rotating_frame",
+    "name": "Spin in the spinning payload frame",
+    "what": "A spinning grain, and an L-shaped aggregate 5 cm off the spin axis, in vacuum for 10 s at 1 rpm about a tilted axis: their absolute angular momentum must stay fixed in inertial space (so it appears to precess at -Omega in the chamber); centrifugal force must not torque the aggregate.",
+    "value": "grain |dL|/L = 5.5e-14, aggregate |dL|/L = 2.3e-10",
+    "criterion": "< 1e-9",
+    "passed": true,
+    "details": "",
+    "seconds": 6.91
+  },
+  {
+    "id": "fragmentation_energy",
+    "name": "Impacts never create energy",
+    "what": "Every impact, measured just before and after it is resolved: grains hitting spinning chains and L-shaped aggregates at 0.02-3 m/s from random directions and offsets, spinning aggregates hitting a wall, and 0.5 s of a closed box of 300 spinning graphite grains. Kinetic energy plus the energy of broken bonds may never increase, and no aggregate may keep grains that no longer touch.",
+    "value": "max gain +1.0e-13 of the impact energy over 1169 impacts (95 with fragmentation); phantom bonds 0",
+    "criterion": "<= 1e-9, none, >= 20 fragmentations",
+    "passed": true,
+    "details": "",
+    "seconds": 3.34
+  },
+  {
+    "id": "friction_energy",
+    "name": "Friction never creates energy",
+    "what": "2000 random eccentric impacts on an aggregate with friction (where rigid-body friction laws can gain energy): every impulse must dissipate.",
+    "value": "max relative energy change -2.8e-03",
+    "criterion": "<= 0",
+    "passed": true,
+    "details": "",
+    "seconds": 0.36
+  },
+  {
+    "id": "drag_limits",
+    "name": "Gas drag limits (Stokes / Epstein)",
+    "what": "The slip-corrected drag must reduce to Stokes drag in dense gas and to Epstein free-molecular drag (diffuse reflection) at low pressure.",
+    "value": "Stokes 0.00% off; Epstein -2.5% off",
+    "criterion": "< 1%; within 3%",
+    "passed": true,
+    "details": "The empirical slip correction sits ~2.5% below ideal diffuse-reflection Epstein drag.",
+    "seconds": 0.0
+  },
+  {
+    "id": "thermophoresis",
+    "name": "Thermophoresis vs the standard free-molecular drift",
+    "what": "Thermophoretic force / drag must give the textbook free-molecular drift speed (derived independently from kinetic theory), up to the ~2.5% drag-model difference.",
+    "value": "drift ratio = 1.028",
+    "criterion": "within 4%",
+    "passed": true,
+    "details": "",
+    "seconds": 0.0
+  },
+  {
+    "id": "brownian",
+    "name": "Brownian motion: equipartition",
+    "what": "2000 grains in dense gas for 10 drag times: thermal kicks plus drag must settle to <m v_x^2> = kT (fluctuation-dissipation).",
+    "value": "<m v^2>/kT = 0.993",
+    "criterion": "within 5%",
+    "passed": true,
+    "details": "",
+    "seconds": 0.83
   }
 ]

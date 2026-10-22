@@ -1,12 +1,12 @@
 {
-  "name": "rocksat_x_carbon_vs_silica",
+  "name": "flight_carbon_vs_silica",
   "seed": 1,
   "duration_s": 120,
   "dt_s": 0.004,
   "output_fps": 15,
-  "_comment": "Carbon (graphite) vs silica, 100 um grains, RockSat-X: despun with a 1 rpm roll, 1e-4 g residual. Walls: fluorinated, roughened glass (adhesion factor 0.05) vibrated at 200 Hz so grains keep bouncing; launch and wall speeds are chosen per material to straddle each predicted sticking velocity.",
+  "_comment": "Carbon (graphite) vs silica, 100 um grains, despun sounding-rocket flight with a 1 rpm roll and 1e-4 g residual acceleration. Walls: fluorinated, roughened glass (adhesion factor 0.05) vibrated at 200 Hz so grains keep bouncing; launch and wall speeds are chosen per material to straddle each predicted sticking velocity.",
   "environment": {
-    "preset": "rocksat_x",
+    "preset": "sounding_rocket",
     "pressure_pa": 1.0,
     "temperature_k": 293,
     "gas": "air",
@@ -66,7 +66,7 @@
     "photophoresis": true,
     "radiation_pressure": true,
     "brownian": true,
-    "long_range_update_every": 5
+    "long_range_update_every": 1
   },
   "contact": {
     "friction_coefficient": 0.3,

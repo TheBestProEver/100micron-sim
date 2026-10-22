@@ -4,6 +4,10 @@ Run with `python -m dolle_sim verify`, in the browser app (Verify tab), or via p
 Each check returns a dict with what was tested, the measured value, the
 acceptance criterion and whether it passed. Checks are short (seconds) so they
 can run in the browser (Pyodide) as well.
+
+Provenance: Each check compares the engine with an analytic solution, an
+independently computed reference (scipy ODE solver, Coulomb's law, kinetic-
+theory formulas) or a conservation law.
 """
 from __future__ import annotations
 
@@ -182,12 +186,20 @@ def check_rigid_body():
     s.L[b] = np.linalg.inv(s.Iinv[b]) @ w0
     E0 = 0.5 * s.L[b] @ s.Iinv[b] @ s.L[b]
     L0 = s.L[b].copy()
-    s.run(progress=False)
-    dE = abs(0.5 * s.L[b] @ s.Iinv[b] @ s.L[b] / E0 - 1)
+    n_steps = int(round(s.duration / s.dt))
+    dE = np.empty(n_steps)
+    for k in range(n_steps):
+        s.step(k * s.dt)
+        dE[k] = 0.5 * s.L[b] @ s.Iinv[b] @ s.L[b] / E0 - 1
     dL = float(np.linalg.norm(s.L[b] - L0) / np.linalg.norm(L0))
+    q = n_steps // 5
+    drift = abs(dE[-q:].mean() - dE[:q].mean())
+    ok = np.abs(dE).max() < 1e-3 and drift < 1e-5 and dL < 1e-10
     return _res("rigid_body", "Free rotation of an aggregate",
-                "Spinning linear trimer in vacuum for 5 s: angular momentum conserved, rotational energy bounded (no pumping).",
-                f"|dE/E| = {dE:.1e}, |dL/L| = {dL:.1e}", "dE < 1e-3, dL < 1e-10", dE < 1e-3 and dL < 1e-10)
+                "Spinning linear trimer in vacuum for 5 s: angular momentum conserved; the rotational-energy error "
+                "(sampled every step) stays bounded and does not drift.",
+                f"max |dE/E| = {np.abs(dE).max():.1e}, drift {drift:.1e}, |dL/L| = {dL:.1e}",
+                "max dE < 1e-3, drift < 1e-5, dL < 1e-10", ok)
 
 
 # ---------------------------------------------------------------------------- collisions
@@ -264,10 +276,13 @@ def check_walls():
     for k in range(int(s.duration / s.dt)):
         s.step(k * s.dt)
         worst = max(worst, float(np.maximum(s.rad[:, None] - s.pos, s.pos + s.rad[:, None] - s.size[None, :]).max()))
+    pre = s.contain_max_m          # penetration found *before* the containment safety net acted
     return _res("walls", "Vibrating walls never let grains out",
-                "150 grains against 25 um / 200 Hz vibrating walls for 1 s: no grain surface may ever cross a wall.",
-                f"worst penetration = {max(worst, 0) * 1e9:.2f} nm over {s.n_events['wall_bounce']} wall bounces",
-                "< 1 nm", worst < 1e-9 and s.n_events["wall_bounce"] > 50)
+                "150 grains (forming spinning aggregates) against 25 um / 200 Hz vibrating walls for 1 s: no grain "
+                "surface may cross a wall, and the position safety net must never be needed.",
+                f"worst penetration = {max(worst, pre) * 1e9:.2f} nm over {s.n_events['wall_bounce']} wall bounces "
+                f"({s.contain_corrections} safety-net corrections)",
+                "< 1 nm, no corrections", max(worst, pre) < 1e-9 and s.n_events["wall_bounce"] > 50)
 
 
 def check_no_overlap():
@@ -341,23 +356,248 @@ def check_threshold_fit():
     rng = np.random.default_rng(1)
     hits, n_rep, worst = 0, 20, 0.0
     for _ in range(n_rep):
-        v = np.exp(rng.normal(math.log(0.03), 0.6, 600))
-        stuck = rng.random(600) < 1 / (1 + np.exp((np.log(v) - math.log(0.03)) / 0.15))
+        v = np.exp(rng.normal(math.log(0.03), 0.6, 1500))
+        stuck = rng.random(1500) < 1 / (1 + np.exp((np.log(v) - math.log(0.03)) / 0.15))
         f = fit_threshold(v, stuck, n_boot=60, seed=int(rng.integers(1e9)))
         worst = max(worst, abs(f["v50_m_s"] / 0.03 - 1))
         hits += f["v50_lo_1sigma"] <= 0.03 <= f["v50_hi_1sigma"]
     sep = fit_threshold([0.001, 0.002, 0.003, 0.05, 0.06, 0.07], [1, 1, 1, 0, 0, 0])
     ok = worst < 0.05 and 0.4 <= hits / n_rep <= 0.95 and sep is not None and 0.003 <= sep["v50_m_s"] <= 0.05
     return _res("threshold_fit", "Sticking-threshold estimator",
-                "Logistic fit + bootstrap on synthetic impacts with a known 30 mm/s threshold: unbiased, honest 1-sigma "
-                "intervals, robust to perfectly separated data.",
+                "Logistic fit + bootstrap on synthetic impacts with a known 30 mm/s threshold: unbiased, robust to perfectly "
+                "separated data; the coverage of its 1-sigma intervals is reported (nominal 68%).",
                 f"max error {100 * worst:.1f}%, 1-sigma coverage {hits}/{n_rep}", "< 5%; coverage 40-95%", ok)
+
+
+def check_spin_rotating_frame():
+    """A torque-free spinning grain keeps its absolute angular momentum fixed in inertial space."""
+    cfg = _cfg(env={"pressure_pa": 0.0, "spin_rate_hz": 0.0167, "spin_axis": [0.3, 0.2, 1.0]}, T=10.0)
+    s = ChamberSim(cfg, _one_grain([1e-9, 0, 0], [0.5, 0.5, 0.5]), 0)
+    I0 = s.Iiso[0]
+    w_rel0 = 2 * math.pi * 5 * np.array([0.6, 0.0, 0.8])
+    s.L[0] = I0 * w_rel0
+    Om = s.env.omega
+    La0 = s.L[0] + I0 * Om                          # absolute angular momentum (chamber components at t=0)
+    s.run(progress=False)
+    expect = s.env.to_chamber(La0, s.duration)      # the same inertial vector seen from the chamber at t
+    err = float(np.linalg.norm(s.L[0] + I0 * Om - expect) / np.linalg.norm(La0))
+    # an L-shaped (asymmetric) aggregate 5 cm off the spin axis: centrifugal force acts on it, but in inertial
+    # space no real torque does, so its absolute angular momentum must stay fixed too
+    cfg = _cfg(env={"pressure_pa": 0.0, "spin_rate_hz": 0.0167, "spin_axis": [0.3, 0.2, 1.0]}, T=10.0)
+    ch = {"name": "t", "size_m": [1.0] * 3, "center_from_spin_axis_m": [0.05, 0.0, 0.0],
+          "particles": [{"material": "graphite", "count": 3, "radius_m": R, "velocity": {"speed_mean_m_s": 0.0}}]}
+    a = ChamberSim(cfg, ch, 4)
+    c = a.size / 2
+    a.pos[:3] = c + np.array([[0, 0, 0], [2 * R, 0, 0], [2 * R, 2 * R, 0]])
+    a.X[:] = a.pos
+    a.V[:] = 0
+    a.L[:] = 0
+    a._build_neighbors()
+    a._merge(0, 1)
+    a._merge(a.body[0], 2)
+    b = a.body[0]
+    Iw = lambda: a.Q[b] @ np.diag(a.Ip[b]) @ a.Q[b].T
+    a.L[b] = Iw() @ (2 * math.pi * 3 * np.array([0.3, -0.5, 0.8]))
+    La0 = a.L[b] + Iw() @ a.env.omega
+    a.run(progress=False)
+    err2 = float(np.linalg.norm(a.L[b] + Iw() @ a.env.omega - a.env.to_chamber(La0, a.duration))
+                 / np.linalg.norm(La0))
+    return _res("spin_rotating_frame", "Spin in the spinning payload frame",
+                "A spinning grain, and an L-shaped aggregate 5 cm off the spin axis, in vacuum for 10 s at 1 rpm about a "
+                "tilted axis: their absolute angular momentum must stay fixed in inertial space (so it appears to "
+                "precess at -Omega in the chamber); centrifugal force must not torque the aggregate.",
+                f"grain |dL|/L = {err:.1e}, aggregate |dL|/L = {err2:.1e}", "< 1e-9", err < 1e-9 and err2 < 1e-9)
+
+
+def _impact_energy_audit(s):
+    """Wrap the impact resolvers of a sim: record, per impact, the change of kinetic + broken-bond energy."""
+    def total():
+        live = np.flatnonzero(s.alive & ~s.frozen)
+        W = np.einsum("bij,bj->bi", s.Iinv[live], s.L[live])
+        return float((0.5 * s.M[live] * (s.V[live] ** 2).sum(1)).sum() + 0.5 * (W * s.L[live]).sum()) + s.E_bonds_broken
+    log = []
+
+    def wrap(f):
+        def g(*args):
+            n0, E0 = len(s.collisions), total()
+            hit = f(*args)
+            if len(s.collisions) > n0:
+                rec = s.collisions[-1]
+                log.append((total() - E0, max(rec["E_coll"], 1e-300), rec["fragments"] > 0))
+            return hit
+        return g
+    s._resolve_pp, s._resolve_wall = wrap(s._resolve_pp), wrap(s._resolve_wall)
+    return log
+
+
+def _phantom_bonds(s):
+    return sum(len(s._components(s.members[b])) > 1 for b in np.flatnonzero(s.alive & (s.nmono > 1)))
+
+
+def check_fragmentation_energy():
+    """No impact may create energy: kinetic + broken-bond energy never increases, for any impact geometry."""
+    cfg = _cfg(env={"pressure_pa": 0.0}, T=0.01)
+    ch = {"name": "t", "size_m": [0.02] * 3, "wall_material": "glass_fluorosilane", "wall_adhesion_factor": 0.05,
+          "particles": [{"material": "silica", "count": 4, "radius_m": R, "velocity": {"speed_mean_m_s": 0.0}}]}
+    rng = np.random.default_rng(11)
+    gains, n_frag, phantom = [], 0, 0
+    # A: a grain hits a spinning, moving 3-grain chain or L at random speeds (0.02-3 m/s), angles and offsets
+    for trial in range(60):
+        s = ChamberSim(cfg, ch, 5)
+        log = _impact_energy_audit(s)
+        c = s.size / 2
+        shape = [[-2 * R, 0, 0], [0, 0, 0], [2 * R, 0, 0]] if trial % 2 else [[0, 0, 0], [2 * R, 0, 0], [2 * R, 2 * R, 0]]
+        s.pos[:3] = c + np.array(shape)
+        s.X[:3] = s.pos[:3]
+        s.V[:] = 0
+        s.L[:] = 0
+        s._merge(0, 1)
+        s._merge(s.body[0], 2)
+        A = s.body[0]
+        s.V[A] = rng.standard_normal(3) * 0.01
+        s.L[A] = np.linalg.inv(s.Iinv[A]) @ (rng.standard_normal(3) * 2 * math.pi * 10)
+        tgt = s.pos[rng.integers(3)]
+        d = rng.standard_normal(3)
+        d /= np.linalg.norm(d)
+        s.pos[3] = s.X[3] = tgt - d * 2.6 * R + np.cross(d, rng.standard_normal(3)) * 0.5 * R
+        speed = math.exp(rng.uniform(math.log(0.02), math.log(3.0)))
+        s.V[3] = d * speed
+        s._build_neighbors()
+        for k in range(3):
+            s.step(k * s.dt)
+        gains += log
+        phantom += _phantom_bonds(s)
+    # B: spinning aggregates hitting a static wall at random angles
+    for trial in range(30):
+        s = ChamberSim(cfg, ch, 6)
+        log = _impact_energy_audit(s)
+        s.pos[:3] = np.array([[0.01, 0.01, 1.2 * R], [0.01 + 2 * R, 0.01, 1.2 * R], [0.01 + 2 * R, 0.01 + 2 * R, 1.2 * R]])
+        s.pos[3] = [0.015, 0.015, 0.01]
+        s.X[:] = s.pos
+        s.V[:] = 0
+        s.L[:] = 0
+        s._merge(0, 1)
+        s._merge(s.body[0], 2)
+        A = s.body[0]
+        speed = math.exp(rng.uniform(math.log(0.02), math.log(3.0)))
+        v = rng.standard_normal(3)
+        v[2] = -abs(v[2]) - 0.2
+        s.V[A] = speed * v / np.linalg.norm(v)
+        s.L[A] = np.linalg.inv(s.Iinv[A]) @ (rng.standard_normal(3) * 2 * math.pi * 10)
+        s._build_neighbors()
+        for k in range(3):
+            s.step(k * s.dt)
+        gains += log
+        phantom += _phantom_bonds(s)
+    # C: a closed box of 300 graphite grains with spins and a wide speed spread (sticking, bouncing, friction,
+    #    erosion and shattering of aggregates of every shape)
+    cfgC = _cfg(env={"pressure_pa": 0.0}, T=0.5)
+    chC = {"name": "t", "size_m": [0.01] * 3, "wall_material": "glass_fluorosilane", "wall_adhesion_factor": 0.05,
+           "particles": [{"material": "graphite", "count": 300, "radius_m": R, "spin": {"rate_hz_mean": 20.0, "rate_hz_sigma": 10.0},
+                          "velocity": {"speed_mean_m_s": 0.06, "speed_sigma_m_s": 0.05}}]}
+    s = ChamberSim(cfgC, chC, 7)
+    log = _impact_energy_audit(s)
+    s.run(progress=False)
+    gains += log
+    phantom += _phantom_bonds(s)
+    rel = np.array([g / e for g, e, _ in gains])
+    n_frag = sum(f for _, _, f in gains)
+    worst = float(rel.max()) if len(rel) else 0.0
+    ok = worst <= 1e-9 and phantom == 0 and n_frag >= 20
+    return _res("fragmentation_energy", "Impacts never create energy",
+                "Every impact, measured just before and after it is resolved: grains hitting spinning chains and L-shaped "
+                "aggregates at 0.02-3 m/s from random directions and offsets, spinning aggregates hitting a wall, and "
+                "0.5 s of a closed box of 300 spinning graphite grains. Kinetic energy plus the energy of broken bonds "
+                "may never increase, and no aggregate may keep grains that no longer touch.",
+                f"max gain {worst:+.1e} of the impact energy over {len(rel)} impacts ({n_frag} with fragmentation); "
+                f"phantom bonds {phantom}", "<= 1e-9, none, >= 20 fragmentations", ok)
+
+
+def check_friction_energy():
+    """Friction impulses on eccentric aggregate impacts never create kinetic energy."""
+    cfg = _cfg()
+    ch = {"name": "t", "size_m": [0.02] * 3,
+          "particles": [{"material": "graphite", "count": 4, "radius_m": R, "velocity": {"speed_mean_m_s": 0.0}}]}
+    s = ChamberSim(cfg, ch, 6)
+    rng = np.random.default_rng(3)
+    c = s.size / 2
+    s.pos[:3] = c + np.array([[0, 0, 0], [2 * R, 0, 0], [2 * R, 2 * R, 0]])
+    s.X[:] = s.pos
+    s._merge(0, 1)
+    s._merge(s.body[0], 2)
+    A = s.body[0]
+    worst = -math.inf
+    for _ in range(2000):
+        n = rng.standard_normal(3)
+        n /= np.linalg.norm(n)
+        rA = rng.standard_normal(3) * 2 * R
+        vrel = rng.standard_normal(3) * 0.01
+        vrel += (abs(vrel @ n) + 1e-4 - vrel @ n) * n
+        K = s._K_body(A, rA) + np.eye(3) / s.mass[3]
+        e = rng.random()
+        P = s._impulse(K, vrel, n, e)
+        dKE = float(-P @ vrel + 0.5 * P @ K @ P)
+        Kinv = np.linalg.inv(K)
+        worst = max(worst, dKE / (0.5 * vrel @ Kinv @ vrel))
+    return _res("friction_energy", "Friction never creates energy",
+                "2000 random eccentric impacts on an aggregate with friction (where rigid-body friction laws can "
+                "gain energy): every impulse must dissipate.",
+                f"max relative energy change {worst:+.1e}", "<= 0", worst <= 1e-12)
+
+
+def check_drag_limits():
+    """Gas drag reproduces the exact continuum (Stokes) and free-molecular (Epstein) limits."""
+    from .environment import Environment
+    env_lo = Environment({"preset": "ideal", "pressure_pa": 1e7}, np.random.default_rng(0))   # Kn << 1
+    env_hi = Environment({"preset": "ideal", "pressure_pa": 1e-3}, np.random.default_rng(0))  # Kn >> 1
+    r = 50e-6
+    stokes = 6 * math.pi * env_lo.mu * r
+    e1 = abs(float(env_lo.drag_coeff(r)) / stokes - 1)
+    epstein = (4 * math.pi / 3) * (1 + math.pi / 8) * env_hi.rho_gas * env_hi.v_th * r ** 2   # diffuse reflection
+    e2 = float(env_hi.drag_coeff(r)) / epstein - 1
+    ok = e1 < 0.01 and abs(e2) < 0.03
+    return _res("drag_limits", "Gas drag limits (Stokes / Epstein)",
+                "The slip-corrected drag must reduce to Stokes drag in dense gas and to Epstein free-molecular drag "
+                "(diffuse reflection) at low pressure.",
+                f"Stokes {100 * e1:.2f}% off; Epstein {100 * e2:+.1f}% off", "< 1%; within 3%", ok,
+                "The empirical slip correction sits ~2.5% below ideal diffuse-reflection Epstein drag.")
+
+
+def check_thermophoresis():
+    """Thermophoretic drift velocity vs the standard free-molecular result v = -(3/4)(1+pi/8)^-1 (mu/rho) gradT/T."""
+    cfg = _cfg(env={"pressure_pa": 1.0, "temperature_gradient_k_m": [0, 0, 10.0]}, forces={"thermophoresis": True})
+    s = ChamberSim(cfg, _one_grain([1e-9, 0, 0], [0.5, 0.5, 0.5], size=1.0), 0)
+    env = s.env
+    jump = 1 + 3.9 * env.mfp / s.size[2]                    # the code's chamber temperature-jump reduction
+    v_code = s.F_static[0, 2] / s.dragc[0] * jump
+    v_ref = -(3 / 4) / (1 + math.pi / 8) * env.mu / env.rho_gas * 10.0 / env.T
+    ratio = v_code / v_ref
+    return _res("thermophoresis", "Thermophoresis vs the standard free-molecular drift",
+                "Thermophoretic force / drag must give the textbook free-molecular drift speed (derived independently "
+                "from kinetic theory), up to the ~2.5% drag-model difference.",
+                f"drift ratio = {ratio:.3f}", "within 4%", abs(ratio - 1) < 0.04)
+
+
+def check_brownian():
+    """Brownian kicks reproduce equipartition: <m v_x^2> = kT."""
+    cfg = _cfg(env={"pressure_pa": 1e5}, forces={"brownian": True}, T=0.6)
+    ch = {"name": "t", "size_m": [1.0] * 3,
+          "particles": [{"material": "silica", "count": 2000, "radius_m": R, "velocity": {"speed_mean_m_s": 1e-9}}]}
+    s = ChamberSim(cfg, ch, 7)
+    s.run(progress=False)
+    ratio = float((s.mass[:, None] * s.V ** 2).mean() / (1.380649e-23 * s.env.T))
+    tau = s.mass[0] / s.dragc[0]
+    return _res("brownian", "Brownian motion: equipartition",
+                f"2000 grains in dense gas for {s.duration / tau:.0f} drag times: thermal kicks plus drag must settle to "
+                "<m v_x^2> = kT (fluctuation-dissipation).",
+                f"<m v^2>/kT = {ratio:.3f}", "within 5%", abs(ratio - 1) < 0.05)
 
 
 CHECKS = [check_elastic_limit, check_damping, check_thornton_ning, check_plastic_damping, check_energy_scaling,
           check_threshold_limits, check_free_flight, check_rotating_frame, check_rigid_body, check_impulse,
           check_conservation, check_walls, check_no_overlap, check_space_charge, check_charge_saturation,
-          check_threshold_fit]
+          check_threshold_fit, check_spin_rotating_frame, check_fragmentation_energy, check_friction_energy,
+          check_drag_limits, check_thermophoresis, check_brownian]
 
 
 def list_checks():

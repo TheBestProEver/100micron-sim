@@ -1,4 +1,8 @@
-"""Analytic pre-flight checks and sticking-threshold tools (no full simulation needed)."""
+"""Analytic pre-flight checks and sticking-threshold tools (no full simulation needed).
+
+Provenance: Analytic estimates derived for DOLL-E from the same physics as the
+engine. No REBOUND code.
+"""
 from __future__ import annotations
 
 import math
@@ -43,7 +47,7 @@ def preflight(cfg: dict, chamber: dict) -> dict:
     if a_cf > 10 * max(a_res, 1e-6):
         W.append(f"Spin ({spin / 2 / math.pi:.2f} Hz) gives up to {a_cf / G0:.2e} g centrifugal "
                  f"acceleration in the chamber -- this dominates the residual {a_res / G0:.1e} g. "
-                 "Consider a despun platform (RockSat-X) or putting the chamber on the spin axis.")
+                 "Consider a despun flight or putting the chamber on the spin axis.")
 
     for g in groups:
         m = get_material(g["material"], ov)
@@ -76,7 +80,8 @@ def preflight(cfg: dict, chamber: dict) -> dict:
             "mutual_gravity_at_mean_spacing": G_N * mass / sep ** 2,
             "coulomb_at_mean_spacing": K_E * q_rms ** 2 / sep ** 2 / mass,
             "coulomb_at_1mm": K_E * q_rms ** 2 / 1e-3 ** 2 / mass,
-            "polarization_at_contact": 2 * K_E * q_rms ** 2 * m.polarizability * r ** 3 / (2 * r) ** 5 / mass,
+            # both grains are charged and both are polarised by the other: two terms (as in the engine)
+            "polarization_at_contact": 2 * 2 * K_E * q_rms ** 2 * m.polarizability * r ** 3 / (2 * r) ** 5 / mass,
             "image_charge_at_1mm_from_wall": K_E * wall.image_factor * q_rms ** 2 / (2e-3) ** 2 / mass,
             "lorentz_qvB": q_rms * v0 * Bmag / mass,
             "external_E_field": q_rms * Emag / mass,
@@ -102,7 +107,7 @@ def preflight(cfg: dict, chamber: dict) -> dict:
         # collisions: number density x cross-section x relative speed, decaying with drag
         nd = n_tot / vol
         sigma = math.pi * (2 * r) ** 2
-        v_rel = 4.0 / 3.0 * v0           # mean relative speed, isotropic Maxwellian-ish
+        v_rel = 4.0 / 3.0 * v0           # mean relative speed of two equal-speed grains with isotropic directions
         dist = v0 * tau * (1 - math.exp(-T / tau)) if math.isfinite(tau) else v0 * T
         # walls capture grains slower than the wall-sticking speed: path ends after ~1/p_stick wall hits
         vs = float(g.get("velocity", {}).get("speed_sigma_m_s", 0.3 * v0))
@@ -116,7 +121,8 @@ def preflight(cfg: dict, chamber: dict) -> dict:
         # vibrating walls: phase uniform at arrival, hit rate weighted by the approach speed
         n_axes = len(set((chamber.get("wall_vibration") or {}).get("axes", [0, 1, 2]))) if v_vib > 0 else 0
         v_app = v_n + v_vib * np.cos(rng0.random(n_s) * 2 * math.pi)
-        wgt = np.clip(v_app, 0, None)
+        # v_n is already flux-weighted for a static wall; a moving wall changes the hit rate by (v_n + w) / v_n
+        wgt = np.clip(v_app, 0, None) / np.maximum(v_n, 1e-30)
         p_vib = float((wgt * (v_app < v_pw)).sum() / wgt.sum()) if wgt.sum() > 0 else 1.0
         p_static = float(np.mean(v_n < v_pw))
         wall_mode = cfg.get("contact", {}).get("wall_sticking", "jkr")
@@ -131,7 +137,7 @@ def preflight(cfg: dict, chamber: dict) -> dict:
         d = {
             "material": m.name, "radius_m": r, "count": n, "mass_kg": mass,
             "knudsen_number": Kn, "stopping_time_s": tau,
-            "v_stick_pp_DEM_m_s": v_pp, "v_stick_pp_Chokshi_m_s": pp.v_stick_analytic(mass / 2),
+            "v_stick_pp_DEM_m_s": v_pp, "v_stick_pp_energy_estimate_m_s": pp.v_stick_analytic(mass / 2),
             "v_stick_wall_DEM_m_s": v_pw, "pull_off_force_N": pp.p.F_c,
             "launch_speed_m_s": v0, "collision_mean_free_path_m": mfp_coll,
             "wall_capture_probability_per_hit": p_wall_true,
@@ -177,6 +183,9 @@ def preflight(cfg: dict, chamber: dict) -> dict:
             W.append(f"[{m.name}] photophoresis from the illumination ({budget['photophoresis'] / G0:.1e} g) is "
                      "comparable to the residual gravity -- absorbing (carbon) grains drift away from the light. "
                      "Use pulsed/short illumination synced to the camera or lower intensity.")
+        if env.P > 0 and Kn < 10 and (env.grad_T.any() or env.light_I > 0):
+            W.append(f"[{m.name}] Knudsen number {Kn:.2g} < 10: the thermophoresis and photophoresis formulas are "
+                     "free-molecular limits (Kn >> 1) and overestimate these forces at this pressure.")
         if math.isfinite(drift_v) and drift_v > 0.3 * v0:
             W.append(f"[{m.name}] residual acceleration drives a gas-drift of {drift_v:.2g} m/s "
                      "relative to the chamber, comparable to the launch speed.")

@@ -2,6 +2,7 @@
 
     python tools/build_site.py            # copy the package + data into docs/
     python tools/build_site.py --replays  # also rebuild the web replays from results/
+    python tools/build_site.py --figures  # also rebuild docs/figures from results/
 
 The site is static: docs/app runs the Python package in the browser with Pyodide,
 docs/replays holds down-sampled 3D replays of the desktop flight runs.
@@ -48,6 +49,17 @@ def copy_data():
         (DOCS / "data" / "rebound_check.json").write_text(json.dumps(rb, indent=1))
         print("wrote docs/data/rebound_check.json")
     (DOCS / ".nojekyll").write_text("")
+    write_provenance()
+
+
+def write_provenance():
+    """PROVENANCE.md and the Sources tab data, both generated from dolle_sim/provenance.py."""
+    sys.path.insert(0, str(ROOT))
+    from dolle_sim import provenance
+    counts = provenance.line_counts(PKG)
+    (DOCS / "data" / "provenance.json").write_text(json.dumps(provenance.as_dict(counts), indent=1), encoding="utf-8")
+    (ROOT / "PROVENANCE.md").write_text(provenance.as_markdown(counts), encoding="utf-8")
+    print("wrote PROVENANCE.md and docs/data/provenance.json")
 
 
 def _decimate_viewer(src: Path, dst: Path, title: str, max_particles=500, frame_step=2, t_max=60.0):
@@ -81,7 +93,7 @@ def _decimate_viewer(src: Path, dst: Path, title: str, max_particles=500, frame_
 
 
 def build_replays():
-    runs = [("rocksat_x_carbon_vs_silica", "mission.html", "Mission run: graphite vs silica (first 60 s)"),
+    runs = [("flight_carbon_vs_silica", "mission.html", "Simulated flight: graphite vs silica (first 60 s)"),
             ("colliding_clouds", "clouds.html", "Colliding clouds: graphite vs silica (60 s)")]
     for run, name, title in runs:
         src = ROOT / "results" / run / "viewer.html"
@@ -91,11 +103,49 @@ def build_replays():
             print(f"skip {name}: {src} not found (run the simulation first)")
 
 
+def build_figures():
+    """README / site figures from the saved results (run the simulations, sweep and rebound-check first)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig_dir = DOCS / "figures"
+    fig_dir.mkdir(exist_ok=True)
+    R = ROOT / "results"
+    for src, dst in [("colliding_clouds/sticking_measurement.png", "sticking_measurement_clouds.png"),
+                     ("flight_carbon_vs_silica/sticking_measurement.png", "sticking_measurement_isotropic.png"),
+                     ("flight_carbon_vs_silica/timeseries.png", "timeseries_isotropic.png"),
+                     ("sweep/sticking_sweep.png", "sticking_sweep.png"),
+                     ("rebound_check/rebound_check_carbon.png", "rebound_check_carbon.png")]:
+        if (R / src).exists():
+            shutil.copy2(R / src, fig_dir / dst)
+            print(f"copied {dst}")
+        else:
+            print(f"skip {dst}: results/{src} not found")
+    if (R / "colliding_clouds" / "carbon" / "trajectory.npz").exists():
+        fig = plt.figure(figsize=(11, 5), constrained_layout=True)
+        for k, (ch, t_show) in enumerate([("carbon", 2.0), ("silica", 5.0)]):
+            d = np.load(R / "colliding_clouds" / ch / "trajectory.npz")
+            t, pos, body = d["t"], d["pos"], d["body"]
+            f = int(np.searchsorted(t, t_show))
+            p = pos[f] * 1e3
+            agg = np.bincount(body[f], minlength=len(body[f]))[body[f]]
+            ax = fig.add_subplot(1, 2, k + 1, projection="3d")
+            ax.scatter(p[:, 0], p[:, 1], p[:, 2], s=2, c=np.where(agg > 1, "#e0703a", "#2a6fdb"), depthshade=False)
+            ax.set(xlim=(0, 60), ylim=(0, 30), zlim=(0, 30), xlabel="x [mm]", ylabel="y [mm]", zlabel="z [mm]",
+                   title=f"{ch}: colliding clouds at t = {t[f]:.1f} s (orange = aggregates)")
+            ax.set_box_aspect((2, 1, 1))
+        fig.savefig(fig_dir / "clouds_snapshot.png", dpi=120)
+        print("wrote clouds_snapshot.png")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--replays", action="store_true")
+    ap.add_argument("--replays", action="store_true", help="rebuild the web replays from results/")
+    ap.add_argument("--figures", action="store_true", help="rebuild docs/figures from results/")
     a = ap.parse_args()
     copy_package()
     copy_data()
     if a.replays:
         build_replays()
+    if a.figures:
+        build_figures()

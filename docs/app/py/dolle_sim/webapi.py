@@ -1,6 +1,8 @@
 """JSON API used by the in-browser app (Pyodide). Every function takes and returns JSON strings.
 
 No plotting dependencies: charts are drawn by the web page.
+
+Provenance: JSON wrapper for the browser app (no physics).
 """
 from __future__ import annotations
 
@@ -41,7 +43,7 @@ def default_config():
         }
     return {
         "name": "browser_run", "seed": 1, "duration_s": 4.0, "dt_s": 0.004, "output_fps": 15,
-        "environment": {"preset": "rocksat_x", "pressure_pa": 1.0, "temperature_k": 293, "gas": "air",
+        "environment": {"preset": "sounding_rocket", "pressure_pa": 1.0, "temperature_k": 293, "gas": "air",
                         "residual_accel_g": [0.0, 0.0, 1e-4], "jitter_rms_g": 5e-5, "jitter_corr_time": 0.05,
                         "spin_rate_hz": 0.0167, "spin_axis": [0, 0, 1], "gravity_gradient": True,
                         "altitude_m": 130000, "local_vertical": [0, 0, 1],
@@ -148,7 +150,7 @@ def sticking(args_json):
     probs = stick_probability_curve(a["mat_a"], a["mat_b"], r, vs, float(a.get("radius_rel_sigma", 0.05)),
                                     float(a.get("gamma_log_sigma", 0.3)), int(a.get("samples", 40)), ov)
     e_curve = [c.resolve(v, m_eff).e_n for v in vs]
-    return _dump({"v_stick_dem": v_th, "v_stick_chokshi": c.v_stick_analytic(m_eff),
+    return _dump({"v_stick_dem": v_th, "v_stick_energy_estimate": c.v_stick_analytic(m_eff),
                   "v_stick_jkr_hysteresis": c.v_stick_elastic(m_eff), "v_yield": c.v_yield(m_eff),
                   "pull_off_force_N": c.p.F_c, "break_energy_J": c.p.E_break, "m_eff_kg": m_eff,
                   "velocities": vs, "stick_probability": probs, "restitution": e_curve})

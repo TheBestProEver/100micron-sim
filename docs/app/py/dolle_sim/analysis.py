@@ -10,19 +10,28 @@ point) with a bootstrap confidence interval -- the number the mission reports.
 Sticking is controlled by the NORMAL impact speed. A camera, however, measures
 projected velocities, so the analysis strategy matters a lot. Three are modelled:
 
-  "2d_relative" : one camera, |projected relative velocity|. Simplest, but
-                  oblique (grazing) impacts stick at high relative speed and
-                  the line-of-sight component is invisible -> biased high and
-                  a very broad transition.
-  "2d_normal"   : one camera, relative velocity projected on the measured
-                  line of centres at contact (both from the images). Removes
-                  most of the impact-parameter smearing.
+  "2d_relative" : one camera, |projected relative velocity|. Oblique impacts
+                  stick at high relative speed (pushing the inferred threshold
+                  up) and the line-of-sight component is invisible (pushing it
+                  down), so the bias depends on the impact geometry (several
+                  times low in the isotropic flight run) and the transition is
+                  broad.
+  "2d_normal"   : one camera, relative velocity projected on the imaged line
+                  of centres. When the line of centres is tilted out of the
+                  image plane this is not the normal speed, so it does NOT
+                  remove the smearing; even without noise it reads low and
+                  broad. Not recommended.
   "stereo_normal": two orthogonal cameras -> 3D relative velocity and 3D line
                   of centres -> the normal speed itself, up to noise.
 
 All fits use free monomer-monomer impacts only: single grains are
 distinguishable from aggregates in the images, and grains resting on a wall are
-visibly stationary. Impacts on aggregates or on wall-bound grains have
+visibly stationary. (Idealisations: impacts are classified from simulation
+truth, i.e. perfectly; the measured velocity is the true centroid velocity at
+contact plus the noise of a k-frame track fit, not a fit to a simulated track;
+field of view and focus are checked at the impact point only; the fit treats
+measured speeds as exact, so velocity noise biases the threshold by a few
+percent, and the bootstrap error bars contain sampling noise only.) Impacts on aggregates or on wall-bound grains have
 different effective masses and thresholds, and impacts within 50 ms of a
 fragmentation are excluded. The camera measures grain-centroid velocities (grain spin is
 invisible at ~5 um centroid precision); the truth uses the contact-point normal speed.
@@ -36,6 +45,10 @@ Camera config (top-level "camera": {...}, overridable per chamber):
     depth_of_field_m   : grains within +-DOF/2 of the focal plane are in focus
     position_noise_m   : centroiding error per frame (~0.3 px)
     track_frames       : frames of free flight needed before and after an impact
+
+Provenance: The camera model and analysis choices are our own (their limits
+are listed in provenance.py). The threshold fit is standard maximum likelihood
+with bootstrap errors (Efron 1979). No REBOUND code.
 """
 from __future__ import annotations
 

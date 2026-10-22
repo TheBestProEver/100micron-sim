@@ -31,10 +31,16 @@ Method (hybrid event-driven / DEM):
   from the flux-weighted distribution, so the wall motion never lets a grain
   through), and Dominik & Tielens (1997) erosion / shattering of aggregates.
 
+* Spins are stored relative to the chamber. During free flight each body keeps
+  its absolute angular momentum fixed in inertial space, so the spinning chamber
+  sees it precess at -Omega (this is the Coriolis torque on grain rotation).
+
 Known simplifications (see README): grains are spheres; aggregates are rigid
 between impacts (no rolling restructuring); no gas-mediated interaction
-between grains (negligible at Kn >> 1); photophoresis without shadowing;
-Coriolis torque on the internal rotation of aggregates is neglected.
+between grains (negligible at Kn >> 1); photophoresis without shadowing.
+
+Provenance: written for DOLL-E; no REBOUND code is used here. Every method and
+its source is listed in dolle_sim/provenance.py (and PROVENANCE.md).
 """
 from __future__ import annotations
 
@@ -145,8 +151,14 @@ class ChamberSim:
         self.frame_spin: list[np.ndarray] = []
         self.timeseries: list[dict] = []
         self.n_events = {"stick": 0, "bounce": 0, "wall_stick": 0, "wall_bounce": 0,
-                         "erosion": 0, "shatter": 0}
+                         "erosion": 0, "shatter": 0, "friction_energy_guard": 0, "fragmentation_energy_limited": 0,
+                         "midstep_neighbor_rebuild": 0}
+        self.E_bonds_broken = 0.0           # total bond energy paid by fragmentation [J] (energy bookkeeping)
+        self._F_cf = None                   # centrifugal force per grain (excluded from body torques)
+        self._nl_vlim = math.inf            # fastest grain speed the current neighbour list stays valid for
         self._topology_changed = False
+        self.contain_corrections = 0        # safety-net position corrections (should stay ~0; see _contain)
+        self.contain_max_m = 0.0
         self._F_pos = None
         self._F_pair = None
         self.sc = None
@@ -360,14 +372,92 @@ class ChamberSim:
         mm = np.flatnonzero(local[self.body] >= 0)
         self.off[mm] = np.einsum("kij,kj->ki", Q[local[self.body[mm]]], self.offb[mm])
 
+    def _frame_rotation(self, h):
+        """Rotation matrix R(-Omega h): inertially fixed vectors seen from the chamber, which spins at Omega."""
+        Om = self.env.omega
+        W = float(np.linalg.norm(Om))
+        if W == 0:
+            return None
+        k = Om / W
+        K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+        th = -W * h
+        return np.eye(3) + math.sin(th) * K + (1 - math.cos(th)) * (K @ K)
+
     def _drift(self, h, act):
+        """Free flight over h. Spin is stored relative to the chamber (L = I omega_rel); in the spinning
+        chamber frame a torque-free body keeps its *absolute* angular momentum L + I Omega fixed in inertial
+        space, which the chamber sees rotating at -Omega."""
         if h <= 0:
             return
         self.X[act] += self.V[act] * h
+        Om = self.env.omega
+        Rf = self._frame_rotation(h)
         multi = act[self.nmono[act] > 1]
+        single = act[self.nmono[act] == 1]
+        if Rf is not None and len(single):
+            I0 = self.Iiso[single][:, None]
+            La = self.L[single] + I0 * Om[None, :]
+            self.L[single] = La @ Rf.T - I0 * Om[None, :]
         if len(multi):
+            if Rf is not None:
+                Iw = self.Q[multi] @ (self.Ip[multi][:, :, None] * np.transpose(self.Q[multi], (0, 2, 1)))
+                self.L[multi] += Iw @ Om
             self._rotate(multi, h)
+            if Rf is not None:
+                self.Q[multi] = Rf[None] @ self.Q[multi]
+                self.L[multi] = self.L[multi] @ Rf.T
+                Q, Ip = self.Q[multi], self.Ip[multi]
+                self.Iinv[multi] = Q @ (np.eye(3)[None] / Ip[:, None, :]) @ np.transpose(Q, (0, 2, 1))
+                Iw = Q @ (Ip[:, :, None] * np.transpose(Q, (0, 2, 1)))
+                self.L[multi] -= Iw @ Om
+                local = np.full(self.N, -1)
+                local[multi] = np.arange(len(multi))
+                mm = np.flatnonzero(local[self.body] >= 0)
+                self.off[mm] = np.einsum("kij,kj->ki", Q[local[self.body[mm]]], self.offb[mm])
         self.pos = self.X[self.body] + self.off
+
+    def _rotation_window(self, vm, horizon):
+        """Longest drift (<= horizon) over which collision prediction may move every grain in a straight line.
+
+        Members of a spinning aggregate move on arcs, which the straight-line prediction follows only for
+        small rotation angles (<= 0.05 rad: path error < 0.1% of the aggregate size). That matters only if
+        the aggregate can touch something during the drift. A member moves at most (|V_b| + w_b r) h and a
+        partner at most v_lim h, so if every gap to a neighbour or wall is larger than they can close in h,
+        no contact is possible on either the true or the predicted path. Sets self._win_vlim, the partner
+        speed assumed here: a collision that speeds a grain up beyond it forces a re-prediction."""
+        self._win_vlim = None
+        multi = np.flatnonzero(self.alive & ~self.frozen & (self.nmono > 1))
+        if not len(multi) or horizon <= 0:
+            return horizon
+        Om = float(np.linalg.norm(self.env.omega))
+        Ip = self.Ip[multi]
+        # torque-free bound on the spin relative to the chamber: |w_abs| <= |L_abs| / I_min, w_rel = w_abs - Omega
+        w = (np.linalg.norm(self.L[multi], axis=1) + Ip.max(1) * Om) / Ip.min(1) + Om
+        fast = w * horizon > 0.05
+        if not fast.any():
+            return horizon
+        w_b = np.zeros(len(self.alive))
+        w_b[multi[fast]] = w[fast]
+        m = np.flatnonzero(w_b[self.body] > 0)                 # members of fast-spinning aggregates
+        s_m = np.linalg.norm(self.V[self.body[m]], axis=1) + w_b[self.body[m]] * np.linalg.norm(self.off[m], axis=1)
+        v_lim = max(self._speed_bound(vm), float(s_m.max()))
+        gap = np.full(self.N, np.inf)
+        if len(self.nlist):
+            infast = w_b[self.body] > 0
+            i, j = self.nlist[:, 0], self.nlist[:, 1]
+            sel = (infast[i] | infast[j]) & (self.body[i] != self.body[j])
+            if sel.any():
+                i, j = i[sel], j[sel]
+                d = np.linalg.norm(self.pos[i] - self.pos[j], axis=1) - self.rad[i] - self.rad[j]
+                np.minimum.at(gap, i, d)
+                np.minimum.at(gap, j, d)
+        p, r = self.pos[m], self.rad[m][:, None]
+        g_wall = np.minimum(p - r, self.size[None, :] - p - r).min(1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            h = np.minimum(np.maximum(gap[m], 0) / (s_m + v_lim), np.maximum(g_wall, 0) / s_m)
+        h = np.maximum(np.nan_to_num(h, nan=np.inf), 0.05 / w_b[self.body[m]])
+        self._win_vlim = v_lim
+        return min(horizon, float(h.min()))
 
     def _K_body(self, b, r):
         """3x3 collision (inverse effective mass) matrix of body b at lever arm r."""
@@ -398,12 +488,17 @@ class ChamberSim:
             P = np.linalg.lstsq(K, vrel - target, rcond=None)[0]
         Pn = float(P @ n)
         Pt = P - Pn * n
-        if np.linalg.norm(Pt) <= self.mu_f * Pn or float(np.linalg.norm(vt)) < 1e-15:
-            return P
-        tv = vt / np.linalg.norm(vt)
-        d = n + self.mu_f * tv
-        Pn = (1 + e_n) * vn / float(n @ K @ d)
-        return Pn * d
+        if not (np.linalg.norm(Pt) <= self.mu_f * Pn or float(np.linalg.norm(vt)) < 1e-15):
+            tv = vt / np.linalg.norm(vt)
+            d = n + self.mu_f * tv
+            P = (1 + e_n) * vn / float(n @ K @ d) * d
+        # Rigid-body friction laws can gain energy in eccentric impacts (Kane's paradox). The change in
+        # kinetic energy of an impulse P is -P.vrel + 1/2 P.K.P; if positive, fall back to the frictionless
+        # normal impulse, which always dissipates: dKE = -(1 - e_n) vn Pn / 2 <= 0.
+        if float(-P @ vrel + 0.5 * P @ K @ P) > 0:
+            P = (1 + e_n) * vn / float(n @ K @ n) * n
+            self.n_events["friction_energy_guard"] += 1
+        return P
 
     # ------------------------------------------------------------ walls
     def _wall_speed(self, ax):
@@ -454,9 +549,11 @@ class ChamberSim:
         m = self.mass[:, None]
         F = self.F_static.copy()
         Om = self.env.omega
+        self._F_cf = None
         if Om.any():
             r_ax = self.pos + self.axis_offset
-            F -= m * _crossN(Om[None, :], _crossN(Om[None, :], r_ax))          # centrifugal
+            self._F_cf = -m * _crossN(Om[None, :], _crossN(Om[None, :], r_ax))  # centrifugal
+            F += self._F_cf
         if self.env.gravity_gradient:
             F += m * self.env.tidal_accel(self.pos + self.cg_offset, self.t)
         charged = self.q.any()
@@ -477,7 +574,10 @@ class ChamberSim:
                 # images of a grounded chamber is already in the space-charge mesh)
                 wc = self.wall_cand
                 if len(wc):
-                    beta = self.wall_mat.image_factor
+                    # with the space-charge mesh the walls are grounded conductors (Dirichlet phi = 0), so use
+                    # the conductor image factor 1 for the short-range part too (consistent split); without the
+                    # mesh, a dielectric wall's image factor (eps-1)/(eps+1)
+                    beta = 1.0 if self.sc is not None else self.wall_mat.image_factor
                     p = self.pos[wc]
                     h_lo = np.maximum(p, self.rad[wc][:, None])
                     h_hi = np.maximum(self.size[None, :] - p, self.rad[wc][:, None])
@@ -526,10 +626,20 @@ class ChamberSim:
         return F
 
     # ------------------------------------------------------------ neighbour lists
-    def _build_neighbors(self):
-        c_cut = 2 * self.rad.max() + self.skin
+    def _speed_bound(self, vm):
+        """Upper bound on any grain speed during the next step: current maximum plus the most a vibrating
+        wall can add in one bounce ((1 + e) A omega <= 2 A omega)."""
+        vmax = float(np.linalg.norm(vm, axis=1).max()) if len(vm) else 0.0
+        return vmax + 2 * self.vib_A * self.vib_w
+
+    def _build_neighbors(self, vm=None):
+        # the skin is widened when grains are fast, so no pair can close the gap before the next check
+        if vm is None:
+            vm = self._mono_vel()
+        self.skin_eff = max(self.skin, 3.0 * self._speed_bound(vm) * self.dt)
+        c_cut = 2 * self.rad.max() + self.skin_eff
         lr = self._long_range()
-        cut = max(c_cut, self.coulomb_cut + self.skin if lr else 0)
+        cut = max(c_cut, self.coulomb_cut + self.skin_eff if lr else 0)
         pairs = cKDTree(self.pos).query_pairs(cut, output_type="ndarray")
         if len(pairs):
             d = np.linalg.norm(self.pos[pairs[:, 0]] - self.pos[pairs[:, 1]], axis=1)
@@ -538,16 +648,18 @@ class ChamberSim:
         else:
             self.nlist = self.lrlist = pairs
         self.pos_at_build = self.pos.copy()
+        self._nl_vlim = 0.5 * self.skin_eff / self.dt     # no grain may move more than half the skin per step
         self._F_pair = None
         # grains close enough to a wall to possibly reach it before the next rebuild
         gap = np.minimum(self.pos, self.size[None, :] - self.pos).min(1) - self.rad
-        self.wall_cand = np.flatnonzero(gap < self.skin)
+        self.wall_cand = np.flatnonzero(gap < self.skin_eff)
 
     def _needs_rebuild(self, vm):
-        # no pair can close the gap 'skin' before the next check: 2 (max displacement + v_max dt) < skin
+        # no pair can close the skin gap before the next check: 2 (max displacement + v_bound dt) < skin.
+        # _nl_vlim: the speed up to which the list stays valid over the next step (checked after every bounce)
         disp = np.linalg.norm(self.pos - self.pos_at_build, axis=1).max()
-        vmax = np.linalg.norm(vm, axis=1).max() if len(vm) else 0.0
-        return 2 * (disp + vmax * self.dt) > self.skin
+        self._nl_vlim = (0.5 * self.skin_eff - disp) / self.dt
+        return 2 * (disp + self._speed_bound(vm) * self.dt) > self.skin_eff
 
     # ------------------------------------------------------------ events
     def _events(self, vm, remaining, excl, wexcl, subset=None):
@@ -650,7 +762,8 @@ class ChamberSim:
                    spin_j_hz=float(np.linalg.norm(wB)) / (2 * math.pi) if not fzB else 0.0,
                    vrel_x=vrel[0], vrel_y=vrel[1], vrel_z=vrel[2],
                    vcm_x=vcm[0], vcm_y=vcm[1], vcm_z=vcm[2], n_x=n[0], n_y=n[1], n_z=n[2],
-                   x=cpt[0], y=cpt[1], z=cpt[2], r_sum=self.rad[i] + self.rad[j], E_coll=E_coll, fragments=0)
+                   x=cpt[0], y=cpt[1], z=cpt[2], r_sum=self.rad[i] + self.rad[j], E_coll=E_coll, E_diss=0.0,
+                   fragments=0)
         self.collisions.append(rec)
         if res.stuck:
             self.n_events["stick"] += 1
@@ -660,8 +773,10 @@ class ChamberSim:
             P = self._impulse(K, vrel, n, res.e_n)
             self._apply_impulse(A, rA, -P)
             self._apply_impulse(B, rB, P)
+            # kinetic energy the impulse removed (exact for rigid bodies: dKE = -P.vrel + P.K.P/2)
+            rec["E_diss"] = E_diss = float(P @ vrel - 0.5 * P @ K @ P)
             if self.fragmentation and (nA > 1 or nB > 1):
-                rec["fragments"] = self._fragment([(A, i), (B, j)], E_coll, res.e_n, t_now)
+                rec["fragments"] = self._fragment([(A, i), (B, j)], E_coll, E_diss, t_now)
         return True
 
     def _resolve_wall(self, m, ax, side, t_now):
@@ -702,7 +817,7 @@ class ChamberSim:
                    spin_i_hz=float(np.linalg.norm(wA)) / (2 * math.pi), spin_j_hz=0.0,
                    vrel_x=vrel[0], vrel_y=vrel[1], vrel_z=vrel[2],
                    vcm_x=dV[0], vcm_y=dV[1], vcm_z=dV[2], n_x=n[0], n_y=n[1], n_z=n[2],
-                   x=cpt[0], y=cpt[1], z=cpt[2], r_sum=self.rad[m], E_coll=E_coll, fragments=0)
+                   x=cpt[0], y=cpt[1], z=cpt[2], r_sum=self.rad[m], E_coll=E_coll, E_diss=0.0, fragments=0)
         self.collisions.append(rec)
         if stuck:
             self.n_events["wall_stick"] += 1
@@ -714,8 +829,10 @@ class ChamberSim:
             self.n_events["wall_bounce"] += 1
             P = self._impulse(K, vrel, n, e_n)
             self._apply_impulse(A, rA, -P)
+            # kinetic energy removed, in the wall's frame (the wall is infinitely massive)
+            rec["E_diss"] = E_diss = float(P @ vrel - 0.5 * P @ K @ P)
             if self.fragmentation and self.nmono[A] > 1:
-                rec["fragments"] = self._fragment([(A, m)], E_coll, e_n, t_now)
+                rec["fragments"] = self._fragment([(A, m)], E_coll, E_diss, t_now)
         return True
 
     # ------------------------------------------------------------ fragmentation
@@ -725,38 +842,69 @@ class ChamberSim:
         d = np.linalg.norm(self.pos[mem] - self.pos[k], axis=1)
         return self._contact(k, mem[int(np.argmin(d))]).p.E_break
 
-    def _fragment(self, hits, E_coll, e_n, t_now):
-        """Dominik & Tielens (1997): erosion above ~3 N_c E_break, shattering above ~10 N_c E_break."""
+    def _contacts_of(self, mem, k=None):
+        """Number of touching grain pairs among mem (or only those involving grain k)."""
+        mem = list(mem)
+        n = 0
+        for a_i, a in enumerate(mem):
+            for b in mem[a_i + 1:]:
+                if k is not None and k not in (a, b):
+                    continue
+                if np.linalg.norm(self.pos[a] - self.pos[b]) < (self.rad[a] + self.rad[b]) * (1 + 1e-6):
+                    n += 1
+        return n
+
+    def _fragment(self, hits, E_coll, E_diss, t_now):
+        """Dominik & Tielens (1997) thresholds: erosion above ~3 N_c E_break, shattering above ~10 N_c E_break,
+        with E_coll the translational relative kinetic energy of the two bodies.
+
+        Energy budget (rigid bodies): the only energy available is E_diss, the kinetic energy the bounce
+        actually removed. Every broken contact costs E_break; if E_diss cannot pay for a shatter, the impact
+        erodes the struck grain instead, and if it cannot pay for that either, nothing breaks. Fragments
+        separate with what is left, so kinetic + bond energy never increases."""
         agg = [(b, k) for b, k in hits if self.nmono[b] > 1 and not self.frozen[b]]
         if not agg:
             return 0
         N_c = sum(int(self.nmono[b]) - 1 for b, _ in agg)
         E_b = float(np.mean([self._bond_energy(b, k) for b, k in agg]))
+        options = []
         if E_coll > 10 * N_c * E_b:
-            mode, self_detach = "shatter", {b: [x for x in self.members[b]][1:] for b, _ in agg}
-        elif E_coll > 3 * N_c * E_b:
-            mode, self_detach = "erosion", {b: [k] for b, k in agg}
-        else:
+            options.append(("shatter", {b: [[x] for x in self.members[b]][1:] for b, _ in agg},
+                            sum(self._contacts_of(self.members[b]) for b, _ in agg)))
+        if E_coll > 3 * N_c * E_b:
+            options.append(("erosion", {b: [[k]] for b, k in agg},
+                            sum(self._contacts_of(self.members[b], k) for b, k in agg)))
+        if not options:
             return 0
-        n_broken = sum(len(v) for v in self_detach.values())
-        # energy above the bond-breaking cost; the elastic fraction e_n^2 becomes separation motion
-        E_sep = max(E_coll - n_broken * E_b, 0.0) * e_n ** 2
+        for mode, detach, n_contacts in options:
+            cost = n_contacts * E_b
+            if E_diss >= cost:
+                break
+        else:
+            self.n_events["fragmentation_energy_limited"] += 1
+            return 0
+        if mode != options[0][0]:
+            self.n_events["fragmentation_energy_limited"] += 1
+        self.E_bonds_broken += cost
+        E_sep = E_diss - cost
         out = 0
-        for b, ks in self_detach.items():
+        for b, groups in detach.items():
             members_before = list(self.members[b])
             X0 = self.X[b].copy()
-            new = self._split(b, ks)
-            out += len(ks)
+            new = self._detach(b, groups)
+            new += self._split_disconnected(b)
+            out += sum(len(g) for g in groups)
             self.last_split[members_before] = t_now
-            parts = [b] + new
-            self._separate(parts, X0, E_sep / len(self_detach))
+            self._separate([b] + new, X0, E_sep / len(detach))
         self.n_events[mode] += 1
         self._topology_changed = True
         return out
 
     def _separate(self, parts, X0, E_sep):
-        """Give fragments radial separation velocities from the old COM, conserving momentum and
-        angular momentum (radial kicks about the COM carry no angular momentum)."""
+        """Give fragments radial separation velocities s*u from the old COM that raise their kinetic energy by
+        exactly E_sep, conserving momentum (sum m u = 0) and angular momentum (radial kicks about the COM carry
+        none). The fragments already move (and a spinning parent gives them different velocities), so
+        dKE = s B + s^2 A with A = sum m u^2 / 2, B = sum m V.u; s is the positive root of A s^2 + B s = E_sep."""
         if E_sep <= 0 or len(parts) < 2:
             return
         m = self.M[parts]
@@ -765,51 +913,101 @@ class ChamberSim:
         nrm[nrm == 0] = 1.0
         u = u / nrm[:, None]
         u -= (m[:, None] * u).sum(0) / m.sum()
-        ke = 0.5 * float((m * (u * u).sum(1)).sum())
-        if ke <= 0:
+        A = 0.5 * float((m * (u * u).sum(1)).sum())
+        if A <= 0:
             return
-        s = math.sqrt(E_sep / ke)
+        B = float((m * (self.V[parts] * u).sum(1)).sum())
+        s = (-B + math.sqrt(B * B + 4 * A * E_sep)) / (2 * A)
         self.V[parts] += s * u
 
-    def _split(self, b, ks):
-        """Detach grains ks from body b as single grains; momentum and angular momentum are conserved.
-        Returns the new body ids."""
+    def _inertia(self, mem, X):
+        I = np.zeros((3, 3))
+        for k in mem:
+            r = self.pos[k] - X
+            I += (self.I0[k] + self.mass[k] * (r @ r)) * np.eye(3) - self.mass[k] * np.outer(r, r)
+        return I
+
+    def _components(self, mem):
+        """Groups of mutually touching grains (an aggregate is held together only by contacts)."""
+        mem = list(mem)
+        left, comps = set(mem), []
+        while left:
+            stack = [left.pop()]
+            comp = list(stack)
+            while stack:
+                k = stack.pop()
+                for j in list(left):
+                    if np.linalg.norm(self.pos[j] - self.pos[k]) < (self.rad[j] + self.rad[k]) * (1 + 1e-6):
+                        left.remove(j)
+                        stack.append(j)
+                        comp.append(j)
+            comps.append(comp)
+        return comps
+
+    def _split_disconnected(self, b):
+        """After grains were removed, any part of body b no longer in contact becomes its own body."""
+        if self.nmono[b] < 2:
+            return []
+        comps = self._components(self.members[b])
+        if len(comps) < 2:
+            return []
+        comps.sort(key=len, reverse=True)
+        return self._detach(b, comps[1:])
+
+    def _detach(self, b, groups):
+        """Detach each group of member grains of body b as its own rigid body (moving with b's rigid-body
+        motion at that instant). Linear and angular momentum are conserved. Returns the new body ids."""
         w = self._w(b)
         P = self.M[b] * self.V[b]
         Lo = self.L[b] + self.M[b] * _cross3(self.X[b], self.V[b])
-        free = list(np.flatnonzero(~self.alive)[:len(ks)])
-        for k, nb in zip(ks, free):
-            I0 = self.I0[k]
-            v = self.V[b] + _cross3(w, self.off[k])
-            P = P - self.mass[k] * v
-            Lo = Lo - (I0 * w + self.mass[k] * _cross3(self.pos[k], v))
-            self.alive[nb], self.frozen[nb], self.nmono[nb] = True, False, 1
+        free = list(np.flatnonzero(~self.alive)[:len(groups)])
+        new = []
+        for g, nb in zip(groups, free):
+            g = [int(k) for k in g]
+            mg = self.mass[g]
+            Mg = float(mg.sum())
+            vg = self.V[b][None, :] + _crossN(w[None, :], self.off[g])
+            Xg = (mg[:, None] * self.pos[g]).sum(0) / Mg
+            Vg = (mg[:, None] * vg).sum(0) / Mg
+            Lg = np.zeros(3)
+            for i, k in enumerate(g):
+                Lg += self.I0[k] * w + self.mass[k] * _cross3(self.pos[k] - Xg, vg[i] - Vg)
+            P = P - Mg * Vg
+            Lo = Lo - (Lg + Mg * _cross3(Xg, Vg))
+            for k in g:
+                self.members[b].remove(k)
+                self.body[k] = nb
+            self.members[nb] = g
+            self.alive[nb], self.frozen[nb], self.nmono[nb] = True, False, len(g)
             self.fw_ax[nb] = -1
-            self.members[nb] = [k]
-            self.members[b].remove(k)
-            self.body[k] = nb
-            self.X[nb], self.V[nb], self.M[nb] = self.pos[k], v, self.mass[k]
-            self.L[nb] = I0 * w
-            self.Iinv[nb] = np.eye(3) / I0
-            self.Q[nb], self.Ip[nb] = np.eye(3), I0
-            self.Iiso[nb], self.brot[nb], self.bdrag[nb] = I0, self.rotc[k], self.dragc[k]
-            self.off[k] = 0.0
-            self.offb[k] = 0.0
+            self.X[nb], self.V[nb], self.M[nb], self.L[nb] = Xg, Vg, Mg, Lg
+            self.off[g] = self.pos[g] - Xg
+            if len(g) == 1:
+                k = g[0]
+                self.Iinv[nb] = np.eye(3) / self.I0[k]
+                self.Q[nb], self.Ip[nb], self.Iiso[nb] = np.eye(3), self.I0[k], self.I0[k]
+                self.offb[k] = 0.0
+            else:
+                self._set_principal(nb, self._inertia(g, Xg))
+            self.bdrag[nb] = self.dragc[g].sum()
+            self.brot[nb] = self._rot_drag(g)
+            new.append(int(nb))
         mem = self.members[b]
         M = self.mass[mem].sum()
         X = (self.mass[mem, None] * self.pos[mem]).sum(0) / M
         self.M[b], self.X[b], self.V[b] = M, X, P / M
         self.L[b] = Lo - M * _cross3(X, P / M)
         self.off[mem] = self.pos[mem] - X
-        I = np.zeros((3, 3))
-        for k in mem:
-            r = self.off[k]
-            I += (self.I0[k] + self.mass[k] * (r @ r)) * np.eye(3) - self.mass[k] * np.outer(r, r)
         self.nmono[b] = len(mem)
-        self._set_principal(b, I)
+        self._set_principal(b, self._inertia(mem, X))
         self.bdrag[b] = self.dragc[mem].sum()
         self.brot[b] = self._rot_drag(mem)
-        return free[:len(ks)]
+        return new
+
+    def _split(self, b, ks):
+        """Detach grains ks from body b as single grains (then split off anything left disconnected)."""
+        new = self._detach(b, [[k] for k in ks])
+        return new + self._split_disconnected(b)
 
     def _rot_drag(self, mem):
         # gas torque coefficient: own spin drag + translational drag at the lever arm, averaged over
@@ -911,7 +1109,9 @@ class ChamberSim:
         self.V[act] = vp[:, None] * e + z.real[:, None] * e1 + z.imag[:, None] * e2
         Tb = None
         if (self.nmono[act] > 1).any():
-            T = _crossN(self.off, F)
+            # torques from real forces only: the centrifugal (and Coriolis) torque of the spinning frame is
+            # already in _drift, which keeps each body's absolute angular momentum fixed in inertial space
+            T = _crossN(self.off, F if self._F_cf is None else F - self._F_cf)
             Tb = np.empty((self.N, 3))
             for k in range(3):
                 Tb[:, k] = np.bincount(self.body, T[:, k], self.N)
@@ -937,7 +1137,10 @@ class ChamberSim:
         hi = self.pos + self.rad[:, None] - self.size[None, :]
         pen = np.where(lo > 0, lo, 0.0) - np.where(hi > 0, hi, 0.0)
         pen[~act[self.body]] = 0.0
-        if np.abs(pen).max(initial=0.0) > 0:
+        worst = float(np.abs(pen).max(initial=0.0))
+        if worst > 0:
+            self.contain_corrections += 1
+            self.contain_max_m = max(self.contain_max_m, worst)
             shift = np.zeros((self.N, 3))
             for k in range(3):
                 # largest required push per body along each axis
@@ -962,11 +1165,16 @@ class ChamberSim:
         excl = np.zeros(len(self.nlist), bool)
         wexcl = np.zeros((self.N, 3), bool)
         for _ in range(100000):
-            vm = self._mono_vel()
-            evs = self._events(vm, remaining, excl, wexcl)
-            if not evs:
-                self._drift(remaining, act)
+            if remaining <= 1e-15:
                 break
+            vm = self._mono_vel()
+            win = self._rotation_window(vm, remaining)
+            evs = self._events(vm, win, excl, wexcl)
+            if not evs:
+                self._drift(win, act)
+                remaining -= win
+                act = np.flatnonzero(self.alive & ~self.frozen)
+                continue
             elapsed = 0.0
             touched = set()
             for kev, (t_ev, ev) in enumerate(evs):
@@ -981,12 +1189,22 @@ class ChamberSim:
                 elapsed = t_ev
                 t_now = t + dt - remaining + elapsed
                 if ev[0] == "pp":
-                    if not self._resolve_pp(ev[1], t_now):
-                        excl[ev[1]] = True      # grazing contact (contact point already separating)
-                elif not self._resolve_wall(ev[1], ev[2], ev[3], t_now):
-                    wexcl[ev[1], ev[2]] = True  # grazing contact with this wall
+                    hit = self._resolve_pp(ev[1], t_now)
+                    if not hit:
+                        excl[ev[1]] = True      # touching but not approaching: skip this pair for now
+                else:
+                    hit = self._resolve_wall(ev[1], ev[2], ev[3], t_now)
+                    if not hit:
+                        wexcl[ev[1], ev[2]] = True
                 touched.update(int(self.body[g]) for g in ((ev[1],) if ev[0] == "wall" else self.nlist[ev[1]]))
                 touched.update(bodies)
+                if hit:
+                    # bodies whose velocity just changed may now approach partners they were excluded from
+                    changed = np.zeros(self.N, bool)
+                    for b in touched:
+                        changed[self.members[b]] = True
+                    excl &= ~(changed[self.nlist[:, 0]] | changed[self.nlist[:, 1]])
+                    wexcl[changed] = False
                 if self._topology_changed or any(self.nmono[b] > 1 for b in bodies):
                     self._topology_changed = False
                     break   # an aggregate changed: recompute all predictions
@@ -994,18 +1212,31 @@ class ChamberSim:
                 mask = np.zeros(self.N, bool)
                 for b in touched:
                     mask[self.members[b]] = True
-                new = self._events(self._mono_vel(), remaining - elapsed, excl, wexcl, subset=mask)
-                t_next = evs[kev + 1][0] - elapsed if kev + 1 < len(evs) else remaining - elapsed
+                vm_new = self._mono_vel()
+                v_new = float(np.linalg.norm(vm_new[mask], axis=1).max())
+                if v_new + 2 * self.vib_A * self.vib_w > self._nl_vlim:
+                    # a bounce made a grain faster than the neighbour list allows: rebuild it now
+                    self._build_neighbors(vm_new)
+                    excl = np.zeros(len(self.nlist), bool)
+                    wexcl = np.zeros((self.N, 3), bool)
+                    self.n_events["midstep_neighbor_rebuild"] += 1
+                    break
+                if self._win_vlim is not None and v_new > self._win_vlim:
+                    break   # faster than the drift window assumed: recompute the window and all predictions
+                new = self._events(vm_new, win - elapsed, excl, wexcl, subset=mask)
+                t_next = evs[kev + 1][0] - elapsed if kev + 1 < len(evs) else win - elapsed
                 if new and new[0][0] < t_next:
                     break
             remaining -= elapsed
             act = np.flatnonzero(self.alive & ~self.frozen)
+        else:
+            raise RuntimeError(f"event loop did not finish the step at t = {t:.6f} s (100000 events)")
         self._contain()
         # forces at the new positions (velocity Verlet), then the second half kick
         self.t = t + dt
         vm = self._mono_vel()
         if self._needs_rebuild(vm):
-            self._build_neighbors()
+            self._build_neighbors(vm)
         self._F_pos = self._forces_pos(vm)
         self._kick(self._F_pos, a_app, 0.5 * dt, brownian=True)
 

@@ -1,11 +1,14 @@
 """Material database for DOLL-E dust simulations.
 
-All values are SI. Numbers are representative literature values meant as a
-starting point -- surface energy in particular is uncertain by a factor of
-several for real powders (roughness, adsorbed water, contamination), and it is
-exactly the quantity a sticking-velocity experiment constrains. Override any
-value from the run config ("materials": {...}). Values marked "uncertain" in
-the notes should be measured on the actual flight powder if at all possible.
+All values are SI. Numbers are representative values meant as a starting
+point. Only some are taken directly from papers (the silica gamma, E and nu;
+the graphite gamma, E, nu and rho; the water-ice gamma, E and nu; see the notes
+and provenance.py); the rest, including every e_dry, are our estimates. Surface
+energy in particular is uncertain by a factor of several for real powders
+(roughness, adsorbed water, contamination), and it is exactly the quantity a
+sticking-velocity experiment constrains. Override any value from the run
+config ("materials": {...}). Values marked "assumed" or "uncertain" in the
+notes should be measured on the actual flight powder if at all possible.
 
 gamma          : surface energy per surface [J/m^2]  (work of adhesion w = 2*gamma)
 E              : Young's modulus [Pa]
@@ -23,6 +26,10 @@ thermal_conductivity : [W/m/K]; controls photophoresis (poor conductors are
                  pushed hardest by light)
 absorptivity   : fraction of visible light absorbed (photophoresis, radiation
                  pressure); carbon ~0.9, clean silica ~0.05-0.1
+
+Provenance: Only the silica gamma, E and nu and the graphite gamma come from
+the cited papers. Every other value is a representative choice, not a
+measurement (see provenance.py, 'Material properties'). No REBOUND code.
 """
 from __future__ import annotations
 
@@ -68,8 +75,9 @@ MATERIALS: dict[str, Material] = {
         "silica", rho=2000.0, E=54e9, nu=0.17, gamma=0.025, e_dry=0.85,
         work_function=5.0, permittivity=3.8, yield_pressure=3e9,
         thermal_conductivity=1.4, absorptivity=0.05,
-        note="Amorphous SiO2 spheres; gamma=0.025 J/m^2 (Blum & Wurm 2000). "
-             "The most-studied reference case. Yield pressure uncertain."),
+        note="Amorphous SiO2 spheres. gamma=0.025 J/m^2, E and nu are the quartz values used by Chokshi+1993 "
+             "and Dominik & Tielens 1997 (measured in air: ~0.014-0.025). Kimura+2015 argue dry silica in "
+             "vacuum has ~0.15-0.25 J/m^2. rho, e_dry and yield pressure are representative (assumed)."),
     "forsterite": Material(
         "forsterite", rho=3270.0, E=200e9, nu=0.24, gamma=0.025, e_dry=0.85,
         work_function=5.0, permittivity=7.0, yield_pressure=4e9,
@@ -81,12 +89,12 @@ MATERIALS: dict[str, Material] = {
         thermal_conductivity=30.0, absorptivity=0.1,
         note="Al2O3; gamma is poorly constrained for powders (0.03-0.1)."),
     "graphite": Material(
-        "graphite", rho=2200.0, E=10e9, nu=0.20, gamma=0.075, e_dry=0.7,
+        "graphite", rho=2200.0, E=10e9, nu=0.32, gamma=0.075, e_dry=0.7,
         work_function=4.6, permittivity=1e6, yield_pressure=0.3e9,
         thermal_conductivity=100.0, absorptivity=0.9,
-        note="Polycrystalline graphite; gamma=0.075 J/m^2 as in Chokshi+1993. "
-             "Soft: yields plastically at modest speeds. Basal-plane gamma is "
-             "higher (~0.1-0.2); yield pressure uncertain."),
+        note="Graphite: gamma=0.075 J/m^2 (basal plane), E=10 GPa, nu=0.32 and rho=2200 kg/m^3 are the values "
+             "of Chokshi+1993 (Table 3). The cleavage energy of graphite (Wang+2015) implies ~0.19 J/m^2. e_dry "
+             "and yield pressure are representative (assumed)."),
     "amorphous_carbon": Material(
         "amorphous_carbon", rho=1800.0, E=20e9, nu=0.25, gamma=0.05, e_dry=0.7,
         work_function=4.8, permittivity=1000, yield_pressure=1.5e9,
@@ -97,12 +105,13 @@ MATERIALS: dict[str, Material] = {
         "carbon_silica_50_50", rho=2100.0, E=30e9, nu=0.20, gamma=0.045,
         e_dry=0.75, work_function=4.8, permittivity=20, yield_pressure=1.5e9,
         thermal_conductivity=1.5, absorptivity=0.7,
-        note="Placeholder for a mixed carbon/silicate grain (simple averages)."),
+        note="Placeholder for a mixed carbon/silicate grain: rough intermediate values, not derived from "
+             "measurements or a mixing rule. Replace with measured properties."),
     "water_ice": Material(
-        "water_ice", rho=1000.0, E=7e9, nu=0.25, gamma=0.19, e_dry=0.8,
+        "water_ice", rho=917.0, E=7e9, nu=0.25, gamma=0.19, e_dry=0.8,
         work_function=6.0, permittivity=3.2, yield_pressure=0.1e9,
         thermal_conductivity=2.2, absorptivity=0.02,
-        note="Reference only (outer-disk ices)."),
+        note="Reference only (outer-disk ices). gamma from Gundlach+2011; E, nu from Chokshi+1993."),
     # ---------------------------------------------------------------- walls
     "aluminum_6061": Material(
         "aluminum_6061", rho=2700.0, E=69e9, nu=0.33, gamma=0.05, e_dry=0.6,
@@ -134,6 +143,14 @@ MATERIALS: dict[str, Material] = {
 }
 
 
+def _clean_override(d: dict) -> dict:
+    """Config overrides: a null yield pressure (how JSON stores infinity) means 'never yields'."""
+    d = {k: v for k, v in d.items() if k != "name"}
+    if "yield_pressure" in d and d["yield_pressure"] is None:
+        d["yield_pressure"] = math.inf
+    return d
+
+
 def get_material(name: str, overrides: dict | None = None) -> Material:
     """Return a material, applying config overrides (dict of field -> value)."""
     overrides = overrides or {}
@@ -142,9 +159,9 @@ def get_material(name: str, overrides: dict | None = None) -> Material:
     else:
         if name not in overrides:
             raise KeyError(f"Unknown material '{name}'. Known: {sorted(MATERIALS)}")
-        return Material(name=name, **{k: v for k, v in overrides[name].items() if k != "name"})
+        return Material(name=name, **_clean_override(overrides[name]))
     if name in overrides:
-        base = replace(base, **overrides[name])
+        base = replace(base, **_clean_override(overrides[name]))
     return base
 
 

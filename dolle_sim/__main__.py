@@ -1,12 +1,16 @@
 """DOLL-E dust collision simulator -- command line interface.
 
-    python -m dolle_sim run configs/rocksat_x_carbon_vs_silica.json
-    python -m dolle_sim preflight configs/rocksat_x_carbon_vs_silica.json
+    python -m dolle_sim run configs/flight_carbon_vs_silica.json
+    python -m dolle_sim preflight configs/flight_carbon_vs_silica.json
     python -m dolle_sim sweep --pairs graphite:graphite silica:silica --radius 50e-6
     python -m dolle_sim invert --material graphite --radius 50e-6 --vstick 0.08
     python -m dolle_sim materials
-    python -m dolle_sim analyze results/rocksat_x_carbon_vs_silica
-    python -m dolle_sim rebound-check configs/rocksat_x_carbon_vs_silica.json --duration 10
+    python -m dolle_sim analyze results/flight_carbon_vs_silica
+    python -m dolle_sim rebound-check configs/flight_carbon_vs_silica.json --duration 60 --max-grains 600
+    python -m dolle_sim verify
+    python -m dolle_sim sources        # where every part of the physics comes from
+
+Provenance: Command-line wrapper only (no physics).
 """
 from __future__ import annotations
 
@@ -37,7 +41,7 @@ def _print_preflight(pf):
         print(f"  [{g['material']}] N={g['count']} d={2e6 * g['radius_m']:.0f} um  Kn={g['knudsen_number']:.3g}  "
               f"t_stop={g['stopping_time_s']:.3g} s")
         print(f"      v_stick grain-grain: DEM {g['v_stick_pp_DEM_m_s'] * 1e3:.2f} mm/s "
-              f"(Chokshi+93 {g['v_stick_pp_Chokshi_m_s'] * 1e3:.2f} mm/s), grain-wall {g['v_stick_wall_DEM_m_s'] * 1e3:.2f} mm/s")
+              f"(energy estimate {g['v_stick_pp_energy_estimate_m_s'] * 1e3:.2f} mm/s), grain-wall {g['v_stick_wall_DEM_m_s'] * 1e3:.2f} mm/s")
         print(f"      launch {g['launch_speed_m_s'] * 1e3:.2f} mm/s, crossing time {g['chamber_crossing_time_s']:.2f} s, "
               f"~{g['expected_pp_collisions_total']:.0f} grain-grain collisions expected")
         print(f"      spin-down time {g['spin_down_time_s']:.3g} s, rms charge {g['rms_charge_e']:.3g} e, "
@@ -194,9 +198,9 @@ def cmd_rebound_check(a):
               f"{b['max_position_difference_m'] * 1e6:.3f} um after {b['t_s']:g} s")
         print(f"  {'':32s} {'DOLL-E':>12s} {'REBOUND':>12s}")
         for k in ("grain_grain_impacts", "grain_grain_sticks", "free_monomer_impacts",
-                  "free_monomer_stick_fraction", "median_impact_speed_m_s", "wall_impacts", "wall_sticks",
-                  "run_time_s"):
-            x, y = r["dolle_engine"][k], r["rebound_engine"][k]
+                  "free_monomer_stick_fraction", "median_impact_speed_m_s", "free_monomer_median_speed_m_s",
+                  "wall_impacts", "wall_sticks", "run_time_s"):
+            x, y = r["dolle_engine"].get(k), r["rebound_engine"].get(k)
             f = (lambda z: "-" if z is None else (f"{z:.4g}" if isinstance(z, float) else str(z)))
             print(f"  {k:32s} {f(x):>12s} {f(y):>12s}")
     print(f"Wrote {out.resolve()}")
@@ -224,6 +228,11 @@ def cmd_materials(a):
     for m in MATERIALS.values():
         print(f"{m.name:22s} {m.rho:7.0f} {m.E / 1e9:8.1f} {m.nu:5.2f} {m.gamma:7.3f} {m.e_dry:6.2f} {m.work_function:7.2f}")
         print(f"{'':22s} {m.note}")
+
+
+def cmd_sources(a):
+    from .provenance import as_text, as_markdown
+    print(as_markdown() if a.markdown else as_text())
 
 
 def main(argv=None):
@@ -275,6 +284,9 @@ def main(argv=None):
     v.set_defaults(fn=cmd_verify)
     m = sub.add_parser("materials", help="list the material database")
     m.set_defaults(fn=cmd_materials)
+    so = sub.add_parser("sources", help="where every part of the physics comes from, how it is checked, what is assumed")
+    so.add_argument("--markdown", action="store_true")
+    so.set_defaults(fn=cmd_sources)
     a = p.parse_args(argv)
     return a.fn(a)
 

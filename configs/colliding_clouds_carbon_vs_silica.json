@@ -6,7 +6,7 @@
   "output_fps": 15,
   "_comment": "Two dust clouds launched toward each other (e.g. from two spring/piston dispensers). Relative speeds are set by the launch speeds, so the impact-speed range can straddle the predicted sticking threshold.",
   "environment": {
-    "preset": "rocksat_x",
+    "preset": "sounding_rocket",
     "pressure_pa": 0.5,
     "spin_rate_hz": 0.0167,
     "spin_axis": [
@@ -57,7 +57,7 @@
     "photophoresis": true,
     "radiation_pressure": true,
     "brownian": true,
-    "long_range_update_every": 5
+    "long_range_update_every": 1
   },
   "contact": {
     "wall_sticking": "jkr",

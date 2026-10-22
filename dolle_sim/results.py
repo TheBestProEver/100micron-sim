@@ -1,4 +1,7 @@
-"""Result helpers without plotting dependencies (shared by the CLI and the in-browser app)."""
+"""Result helpers without plotting dependencies (shared by the CLI and the in-browser app).
+
+Provenance: Output formatting only (no physics).
+"""
 from __future__ import annotations
 
 import base64

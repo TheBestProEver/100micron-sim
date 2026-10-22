@@ -1,11 +1,27 @@
-"""Independent cross-check of the DOLL-E engine against REBOUND (pip install rebound).
+"""Optional cross-check of the DOLL-E engine against REBOUND (pip install rebound).
+
+THIS IS THE ONLY FILE THAT USES REBOUND. The simulator itself never imports
+it, and no REBOUND code is copied into DOLL-E. tests/test_provenance.py checks
+that only this file imports REBOUND, that the simulator never imports this
+file, and that the simulator runs with REBOUND unavailable.
 
 REBOUND (Rein & Liu 2012, https://rebound.readthedocs.io) is a widely used,
-well-tested N-body code. Here it provides an *independent* integrator,
-mutual-gravity solver and collision detection ("line" detection) for the same
-chamber, the same initial conditions and the same external forces. Our JKR
-contact model is plugged in as REBOUND's collision resolver; walls are handled
-after every REBOUND step.
+well-tested N-body code. Here it re-runs a simplified version of the same
+chamber, with the same initial conditions and external forces:
+  * Part 1, independent integrator: over the first 0.2 s, REBOUND's IAS15
+    integrator propagates every grain that has no collision, with the same
+    equations of motion (we type the residual acceleration, centrifugal,
+    Coriolis and drag terms into REBOUND; REBOUND computes mutual gravity).
+    This checks our integration, not the equations or the drag law.
+  * Part 2, partly independent: REBOUND's leapfrog, gravity and "line"
+    collision detection, with OUR JKR contact model plugged in as REBOUND's
+    collision resolver, our exact drag + Coriolis velocity step in REBOUND's
+    pre/post-timestep hooks, and walls handled by our code after every REBOUND
+    step. It checks collision detection and bookkeeping, NOT the contact
+    physics, material values, spin, friction, charging, fragmentation, or any
+    force switched off for the comparison (electrostatics, g-jitter, gravity
+    gradient, thermo-/photophoresis, radiation pressure, Brownian motion, wall
+    vibration).
 
 How the physics is split in REBOUND:
   * leapfrog (DKD) for positions with the position-dependent forces
@@ -320,6 +336,8 @@ def _stats(log):
             "free_monomer_stick_fraction": frac,
             "free_monomer_stick_fraction_err": (math.sqrt(frac * (1 - frac) / n_mono) if n_mono else None),
             "median_impact_speed_m_s": float(np.median([c["v_n"] for c in pp])) if pp else None,
+            # single grains only: the two codes treat aggregates differently by design (sphere vs rigid cluster)
+            "free_monomer_median_speed_m_s": float(np.median([c["v_n"] for c in mono])) if mono else None,
             "wall_impacts": sum(c["kind"] == "wall" for c in log),
             "wall_sticks": sum(c["kind"] == "wall" and c["outcome"] == "stick" for c in log)}
 

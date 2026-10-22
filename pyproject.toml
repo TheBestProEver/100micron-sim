@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dolle-sim"
-version = "0.2.0"
-description = "DOLL-E: microgravity dust-collision simulator for 100 um grains on NASA RockSat"
+version = "0.3.0"
+description = "DOLL-E: microgravity dust-collision simulator for 100 um grains on a sounding-rocket flight"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "scipy>=1.10", "matplotlib>=3.7"]

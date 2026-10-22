@@ -15,7 +15,7 @@ energetically bound (stick). Physics included:
   (Johnson, Kendall & Roberts 1971; Chokshi, Tielens & Hollenbach 1993).
 * Viscoelastic damping tuned so a non-adhesive impact has restitution e_dry
   (Tsuji et al. 1992 form, as used in LIGGGHTS/EDEM).
-* Plastic yield (Thornton & Ning 1998): once the mean contact pressure reaches
+* Plastic yield (Thornton & Ning 1998): once the peak (Hertz) contact pressure reaches
   the limiting pressure p_y the loading curve becomes linear,
       F = F_y + pi p_y R (delta - delta_y),
   and unloading is elastic with an enlarged radius of curvature R_p and a
@@ -32,6 +32,11 @@ material (E, nu, gamma, rho), grain size and the effective mass of the bodies
 JKR relations used (a = contact radius, w = work of adhesion):
     delta(a) = a^2/R - sqrt(2 pi w a / E*)
     F(a)     = 4 E* a^3 / (3R) - sqrt(8 pi w E* a^3)        (F > 0 repulsive)
+
+Provenance: Equations from the papers cited above (Johnson, Kendall & Roberts
+1971; Chokshi et al. 1993; Tsuji et al. 1992; Thornton & Ning 1998); the time
+integration of each impact is our own. No REBOUND code. The material values
+fed in (materials.py) are inputs, several of them assumed.
 """
 from __future__ import annotations
 
@@ -112,7 +117,9 @@ class JKRContact:
 
     # -------------------------------------------------------------- estimates
     def v_stick_analytic(self, m_eff: float) -> float:
-        """Chokshi+1993 energy criterion: 1/2 m v^2 = E_break = 1.54 F_c |delta_c|."""
+        """Simple energy estimate: 1/2 m v^2 = E_break = 1.54 F_c |delta_c| (the contact break energy of
+        Chokshi et al. 1993 / Dominik & Tielens 1997). This is NOT the closed-form critical velocity quoted in
+        Chokshi et al. 1993, and it ignores viscoelastic loss; stick/bounce is always decided by resolve()."""
         return math.sqrt(2 * self.p.E_break / m_eff)
 
     def v_stick_elastic(self, m_eff: float) -> float:
@@ -125,9 +132,6 @@ class JKRContact:
             return math.inf
         U = 8.0 / 15.0 * self.p.E_star * math.sqrt(self.p.R_star) * self.delta_y ** 2.5
         return math.sqrt(2 * U / m_eff)
-
-    def hertz_overlap(self, m_eff: float, v: float) -> float:
-        return (15 * m_eff * v ** 2 / (16 * self.p.E_star * math.sqrt(self.p.R_star))) ** 0.4
 
     # ---------------------------------------------------------------- resolve
     def resolve(self, v_in: float, m_eff: float) -> ContactResult:

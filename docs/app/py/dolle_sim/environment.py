@@ -14,7 +14,7 @@ Also modelled (all optional, all in the chamber frame):
 * Gravity gradient (tidal) acceleration of a free-falling payload,
       a_tid = (GM/r^3) [3 (x.e_up) e_up - x],
   x = position relative to the rocket's centre of mass; at most 2 GM/r^3 |x|
-  (~5e-8 g per 10 cm at 130 km).
+  (~3e-8 g per 10 cm at 130 km).
 * Uniform external electric field E [V/m] (e.g. from charged/biased walls).
 * Uniform magnetic field B [T] (Earth's field ~ 25-65 uT) -> Lorentz force q v x B.
   The local vertical and Earth's B field are fixed in inertial space, so in the
@@ -23,15 +23,20 @@ Also modelled (all optional, all in the chamber frame):
 * Temperature gradient across the chamber [K/m] (thermophoresis) and the
   camera/LED illumination [W/m^2] (photophoresis, radiation pressure).
 
-RockSat notes (VERIFY against the current Wallops user guide for your flight):
-* RockSat-X (Terrier-Improved Malemute, ~150-160 km apogee) is despun and has
-  attitude control, so a ~3-4 minute window of low residual acceleration is
-  realistic. Default preset: 1e-4 g quasi-steady + 5e-5 g rms jitter and a
-  slow 0.0167 Hz (1 rpm) roll about the long axis.
-* RockSat-C (Terrier-Orion, ~115 km) is spin-stabilised and generally not
-  despun. A few Hz of spin produces centrifugal accelerations of order 1 g at
-  a few cm from the axis -- this dominates over everything else and must be
-  designed around (mount the chamber on-axis, or fly on RockSat-X).
+Presets (check the numbers against your launch provider's user guide):
+* "sounding_rocket": a despun sounding rocket with attitude control above
+  ~100 km, giving a ~3-4 minute window of low residual acceleration:
+  1e-4 g quasi-steady + 5e-5 g rms jitter and a slow 0.0167 Hz (1 rpm) roll
+  about the long axis.
+* "spinning_rocket": a spin-stabilised rocket that is not despun. A few Hz of
+  spin produces centrifugal accelerations of order 1 g at a few cm from the
+  axis. This dominates over everything else and must be designed around
+  (mount the chamber on-axis, or use a despun flight).
+* "ideal": no residual acceleration; "drop_tower": a ~4.7 s drop.
+
+Provenance: Standard rotating-frame mechanics and aerosol physics (drag:
+Stokes with the Cunningham slip correction, Davies 1945 constants). The preset
+values are representative assumptions, not vehicle data. No REBOUND code.
 """
 from __future__ import annotations
 
@@ -54,10 +59,10 @@ GASES = {
 }
 
 PRESETS = {
-    "rocksat_x": dict(residual_accel_g=[0.0, 0.0, 1e-4], jitter_rms_g=5e-5,
-                      jitter_corr_time=0.05, spin_rate_hz=0.0167, window_s=210.0),
-    "rocksat_c": dict(residual_accel_g=[0.0, 0.0, 1e-4], jitter_rms_g=1e-4,
-                      jitter_corr_time=0.05, spin_rate_hz=4.0, window_s=180.0),
+    "sounding_rocket": dict(residual_accel_g=[0.0, 0.0, 1e-4], jitter_rms_g=5e-5,
+                            jitter_corr_time=0.05, spin_rate_hz=0.0167, window_s=210.0),
+    "spinning_rocket": dict(residual_accel_g=[0.0, 0.0, 1e-4], jitter_rms_g=1e-4,
+                            jitter_corr_time=0.05, spin_rate_hz=4.0, window_s=180.0),
     "ideal": dict(residual_accel_g=[0.0, 0.0, 0.0], jitter_rms_g=0.0,
                   jitter_corr_time=0.05, spin_rate_hz=0.0, window_s=210.0),
     "drop_tower": dict(residual_accel_g=[0.0, 0.0, 1e-5], jitter_rms_g=1e-6,
@@ -67,7 +72,10 @@ PRESETS = {
 
 class Environment:
     def __init__(self, cfg: dict, rng: np.random.Generator):
-        preset = dict(PRESETS.get(cfg.get("preset", "rocksat_x"), {}))
+        name = cfg.get("preset", "sounding_rocket")
+        if name not in PRESETS:
+            raise KeyError(f"unknown environment preset '{name}' (choose from {sorted(PRESETS)})")
+        preset = dict(PRESETS[name])
         preset.update({k: v for k, v in cfg.items() if k != "preset"})
         c = self.cfg = preset
         self.rng = rng
@@ -89,7 +97,8 @@ class Environment:
         # electromagnetic fields (chamber frame)
         self.E_field = np.asarray(c.get("electric_field_v_m", [0.0, 0.0, 0.0]), float)
         self.B_field = np.asarray(c.get("magnetic_field_t", [0.0, 2.0e-5, -4.5e-5]), float)
-        self._jitter = np.zeros(3)
+        # start the coloured noise in its stationary distribution (not at zero)
+        self._jitter = self.jitter_rms * rng.standard_normal(3) if self.jitter_rms > 0 else np.zeros(3)
         self._csv = None
         if c.get("accel_csv"):
             self._load_csv(c["accel_csv"])

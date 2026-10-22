@@ -1,16 +1,16 @@
 // Runs the DOLL-E Python simulator in the browser (Pyodide / WebAssembly), off the main thread.
 const PYODIDE = "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/";
-importScripts(PYODIDE + "pyodide.js");
 
 let pyodide = null;
 let W = null;
 
 async function boot() {
-  postMessage({ type: "status", msg: "Downloading the Python runtime (Pyodide, ~10 MB)…" });
+  postMessage({ type: "status", step: 1 });
+  importScripts(PYODIDE + "pyodide.js");
   pyodide = await loadPyodide({ indexURL: PYODIDE });
-  postMessage({ type: "status", msg: "Loading numpy and scipy…" });
+  postMessage({ type: "status", step: 2 });
   await pyodide.loadPackage(["numpy", "scipy"]);
-  postMessage({ type: "status", msg: "Loading the DOLL-E simulator…" });
+  postMessage({ type: "status", step: 3 });
   const manifest = await (await fetch("py/manifest.json", { cache: "no-cache" })).json();
   pyodide.FS.mkdirTree("/home/pyodide/dolle_sim");
   for (const f of manifest.files) {
@@ -19,6 +19,7 @@ async function boot() {
   }
   pyodide.runPython("import sys; sys.path.insert(0, '/home/pyodide')\nimport dolle_sim.webapi as W");
   W = pyodide.globals.get("W");
+  postMessage({ type: "status", step: 4 });
   postMessage({ type: "ready", version: manifest.version });
 }
 

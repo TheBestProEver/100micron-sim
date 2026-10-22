@@ -1,4 +1,7 @@
-"""Result writers: CSV logs, summary JSON, matplotlib plots and the HTML 3D viewer."""
+"""Result writers: CSV logs, summary JSON, matplotlib plots and the HTML 3D viewer.
+
+Provenance: Output formatting only (no physics).
+"""
 from __future__ import annotations
 
 import base64
@@ -169,7 +172,7 @@ def plot_sweep(curves, velocities, thresholds, path, title):
     for k, (label, rows) in enumerate(thresholds.items()):
         c = COLORS[k % len(COLORS)]
         ax[1].plot(rows[:, 0] * 2e6, rows[:, 1], color=c, lw=2, label=f"{label} (DEM)")
-        ax[1].plot(rows[:, 0] * 2e6, rows[:, 2], color=c, lw=1, ls="--", label=f"{label} (Chokshi+93)")
+        ax[1].plot(rows[:, 0] * 2e6, rows[:, 2], color=c, lw=1, ls="--", label=f"{label} (energy estimate)")
     ax[1].set(xscale="log", yscale="log", xlabel="grain diameter [um]", ylabel="sticking velocity [m/s]",
               title="Sticking threshold vs grain size")
     for a in ax:

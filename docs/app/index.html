@@ -3,87 +3,133 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DOLL-E dust simulator</title>
+<title>DOLL-E · simulator</title>
 <link rel="stylesheet" href="../style.css">
 <style>
-  .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); margin: 18px 0 18px; flex-wrap: wrap; }
-  .tabs a { padding: 9px 14px; color: var(--muted); border-bottom: 2px solid transparent; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 26px 0 22px; flex-wrap: wrap; }
+  .tabs a { padding: 10px 14px; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
   .tabs a.on { color: var(--text); border-color: var(--accent); text-decoration: none; }
-  .pane { display: none; } .pane.on { display: block; }
-  .explain { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
-    border-radius: 8px; padding: 12px 16px; margin: 14px 0; max-width: 860px; }
-  #boot { font-size: 14px; color: var(--muted); margin: 6px 0 0; }
-  #boot.ok { color: var(--good); }
-  .quick { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px 18px; align-items: end; }
-  .quick label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
-  .quick .full { grid-column: 1 / -1; }
-  .runrow { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
-  .btn.big { font-size: 17px; padding: 12px 26px; }
-  fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px 12px; margin: 0; background: var(--panel); }
-  legend { color: var(--muted); font-size: 12.5px; text-transform: uppercase; letter-spacing: .05em; padding: 0 6px; }
-  .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 12px; }
-  .row { display: grid; grid-template-columns: 1fr 130px; gap: 8px; align-items: center; margin: 5px 0; font-size: 14px; }
-  .row.two { grid-template-columns: 1fr 160px 160px; }
-  fieldset.wide { grid-column: 1 / -1; }
-  .row .u { color: var(--muted); font-size: 12px; }
-  input, select, textarea { background: #0c0f14; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
-    padding: 7px 9px; font: inherit; font-size: 14px; width: 100%; }
+  .pane { display: none; } .pane.on { display: block; animation: fade .25s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  /* ---- loading screen */
+  #loader { margin: 30px auto; max-width: 560px; text-align: left; }
+  #loader h2 { margin: 0 0 4px; font-size: 20px; }
+  .spinner { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent);
+    animation: spin .9s linear infinite; margin-bottom: 16px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .steps { list-style: none; padding: 0; margin: 18px 0; }
+  .steps li { display: flex; gap: 12px; align-items: center; padding: 7px 0; color: var(--muted); }
+  .steps li .dot { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line); display: grid; place-items: center;
+    font-size: 12px; font-weight: 700; flex: none; }
+  .steps li.active { color: var(--text); }
+  .steps li.active .dot { border-color: var(--accent); border-top-color: transparent; animation: spin 1s linear infinite; }
+  .steps li.done { color: var(--text); }
+  .steps li.done .dot { background: var(--good); border-color: var(--good); color: #0d1016; }
+  .steps li.done .dot::after { content: "✓"; }
+  .bar { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .5s ease; }
+  #loader.error .spinner { display: none; }
+  #app { display: none; }
+
+  /* ---- forms */
+  .quick { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px 20px; align-items: end; }
+  .quick label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input, select, textarea { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 11px; font: inherit; font-size: 15px; width: 100%; }
   input[type=checkbox] { width: auto; }
   input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
   textarea { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; min-height: 340px; }
+  .runrow { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-top: 22px; }
+  #run-progress { margin-top: 18px; }
+  #runpct { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .status { font-size: 14px; color: var(--muted); }
+
+  /* ---- advanced form */
+  fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px 14px; margin: 0; background: var(--surface); }
+  legend { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding: 0 6px; }
+  .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 12px; }
+  .row { display: grid; grid-template-columns: 1fr 130px; gap: 8px; align-items: center; margin: 5px 0; font-size: 14px; }
+  .row input, .row select { padding: 6px 8px; font-size: 14px; }
+  .row.two { grid-template-columns: 1fr 160px 160px; }
+  fieldset.wide { grid-column: 1 / -1; }
+  .row .u { color: var(--muted); font-size: 12px; }
   .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 4px 12px; font-size: 14px; }
   .checks label { display: flex; gap: 8px; align-items: center; }
-  details { margin: 14px 0; } summary { cursor: pointer; color: var(--accent); font-weight: 600; }
-  details .inner { margin-top: 10px; }
+  details { margin: 18px 0; } summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+  summary:hover { color: var(--text); }
+  details .inner { margin-top: 12px; }
   .mat { overflow-x: auto; } .mat input { width: 84px; padding: 3px 5px; font-size: 13px; }
   .mat td, .mat th { padding: 4px 5px; white-space: nowrap; }
-  .progress { height: 8px; background: var(--panel2); border-radius: 4px; overflow: hidden; margin: 10px 0 4px; }
-  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
-  canvas.chart { width: 100%; height: 340px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-  iframe.viewer { width: 100%; height: 620px; border: 1px solid var(--line); border-radius: 8px; background: #0f1218; }
+
+  /* ---- results */
+  canvas.chart { width: 100%; height: 340px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  iframe.viewer { width: 100%; height: 620px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
   .warnings li { color: var(--warn); margin: 4px 0; }
-  .status { font-size: 14px; color: var(--muted); }
-  .headline { font-size: 30px; font-weight: 700; margin: 4px 0; }
-  .headline small { font-size: 15px; color: var(--muted); font-weight: 400; }
+  .headline { font-size: 32px; font-weight: 800; letter-spacing: -.02em; margin: 2px 0 8px; }
+  .headline small { font-size: 15px; color: var(--muted); font-weight: 500; }
   .answer p { margin: 6px 0; }
+  .src td { font-size: 13.5px; }
+  .tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--surface2); color: var(--muted); }
+  .org { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 0 7px; margin-top: 5px; border-radius: 6px; border: 1px solid; }
+  .org.published { color: var(--good); }
+  .org.standard { color: var(--accent); }
+  .org.derived { color: #c9a7ff; }
+  .org.assumed { color: var(--warn); }
+  .org.rebound { color: var(--muted); }
 </style>
 </head>
 <body>
 <header class="top"><div class="in">
-  <a class="brand" href="../">DOLL-E sim</a>
+  <a class="brand" href="../">DOLL-E</a>
   <nav>
-    <a href="../">Home</a>
     <a class="on" href="./">Simulator</a>
     <a href="#verify">Verify</a>
-    <a href="../replays/mission.html">Flight replay</a>
-    <a href="https://github.com/TheBestProEver/100micron-sim">GitHub</a>
+    <a href="#sources">Sources</a>
+    <a href="../replays/mission.html">Replay</a>
+    <a href="https://github.com/TheBestProEver/100micron-sim">Code</a>
   </nav>
 </div></header>
 <main>
   <h1>Dust-collision simulator</h1>
-  <div class="explain">
-    Simulates tiny dust grains (about the width of a hair) floating in near-zero gravity, like on our NASA RockSat
-    flight, and finds the <b>speed below which they stick together</b> when they collide. Pick the dust, press
-    <b>Run</b>, and watch it in 3D. It all runs in your browser.
-  </div>
-  <div id="boot"><span id="bootmsg">Loading the simulator (about 15 s the first time)…</span></div>
+  <p class="lead">Choose the dust and press Run. Hundreds of grains float, spin and collide in a simulated chamber, and you get
+    the speed below which they stick. It all runs in your browser.</p>
 
+  <!-- ================================================================ LOADING SCREEN -->
+  <div id="loader" class="card">
+    <div class="spinner"></div>
+    <h2 id="load-title">Getting the simulator ready</h2>
+    <p class="muted small" id="load-sub" style="margin:0">The physics engine runs inside your browser, so it has to download first.
+      This takes about 15–30 s the first time and a few seconds afterwards.</p>
+    <ol class="steps" id="load-steps">
+      <li data-step="1"><span class="dot"></span>Download the Python runtime (≈10 MB)</li>
+      <li data-step="2"><span class="dot"></span>Load the maths libraries (numpy, scipy)</li>
+      <li data-step="3"><span class="dot"></span>Load the DOLL-E simulator</li>
+      <li data-step="4"><span class="dot"></span>Warm up</li>
+    </ol>
+    <div class="bar"><div id="load-bar"></div></div>
+    <p class="small muted" id="load-time" style="margin:10px 0 0"></p>
+  </div>
+
+  <div id="app">
   <div class="tabs">
-    <a href="#simulate" data-tab="simulate">Simulator</a>
-    <a href="#sticking" data-tab="sticking">Sticking calculator</a>
-    <a href="#verify" data-tab="verify">Verify the physics</a>
+    <a href="#simulate" data-tab="simulate">Simulate</a>
+    <a href="#sticking" data-tab="sticking">Quick calculator</a>
+    <a href="#verify" data-tab="verify">Verify</a>
+    <a href="#sources" data-tab="sources">Sources</a>
   </div>
 
-  <!-- ================================================================ SIMULATOR -->
+  <!-- ================================================================ SIMULATE -->
   <section class="pane" id="pane-simulate">
     <div class="card">
       <div class="quick">
         <div><label>Dust</label><select id="qs-a"></select></div>
         <div><label>Compare with</label><select id="qs-b"></select></div>
         <div><label>Grain size (µm)</label><input id="qs-d" type="number" value="100" min="1" step="any"></div>
-        <div><label title="Auto launches each dust near its predicted sticking speed, so both sticks and bounces happen">Launch speed</label><select id="qs-mode"><option value="auto">Auto</option><option value="custom">Custom…</option></select></div>
+        <div><label title="Auto launches each dust near its predicted sticking speed, so both sticks and bounces happen">Launch speed</label>
+          <select id="qs-mode"><option value="auto">Auto</option><option value="custom">Custom</option></select></div>
         <div id="qs-speed-box" style="display:none"><label>Launch speed (mm/s)</label><input id="qs-speed" type="number" value="20" step="any"></div>
-        <div><label>Grains per dust type</label><input id="qs-n" type="number" value="200" min="10" max="3000" step="10"></div>
+        <div><label>Grains per dust</label><input id="qs-n" type="number" value="200" min="10" max="3000" step="10"></div>
         <div><label>Simulated time (s)</label><input id="qs-t" type="number" value="4" min="0.5" max="200" step="0.5"></div>
         <div><label>Gas pressure (Pa)</label><input id="qs-p" type="number" value="1" min="0" step="any"></div>
       </div>
@@ -92,17 +138,17 @@
         <span class="status" id="estimate"></span>
       </div>
       <div id="run-progress" style="display:none">
-        <div class="progress"><div id="bar"></div></div><div class="status" id="runmsg"></div>
+        <div class="status" style="margin-bottom:8px"><span id="runpct">0%</span> · <span id="runmsg"></span></div>
+        <div class="bar"><div id="bar"></div></div>
       </div>
     </div>
 
     <div id="results"></div>
 
     <details id="advanced">
-      <summary>Advanced settings (every parameter, materials, config file)</summary>
+      <summary>Advanced settings</summary>
       <div class="inner">
-        <p class="small muted">Everything the simulator can do. The quick setup above writes into these settings; changes here are kept
-          (the quick setup only overrides its own six values when you press Run).</p>
+        <p class="small muted">Every parameter of the simulator. The quick settings above are applied on top of these when you press Run.</p>
         <div class="btns">
           <button class="btn ghost" id="btn-preflight" disabled>Pre-flight check</button>
           <button class="btn ghost" id="btn-reset">Reset to defaults</button>
@@ -113,13 +159,12 @@
         <div class="form" id="form"></div>
         <details>
           <summary>Material properties</summary>
-          <p class="small muted">Edit any value. Surface energy γ is the most uncertain number, and it is what the flight measures.
+          <p class="small muted">Edit any value. Surface energy γ and dry restitution e are the most uncertain numbers (γ is what the experiment measures; the e values are our estimates). The <a href="#sources">Sources</a> tab says which values come from papers.
             Units: ρ kg/m³, E GPa, γ J/m², φ eV, p_y GPa, k W/m/K.</p>
           <div class="mat" id="mattable"></div>
         </details>
         <details>
-          <summary>Configuration JSON</summary>
-          <p class="small muted">The complete configuration (see the README). Edit it and press <b>Apply JSON</b>.</p>
+          <summary>Configuration file (JSON)</summary>
           <textarea id="cfgjson" spellcheck="false"></textarea>
           <div class="btns"><button class="btn ghost" id="btn-apply-json">Apply JSON</button><span class="status" id="jsonmsg"></span></div>
         </details>
@@ -127,9 +172,9 @@
     </details>
   </section>
 
-  <!-- ================================================================ STICKING -->
+  <!-- ================================================================ QUICK CALCULATOR -->
   <section class="pane" id="pane-sticking">
-    <p class="muted">Instant answer, no full simulation: how fast can two grains hit and still stick?</p>
+    <p class="muted">Instant answer without a full simulation: how fast can two grains collide and still stick?</p>
     <div class="card">
       <div class="quick">
         <div><label>Grain A</label><select id="st-a"></select></div>
@@ -151,25 +196,36 @@
         <div><label>Grain size (µm)</label><input id="inv-d" type="number" value="100" step="any"></div>
         <div><label>Measured sticking speed (mm/s)</label><input id="inv-v" type="number" value="80" step="any"></div>
         <div><button class="btn" id="btn-inv" disabled>Infer γ</button></div>
-      </div><div id="inv-out" style="margin-top:10px"></div></div>
+      </div><div id="inv-out" style="margin-top:12px"></div></div>
     </details>
   </section>
 
   <!-- ================================================================ VERIFY -->
   <section class="pane" id="pane-verify">
-    <p>How do you know the simulator is right? These 16 tests compare it with exact solutions and conservation laws.
-      They run the real code <b>in your browser</b> (about 30 s).</p>
-    <div class="btns"><button class="btn big" id="btn-verify" disabled>Run all 16 tests</button><span class="status" id="vmsg"></span></div>
+    <p>22 tests compare the simulator with exact solutions, independent calculations and conservation laws. They run the
+      real code in your browser and take one to two minutes. The <a href="#sources">Sources</a> tab says which part of the
+      physics each test covers.</p>
+    <div class="btns"><button class="btn big" id="btn-verify" disabled>Run all tests</button><span class="status" id="vmsg"></span></div>
     <table id="vtable"><thead><tr><th>Test</th><th>Result</th><th></th></tr></thead><tbody></tbody></table>
-    <details><summary>Cross-check against the REBOUND N-body code</summary><div class="inner">
-      <p class="muted small">The same chamber run in this engine and in the independent <a href="https://rebound.readthedocs.io">REBOUND</a> code
-        (desktop run; REBOUND does not run in browsers).</p>
-      <div id="rebound"></div>
-      <img class="fig" src="../figures/rebound_check_carbon.png" alt="REBOUND cross-check" style="margin-top:12px">
-    </div></details>
+    <h2>Cross-check with REBOUND</h2>
+    <p class="muted">REBOUND is a widely used N-body code. None of DOLL-E comes from it; it is used only for this comparison
+      (these are stored desktop results, because REBOUND does not run in browsers). REBOUND moves the grains with its
+      leapfrog integrator and its collision detection; our sticking model, our exact drag + Coriolis velocity step and our
+      wall handling run inside it. So this checks the motion and collision bookkeeping, not the sticking physics. Over the
+      first 0.2 s, before any collision, REBOUND's high-accuracy IAS15 integrator and ours agree to under a nanometre for
+      the same equations of motion.</p>
+    <div id="rebound"></div>
   </section>
+
+  <!-- ================================================================ SOURCES -->
+  <section class="pane" id="pane-sources">
+    <div class="card" id="src-summary"><p class="muted" style="margin:0">Loading…</p></div>
+    <h2>Every component, its source and how it is checked</h2>
+    <div id="src-table"></div>
+  </section>
+  </div>
 </main>
-<footer>DOLL-E · University of Chicago · NASA RockSat · <a href="https://github.com/TheBestProEver/100micron-sim">source on GitHub</a></footer>
+<footer>DOLL-E · <a href="https://github.com/TheBestProEver/100micron-sim">source code</a></footer>
 <script src="app.js"></script>
 </body>
 </html>
