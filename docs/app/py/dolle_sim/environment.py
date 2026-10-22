@@ -83,8 +83,19 @@ class Environment:
         self.jitter_rms = float(c.get("jitter_rms_g", 0.0)) * G0
         self.jitter_tau = float(c.get("jitter_corr_time", 0.05))
         axis = np.asarray(c.get("spin_axis", [0.0, 0.0, 1.0]), float)
+        self.spin_axis = axis / np.linalg.norm(axis)
         self.spin_hz = float(c.get("spin_rate_hz", 0.0))
-        self.omega = 2 * math.pi * self.spin_hz * axis / np.linalg.norm(axis)
+        self.omega = 2 * math.pi * self.spin_hz * self.spin_axis
+        self.omega_dot = np.zeros(3)
+        # optional flight timeline (flight.py): time-dependent spin and apparent acceleration. Simulation time
+        # t = 0 corresponds to flight time start_time_s (T+ seconds after lift-off).
+        self.t0_flight = float(c.get("start_time_s", 0.0))
+        self.profile = None
+        if c.get("flight_profile") is not None:
+            from .flight import FlightProfile
+            self.profile = FlightProfile.from_config(c["flight_profile"])
+            self._theta0 = self.profile.spin_angle(self.t0_flight)
+            self.update(0.0)
         self.window_s = float(c.get("window_s", 210.0))
 
         # gravity gradient of a free-falling payload
@@ -133,8 +144,30 @@ class Environment:
         arr = np.asarray(rows)
         self._csv = (arr[:, 0], arr[:, 1:4] * G0)
 
+    def update(self, t: float) -> None:
+        """Set the time-dependent spin (Omega, dOmega/dt) for simulation time t (flight-profile runs only)."""
+        if self.profile is None:
+            return
+        T = self.t0_flight + t
+        self.spin_hz = self.profile.spin_hz(T)
+        self.omega = 2 * math.pi * self.spin_hz * self.spin_axis
+        self.omega_dot = self.profile.spin_rate_dot(T) * self.spin_axis
+
+    def spin_angle(self, t: float) -> float:
+        """Angle the chamber has rolled through since simulation time 0 [rad]."""
+        if self.profile is None:
+            return float(self.omega @ self.spin_axis) * t       # signed
+        return self.profile.spin_angle(self.t0_flight + t) - self._theta0
+
     def apparent_accel(self, t: float, dt: float) -> np.ndarray:
         """Uniform apparent acceleration in the chamber frame at time t."""
+        if self.profile is not None:
+            a = self.profile.apparent_accel(self.t0_flight + t)
+            if self.jitter_rms > 0:
+                f = math.exp(-dt / self.jitter_tau)
+                self._jitter = f * self._jitter + math.sqrt(1 - f * f) * self.jitter_rms * self.rng.standard_normal(3)
+                a = a + self._jitter
+            return a
         if self._csv is not None:
             tt, aa = self._csv
             return np.array([np.interp(t, tt, aa[:, k]) for k in range(3)])
@@ -174,11 +207,10 @@ class Environment:
 
     def to_chamber(self, v_inertial: np.ndarray, t: float) -> np.ndarray:
         """An inertially fixed vector (given at t=0) expressed in the spinning chamber frame."""
-        W = float(np.linalg.norm(self.omega))
-        if W == 0:
+        if self.profile is None and not self.omega.any():
             return v_inertial
-        k = self.omega / W
-        th = -W * t
+        k = self.spin_axis
+        th = -self.spin_angle(t)
         return (v_inertial * math.cos(th) + np.cross(k, v_inertial) * math.sin(th)
                 + k * (k @ v_inertial) * (1 - math.cos(th)))
 

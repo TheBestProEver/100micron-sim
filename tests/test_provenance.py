@@ -11,6 +11,8 @@ PKG = ROOT / "dolle_sim"
 IMPORTS_REBOUND = re.compile(r"^\s*(import\s+rebound\b|from\s+rebound\b)|__import__\(\s*['\"]rebound['\"]|"
                              r"import_module\(\s*['\"]rebound['\"]", re.M)
 IMPORTS_CHECK = re.compile(r"^\s*(from\s+\S*rebound_check\s+import|import\s+\S*rebound_check)", re.M)
+IMPORTS_LAMMPS = re.compile(r"^\s*(import\s+lammps\b|from\s+lammps\b)", re.M)
+IMPORTS_LCHECK = re.compile(r"^\s*(from\s+\S*lammps_check\s+import|import\s+\S*lammps_check)", re.M)
 
 
 def _items():
@@ -31,10 +33,18 @@ def test_rebound_is_only_imported_by_the_cross_check():
     assert importers == ["__main__.py"]
 
 
+def test_lammps_is_only_imported_by_its_cross_check():
+    users = sorted(str(f.relative_to(ROOT)).replace("\\", "/") for f in _py_files()
+                   if IMPORTS_LAMMPS.search(f.read_text(encoding="utf-8")))
+    assert users == ["dolle_sim/lammps_check.py"]
+    importers = sorted(f.name for f in PKG.glob("*.py") if IMPORTS_LCHECK.search(f.read_text(encoding="utf-8")))
+    assert importers == ["__main__.py"]
+
+
 def test_simulator_runs_without_rebound():
-    """Run a short simulation in a fresh interpreter in which `import rebound` fails."""
+    """Run a short simulation in a fresh interpreter in which `import rebound` and `import lammps` fail."""
     code = (
-        "import sys; sys.modules['rebound'] = None\n"
+        "import sys; sys.modules['rebound'] = None; sys.modules['lammps'] = None\n"
         "from dolle_sim.simulation import ChamberSim\n"
         "from dolle_sim import webapi, verification, design, analysis\n"
         "cfg = {'dt_s': 4e-3, 'duration_s': 0.2, 'environment': {'preset': 'ideal'}}\n"
@@ -55,7 +65,7 @@ def test_rebound_relations_are_as_stated():
 
 def test_every_named_check_exists():
     ids = set(re.findall(r'_res\("(\w+)"', (PKG / "verification.py").read_text(encoding="utf-8")))
-    assert len(ids) == 22
+    assert len(ids) == 25
     for c in _items():
         assert c["origin"] in provenance.ORIGINS, c["component"]
         for k in c["checks"]:

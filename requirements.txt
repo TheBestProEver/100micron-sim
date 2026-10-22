@@ -3,4 +3,6 @@ scipy>=1.10
 matplotlib>=3.7
 numba>=0.58        # optional but ~100x faster contact integration
 rebound>=4.0       # optional: only for `python -m dolle_sim rebound-check`
+lammps>=2025.7.22  # optional: only for `python -m dolle_sim lammps-check` (Windows: also MS-MPI)
+scikit-image>=0.21 # optional: only for measuring grain sizes from images (`sizes --image`)
 pytest>=7          # tests

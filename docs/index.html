@@ -44,16 +44,29 @@
     <div class="card stat"><div class="kpi">2 <small>cameras</small></div><p>are needed to measure it: with one camera the answer comes out up to 4× too low.</p></div>
   </div>
 
+  <h2>The flight, start to finish</h2>
+  <div class="grid c3">
+    <div class="card stat"><div class="kpi">~1,000 <small>g</small></div><p>is what it takes to pull a typical 100 µm grain
+      off clean glass, about a thousand times its weight. So the 25 g launch cannot shake the dust loose, and neither can a
+      gentle 50 g shaker.</p></div>
+    <div class="card stat"><div class="kpi">~1.5 <small>m/s</small></div><p>is how fast a 5,000 g kick that does free the
+      dust sends it flying: far faster than the 6-40 mm/s below which grains are predicted to stick, so the release has to be gentler.</p></div>
+    <div class="card stat"><div class="kpi">T+88–313 <small>s</small></div><p>is the microgravity window above 100 km.
+      Every tubule is simulated on one clock from lift-off to power-off. See the <a href="app/#flight">Flight</a> page.</p></div>
+  </div>
+
   <h2>Can I trust it?</h2>
   <div class="card trustlist">
     <p style="margin-top:0"><b>Where the physics comes from.</b> Published contact-mechanics and aerosol-physics papers,
       textbook mechanics and electrostatics, and a few modelling choices of our own. The <a href="app/#sources">Sources</a>
       page lists every part with its paper, where it is in the code, how it is checked, and what it assumes.</p>
-    <p><b>How it is checked.</b> 22 tests compare the code with exact solutions, independent calculations and conservation
+    <p><b>How it is checked.</b> 25 tests compare the code with exact solutions, independent calculations and conservation
       laws. You can run them yourself on the <a href="app/#verify">Verify</a> page.</p>
-    <p><b>REBOUND.</b> None of the simulator comes from REBOUND. That widely used N-body code is used only as an outside
-      check: it reproduces our collision-free grain trajectories to under a nanometre, and our collision statistics in a
-      simplified chamber. It does not test the sticking physics.</p>
+    <p><b>REBOUND and LAMMPS.</b> None of the simulator comes from either. They are widely used open-source codes, used
+      only as outside checks. REBOUND reproduces our collision-free grain trajectories to under a nanometre and our
+      collision statistics in a simplified chamber. LAMMPS, with its own implementation of the same adhesive contact
+      model, reproduces our sticking speeds to 0.3% (when both use the same rule for when a contact breaks) and the
+      force needed to pull a grain off a glass wall to 0.14%.</p>
     <p class="muted" style="margin-bottom:0"><b>What is uncertain.</b> How sticky and how bouncy the real grains are. The
       predictions above use commonly used literature values for stickiness (surface energy) and our own estimates for
       bounciness, and both matter: twice the surface energy moves the predicted sticking speed about 1.8×, and our assumed

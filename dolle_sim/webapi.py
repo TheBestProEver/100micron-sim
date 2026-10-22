@@ -21,7 +21,8 @@ from .analysis import measurement_report
 from .results import jsonable, collision_stats, csv_text, viewer_payload
 from . import verification
 
-WALL_MATERIALS = ["glass_fluorosilane", "glass_bk7", "sapphire", "aluminum_6061", "ptfe"]
+WALL_MATERIALS = ["glass_fluorosilane", "glass_bk7", "glass_borosilicate", "glass_soda_lime", "fused_silica_glass",
+                  "glass_silanized", "sapphire", "aluminum_6061", "ptfe"]
 
 
 def _dump(o):
@@ -167,6 +168,12 @@ def invert(args_json):
 
 def verify(name):
     return _dump(verification.run_check(name))
+
+
+def launch_loads(cfg_json):
+    """Analytic launch-load report for a mission config (mission.py: launch_report)."""
+    from .mission import launch_report
+    return _dump(launch_report(json.loads(cfg_json)))
 
 
 def scale_config(cfg_json, factor):

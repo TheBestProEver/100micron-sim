@@ -52,8 +52,9 @@ from scipy.spatial import cKDTree
 
 from .materials import get_material, pair_props, sphere_mass
 from .contact import JKRContact
-from .environment import Environment
+from .environment import Environment, G0
 from .electrostatics import SpaceChargeSolver, short_range_kernel
+from .sizes import sample_diameters
 
 K_E = 8.9875517923e9
 G_N = 6.67430e-11
@@ -111,6 +112,23 @@ class ChamberSim:
         self.vib_A = float(vib.get("amplitude_m", 0.0))
         self.vib_w = 2 * math.pi * float(vib.get("frequency_hz", 0.0))
         self.vib_axes = set(vib.get("axes", [0, 1, 2]))
+        self.base_vib = (self.vib_A, self.vib_w, set(self.vib_axes))
+        # release mechanisms: time windows (flight time, s) in which the whole tubule shakes along one axis.
+        # A short burst (cycles = 1) models an impulsive kick. Wall-bound grains on the faces normal to the axis
+        # are pulled off when the wall acceleration exceeds their pull-off force (see _check_detachment).
+        self.release = []
+        for r in chamber.get("release", []) or []:
+            if r.get("type", "shake") not in ("shake", "kick"):
+                raise ValueError(f"unknown release type '{r.get('type')}'")
+            f = float(r["frequency_hz"])
+            w = 2 * math.pi * f
+            A = float(r["amplitude_m"]) if "amplitude_m" in r else float(r["peak_g"]) * G0 / (w * w)
+            dur = float(r["duration_s"]) if "duration_s" in r else float(r.get("cycles", 1)) / f
+            axr = r.get("axis", 2)
+            axr = {"x": 0, "y": 1, "z": 2}.get(axr, axr)
+            self.release.append(dict(start_s=float(r["start_s"]), end_s=float(r["start_s"]) + dur, amplitude_m=A,
+                                     omega=w, axis=int(axr), peak_g=A * w * w / G0, type=r.get("type", "shake")))
+        self.shake_axis = None
 
         fc = cfg.get("forces", {})
         self.f_coulomb = bool(fc.get("coulomb", True))
@@ -133,6 +151,9 @@ class ChamberSim:
         self.cg_offset = np.asarray(cg, float) - self.size / 2
 
         self.dt = float(cfg.get("dt_s", 1e-3))
+        self.dt_base = self.dt
+        # flight-profile runs: smaller steps while the payload is boosting / spinning fast
+        self.dt_launch = float(cfg.get("dt_launch_s", 5e-4))
         Om = float(np.linalg.norm(self.env.omega))
         if Om > 0:
             self.dt = min(self.dt, 0.02 / Om)
@@ -141,8 +162,8 @@ class ChamberSim:
         self._step_count = 0
         self.t = 0.0
 
-        self._init_particles(chamber.get("particles", []), ov)
         self._contacts: dict = {}
+        self._init_particles(chamber.get("particles", []), ov)
         self.collisions: list[dict] = []
         self.frames: list[np.ndarray] = []
         self.frame_bodies: list[np.ndarray] = []
@@ -152,7 +173,10 @@ class ChamberSim:
         self.timeseries: list[dict] = []
         self.n_events = {"stick": 0, "bounce": 0, "wall_stick": 0, "wall_bounce": 0,
                          "erosion": 0, "shatter": 0, "friction_energy_guard": 0, "fragmentation_energy_limited": 0,
-                         "midstep_neighbor_rebuild": 0}
+                         "midstep_neighbor_rebuild": 0, "rest": 0, "detach": 0, "detach_shake": 0}
+        self.detach_log: list[dict] = []    # (flight time, grain, how) for every grain pulled off a wall
+        self._a_app_now = np.zeros(3)
+        self._W_drift = None                # spin rate used for the frame rotation during the current step
         self.E_bonds_broken = 0.0           # total bond energy paid by fragmentation [J] (energy bookkeeping)
         self._F_cf = None                   # centrifugal force per grain (excluded from body torques)
         self._nl_vlim = math.inf            # fastest grain speed the current neighbour list stays valid for
@@ -161,6 +185,9 @@ class ChamberSim:
         self.contain_max_m = 0.0
         self._F_pos = None
         self._F_pair = None
+        # pair forces depend only on positions, charges and which grains share a body; all three can change only
+        # while some body is free, so with every body wall-bound the last result is still exact (step() marks it)
+        self._pair_stale = True
         self.sc = None
         if self.f_space and self.f_coulomb and (self.q.any() or self.charging):
             self.sc = SpaceChargeSolver(self.size, self.coulomb_cut / 3.5)
@@ -168,24 +195,63 @@ class ChamberSim:
             self.coulomb_cut = max(self.coulomb_cut, 3.5 * self.sc.sigma)
 
     # ------------------------------------------------------------ setup
+    def _settle_on_face(self, r, face, ofs):
+        """Random sequential placement of grains of radii r on one face, each touching it ("settled" bed).
+        Grains do not overlap (centre distance >= 1.06 x the radius sum), also with grains settled earlier by other
+        groups or on other faces, and stay clear of the side walls."""
+        ax = {"x": 0, "y": 1, "z": 2}[face[1]]
+        side = -1.0 if face[0] == "-" else 1.0
+        tang = [k for k in range(3) if k != ax]
+        P, Rr = self._settled_xyz, self._settled_r          # every grain settled so far (all groups, all faces)
+        out = np.zeros((len(r), 3))
+        for i, ri in enumerate(r):
+            for _ in range(20000):
+                c = np.empty(3)
+                for k in tang:
+                    c[k] = self.rng.uniform(ri, self.size[k] - ri)
+                c[ax] = ri if side < 0 else self.size[ax] - ri
+                if not len(Rr) or np.all(((P - c) ** 2).sum(1) >= (1.06 * (Rr + ri)) ** 2):
+                    break
+            else:
+                raise ValueError(f"chamber '{self.name}': cannot fit {len(r)} grains as one layer on face {face}; "
+                                 "multi-layer beds are not modelled")
+            P = np.vstack([P, c])
+            Rr = np.append(Rr, ri)
+            out[i] = c
+            self._settled.append((ofs + i, ax, side))
+        self._settled_xyz, self._settled_r = P, Rr
+        return out
+
     def _init_particles(self, groups, overrides):
         mats, mat_idx, rad, q, vel, pos, group_idx, spin, adh = [], [], [], [], [], [], [], [], []
         self.groups = []
+        self._settled = []
+        self._ever_freed = set()              # grains released from a wall at least once (detachment)
+        self._settled_xyz, self._settled_r = np.zeros((0, 3)), np.zeros(0)
+        n_ofs = 0
         for gi, g in enumerate(groups):
             m = get_material(g["material"], overrides)
             if m.name not in [x.name for x in mats]:
                 mats.append(m)
             mi = [x.name for x in mats].index(m.name)
             n = int(g["count"])
-            r0 = float(g.get("radius_m", 50e-6))
-            rs = float(g.get("radius_rel_sigma", 0.0))
-            r = r0 * np.clip(1 + rs * self.rng.standard_normal(n), 0.5, 1.5)
+            if "size_distribution" in g:
+                # manufacturer / measured size distribution (sizes.py: number-weighted sampling)
+                r = 0.5 * sample_diameters(g["size_distribution"], n, self.rng)
+                r0 = float(r.max())
+            else:
+                r0 = float(g.get("radius_m", 50e-6))
+                rs = float(g.get("radius_rel_sigma", 0.0))
+                r = r0 * np.clip(1 + rs * self.rng.standard_normal(n), 0.5, 1.5)
             reg = g.get("region_m", {})
             margin = 2 * r0
             center = np.asarray(reg.get("center", self.size / 2), float)
             span = np.asarray(reg.get("size", self.size - 2 * margin), float)
             p = center + (self.rng.random((n, 3)) - 0.5) * span
             p = np.clip(p, margin, self.size - margin)
+            init = g.get("initial_state", {}) or {}
+            if init.get("type") == "settled":
+                p = self._settle_on_face(r, init.get("face", "-z"), n_ofs)
             vcfg = g.get("velocity", {})
             vm = float(vcfg.get("speed_mean_m_s", 0.01))
             vs = float(vcfg.get("speed_sigma_m_s", 0.3 * vm))
@@ -216,6 +282,7 @@ class ChamberSim:
             pos.append(p)
             group_idx.append(np.full(n, gi))
             self.groups.append({**g, "material_obj": m})
+            n_ofs += n
         self.mats = mats
         if not pos:
             raise ValueError(f"chamber '{self.name}' has no particles")
@@ -256,14 +323,29 @@ class ChamberSim:
         self.nmono = np.ones(N, int)
         self.bdrag = self.dragc.copy()
         self.last_split = np.full(N, -np.inf)
+        for k, ax, side in self._settled:
+            self.frozen[k] = True
+            self.fw_ax[k], self.fw_side[k] = ax, side
+            self.V[k] = 0
+            self.L[k] = 0
+        # JKR pull-off force of each grain from the wall, F_c = 1.5 pi w R (w with this grain's adhesion factor)
+        self.Fc_wall = np.array([self._contact(k, None).p.F_c for k in range(N)])
+        if self.wall_mode == "never":
+            # idealised non-adhesive walls: a grain resting on one (under a load) leaves as soon as the load turns
+            self.Fc_wall[:] = 0.0
 
     def _remove_overlaps(self):
+        settled = np.zeros(len(self.pos), bool)
+        settled[[k for k, _, _ in self._settled]] = True
         for _ in range(50):
             pairs = cKDTree(self.pos).query_pairs(2.05 * self.rad.max(), output_type="ndarray")
             if len(pairs) == 0:
                 return
             d = np.linalg.norm(self.pos[pairs[:, 0]] - self.pos[pairs[:, 1]], axis=1)
-            bad = pairs[d < 1.05 * (self.rad[pairs[:, 0]] + self.rad[pairs[:, 1]]), 1]
+            close = d < 1.05 * (self.rad[pairs[:, 0]] + self.rad[pairs[:, 1]])
+            # move a grain that is not part of a settled bed
+            bad = np.where(settled[pairs[close, 1]], pairs[close, 0], pairs[close, 1])
+            bad = bad[~settled[bad]]
             if len(bad) == 0:
                 return
             m = 2 * self.rad.max()
@@ -373,12 +455,14 @@ class ChamberSim:
         self.off[mm] = np.einsum("kij,kj->ki", Q[local[self.body[mm]]], self.offb[mm])
 
     def _frame_rotation(self, h):
-        """Rotation matrix R(-Omega h): inertially fixed vectors seen from the chamber, which spins at Omega."""
-        Om = self.env.omega
-        W = float(np.linalg.norm(Om))
+        """Rotation matrix R(-Omega h): inertially fixed vectors seen from the chamber, which spins at Omega.
+        With a time-dependent spin the rate at the middle of the step is used (exact for a piecewise-linear
+        spin profile)."""
+        # signed rate about spin_axis (a negative spin_rate_hz spins the other way)
+        W = self._W_drift if self._W_drift is not None else float(self.env.omega @ self.env.spin_axis)
         if W == 0:
             return None
-        k = Om / W
+        k = self.env.spin_axis
         K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
         th = -W * h
         return np.eye(3) + math.sin(th) * K + (1 - math.cos(th)) * (K @ K)
@@ -550,9 +634,11 @@ class ChamberSim:
         F = self.F_static.copy()
         Om = self.env.omega
         self._F_cf = None
-        if Om.any():
+        if Om.any() or self.env.omega_dot.any():
             r_ax = self.pos + self.axis_offset
             self._F_cf = -m * _crossN(Om[None, :], _crossN(Om[None, :], r_ax))  # centrifugal
+            if self.env.omega_dot.any():
+                self._F_cf -= m * _crossN(self.env.omega_dot[None, :], r_ax)     # Euler (spin-rate change)
             F += self._F_cf
         if self.env.gravity_gradient:
             F += m * self.env.tidal_accel(self.pos + self.cg_offset, self.t)
@@ -588,8 +674,9 @@ class ChamberSim:
                         g_lo, g_hi = 1 / (2 * h_lo) ** 2, 1 / (2 * h_hi) ** 2
                     F[wc] += k[:, None] * (g_hi - g_lo)
         if len(self.lrlist) and self._long_range():
-            if self._F_pair is None or self._step_count % self.lr_every == 0:
+            if self._F_pair is None or (self._step_count % self.lr_every == 0 and self._pair_stale):
                 self._F_pair = self._pair_forces()
+                self._pair_stale = False
             F += self._F_pair
         return F
 
@@ -765,8 +852,12 @@ class ChamberSim:
                    x=cpt[0], y=cpt[1], z=cpt[2], r_sum=self.rad[i] + self.rad[j], E_coll=E_coll, E_diss=0.0,
                    fragments=0)
         self.collisions.append(rec)
-        if res.stuck:
-            self.n_events["stick"] += 1
+        resting = (not res.stuck) and (fzA != fzB) and self._comes_to_rest(B if fzA else A, n if fzB else -n,
+                                                                            res.e_n * vn)
+        if resting:
+            rec["outcome"] = "rest"
+        if res.stuck or resting:
+            self.n_events["rest" if resting else "stick"] += 1
             self._merge(A, B)
         else:
             self.n_events["bounce"] += 1
@@ -818,9 +909,12 @@ class ChamberSim:
                    vrel_x=vrel[0], vrel_y=vrel[1], vrel_z=vrel[2],
                    vcm_x=dV[0], vcm_y=dV[1], vcm_z=dV[2], n_x=n[0], n_y=n[1], n_z=n[2],
                    x=cpt[0], y=cpt[1], z=cpt[2], r_sum=self.rad[m], E_coll=E_coll, E_diss=0.0, fragments=0)
+        resting = (not stuck) and self._comes_to_rest(A, n, e_n * vn)
+        if resting:
+            rec["outcome"] = "rest"
         self.collisions.append(rec)
-        if stuck:
-            self.n_events["wall_stick"] += 1
+        if stuck or resting:
+            self.n_events["rest" if resting else "wall_stick"] += 1
             self.frozen[A] = True
             self.fw_ax[A], self.fw_side[A] = ax, side
             self.V[A] = 0
@@ -1076,10 +1170,12 @@ class ChamberSim:
             dV/dt = a_app + F/M - V/tau - 2 Omega x V
         with F (sum of grain forces) held constant. Drag and Coriolis are integrated exactly
         (damped rotation about the spin axis); angular momentum gets the torque and gas spin-down."""
+        act = np.flatnonzero(self.alive & ~self.frozen)
+        if not len(act):
+            return act
         Fb = np.empty((self.N, 3))
         for k in range(3):
             Fb[:, k] = np.bincount(self.body, F[:, k], self.N)
-        act = np.flatnonzero(self.alive & ~self.frozen)
         Ma = self.M[act]
         acc = Fb[act] / Ma[:, None] + a_app[None, :]
         gam = self.bdrag[act] / Ma if self.env.P > 0 else np.zeros(len(act))
@@ -1130,6 +1226,165 @@ class ChamberSim:
             self.L[act] += Tb[act] * h
         return act
 
+    def _comes_to_rest(self, b, n, v_out):
+        """A bounce under a sustained load pressing body b onto its contact (unit normal n, from b into the
+        contact) comes back within one step if v_out < a_n dt. Such a grain undergoes an unresolvable sequence
+        of ever smaller bounces (inelastic collapse) and is at rest in adhesive contact: it is treated as
+        stuck. Under the ~1e-4 g of microgravity this never applies (a_n dt ~ 1e-6 m/s)."""
+        mem = self.members[b]
+        a = self._a_app_now + (self._F_pos[mem].sum(0) / self.M[b] if self._F_pos is not None else 0.0)
+        a_n = float(a @ n)
+        return a_n > 0 and v_out < a_n * self.dt
+
+    def _update_time(self, t):
+        """Time-dependent spin and release shaking at simulation time t. Returns True if the wall vibration
+        changed (the neighbour list must then be rebuilt)."""
+        Om_old = self.env.omega.copy()
+        self.env.update(t)
+        dOm = Om_old - self.env.omega
+        if dOm.any():
+            # spins are stored relative to the chamber; a change of the payload's spin rate leaves each free
+            # body's absolute angular momentum unchanged, so its relative spin changes by I (Omega_old - Omega_new)
+            act = np.flatnonzero(self.alive & ~self.frozen)
+            if len(act):
+                Iw = self.Q[act] @ (self.Ip[act][:, :, None] * np.transpose(self.Q[act], (0, 2, 1)))
+                self.L[act] += Iw @ dOm
+        if not self.release:
+            return False
+        T = self.env.t0_flight + t
+        A, w, axes = self.base_vib
+        self.shake_axis = None
+        for r in self.release:
+            if r["start_s"] - 1e-12 <= T < r["end_s"] - 1e-12:     # same tolerance as _dt_at
+                A, w, axes = r["amplitude_m"], r["omega"], {r["axis"]}
+                self.shake_axis = r["axis"]
+                break
+        changed = (A, w) != (self.vib_A, self.vib_w)
+        self.vib_A, self.vib_w, self.vib_axes = A, w, set(axes)
+        return changed
+
+    def _check_detachment(self, t_now):
+        """Pull wall-bound grains off when the load away from the wall exceeds the JKR pull-off force.
+
+        Load on a wall-bound body = its mass times the quasi-static apparent acceleration (uniform part,
+        centrifugal, Euler, gravity gradient) plus its own forces (electrostatic, thermo-/photophoresis),
+        plus, while the tubule shakes along the face normal, the wall's peak acceleration A omega^2. The
+        pull-off force under a slowly varying load is F_c = 1.5 pi w R (JKR). Tangential loads (rolling,
+        sliding) are not modelled. A grain freed by the shaking leaves with the wall's velocity at the moment
+        the threshold is reached, A omega cos(phi) with sin(phi) = (F_c - F_qs) / (m A omega^2)."""
+        fb = np.flatnonzero(self.alive & self.frozen)
+        if not len(fb) or self._F_pos is None:
+            return
+        a_sh = self.vib_A * self.vib_w ** 2 if self.shake_axis is not None else 0.0
+        single = fb[self.nmono[fb] == 1]
+        if len(single):
+            g = np.array([self.members[b][0] for b in single])
+            u = np.zeros((len(single), 3))
+            u[np.arange(len(single)), self.fw_ax[single]] = -self.fw_side[single]     # wall -> grain
+            a_drive = self._a_app_now[None, :] + self._F_pos[g] / self.mass[g][:, None]
+            F_qs = self.mass[g] * (a_drive * u).sum(1)
+            F_sh = self.mass[g] * a_sh * (np.abs(u[:, self.shake_axis]) if self.shake_axis is not None else 0.0)
+            Fc = self.Fc_wall[g]
+            for k in np.flatnonzero(F_qs + F_sh > Fc):
+                v = 0.0
+                if F_qs[k] < Fc[k]:
+                    sphi = (Fc[k] - F_qs[k]) / F_sh[k]
+                    v = self.vib_A * self.vib_w * math.sqrt(max(0.0, 1.0 - sphi * sphi))
+                self._free_body(int(single[k]), u[k] * v, t_now, int(g[k]), "shake" if F_qs[k] < Fc[k] else "load")
+        for b in fb[self.nmono[fb] > 1]:
+            self._detach_aggregate(int(b), a_sh, t_now)
+
+    def _free_body(self, b, v, t_now, grain, how):
+        self._ever_freed.update(int(g) for g in self.members[b])
+        self.frozen[b] = False
+        self.fw_ax[b] = -1
+        self.V[b] = v
+        self.L[b] = 0.0
+        self.n_events["detach"] += 1
+        if how == "shake":
+            self.n_events["detach_shake"] += 1
+        self.detach_log.append(dict(t=self.env.t0_flight + t_now, grain=grain, n=int(self.nmono[b]), how=how,
+                                    v=float(np.linalg.norm(v))))
+
+    def _detach_aggregate(self, b, a_sh, t_now):
+        """Tree statics for a wall-bound aggregate: the bond to the wall carries the load of the whole body,
+        each grain-grain bond the load of the part beyond it. A bond fails in tension when its load along the
+        line of centres exceeds the JKR pull-off force of that pair; the part beyond it comes off."""
+        mem = list(self.members[b])
+        ax, side = int(self.fw_ax[b]), float(self.fw_side[b])
+        u_in = np.zeros(3)
+        u_in[ax] = -side
+        wall_pos = 0.0 if side < 0 else self.size[ax]
+        gap = np.abs(self.pos[mem, ax] - wall_pos) - self.rad[mem]
+        root = mem[int(np.argmin(gap))]
+        # spanning tree of touching grains, from the grain on the wall
+        parent, order, todo = {root: None}, [root], [root]
+        while todo:
+            k = todo.pop()
+            for j in mem:
+                if j not in parent and np.linalg.norm(self.pos[j] - self.pos[k]) < (self.rad[j] + self.rad[k]) * (1 + 1e-6):
+                    parent[j] = k
+                    order.append(j)
+                    todo.append(j)
+        a = self._a_app_now[None, :] + self._F_pos[mem] / self.mass[mem][:, None]
+        idx = {k: i for i, k in enumerate(mem)}
+        Msub = {k: self.mass[k] for k in mem}
+        Fsub = {k: self.mass[k] * a[idx[k]] for k in mem}
+        for k in reversed(order):
+            if parent.get(k) is not None:
+                Msub[parent[k]] += Msub[k]
+                Fsub[parent[k]] = Fsub[parent[k]] + Fsub[k]
+
+        def fails(F, M, u, Fc):
+            F_qs = float(F @ u)
+            F_sh = M * a_sh * (abs(u[self.shake_axis]) if self.shake_axis is not None else 0.0)
+            if F_qs + F_sh <= Fc:
+                return None
+            if F_qs >= Fc:
+                return 0.0, "load"
+            sphi = (Fc - F_qs) / F_sh
+            return self.vib_A * self.vib_w * math.sqrt(max(0.0, 1.0 - sphi * sphi)), "shake"
+        res = fails(Fsub[root], Msub[root], u_in, self.Fc_wall[root])
+        if res is not None:                                   # the whole aggregate comes off the wall
+            self._free_body(b, u_in * res[0], t_now, root, res[1])
+            return
+        cut = []
+        for k in order[1:]:
+            par = parent[k]
+            if any(c in cut for c in self._ancestors(k, parent)):
+                continue
+            u = self.pos[k] - self.pos[par]
+            u /= np.linalg.norm(u)
+            Fc = self._contact(k, par).p.F_c
+            r = fails(Fsub[k], Msub[k], u, Fc)
+            if r is not None:
+                cut.append(k)
+                sub = [j for j in order if j == k or k in self._ancestors(j, parent)]
+                new = self._detach(b, [sub])
+                # the aggregate moved rigidly with the wall, so the freed part leaves with the wall's velocity
+                # (along the shaking axis, toward the side the bond was loaded); a quasi-static break gives it none
+                v_free = np.zeros(3)
+                if r[1] == "shake":
+                    v_free[self.shake_axis] = math.copysign(r[0], u[self.shake_axis])
+                for nb in new:
+                    self.V[nb] = v_free
+                    self._ever_freed.update(int(g) for g in self.members[nb])
+                    self.n_events["detach"] += 1
+                    if r[1] == "shake":
+                        self.n_events["detach_shake"] += 1
+                    self.detach_log.append(dict(t=self.env.t0_flight + t_now, grain=k, n=len(sub), how=r[1],
+                                                v=float(r[0])))
+        if cut:
+            self._topology_changed = True
+
+    @staticmethod
+    def _ancestors(k, parent):
+        out = []
+        while parent.get(k) is not None:
+            k = parent[k]
+            out.append(k)
+        return out
+
     def _contain(self):
         """Safety net: no free grain may end a step outside the chamber (pushes its body back)."""
         act = self.alive & ~self.frozen
@@ -1156,9 +1411,17 @@ class ChamberSim:
         dt = self.dt
         self.t = t
         self._step_count += 1
+        if self._update_time(t):
+            self._build_neighbors()
         a_app = self.env.apparent_accel(t, dt)
+        self._a_app_now = a_app
+        if self.env.profile is not None:
+            self._W_drift = 2 * math.pi * self.env.profile.spin_hz(self.env.t0_flight + t + 0.5 * dt)
         if self._F_pos is None:
             self._F_pos = self._forces_pos(self._mono_vel())
+        self._check_detachment(t)
+        if (self.alive & ~self.frozen).any():
+            self._pair_stale = True          # something can move, collide or charge during this step
         act = self._kick(self._F_pos, a_app, 0.5 * dt)
 
         remaining = dt
@@ -1232,13 +1495,53 @@ class ChamberSim:
         else:
             raise RuntimeError(f"event loop did not finish the step at t = {t:.6f} s (100000 events)")
         self._contain()
-        # forces at the new positions (velocity Verlet), then the second half kick
+        # forces at the new positions (velocity Verlet), then the second half kick. With a time-dependent spin
+        # the end-of-step forces and the second half kick use Omega(t + dt) (keeps the scheme second order).
         self.t = t + dt
+        if self.env.profile is not None and self._update_time(t + dt):
+            self._build_neighbors()
         vm = self._mono_vel()
         if self._needs_rebuild(vm):
             self._build_neighbors(vm)
         self._F_pos = self._forces_pos(vm)
         self._kick(self._F_pos, a_app, 0.5 * dt, brownian=True)
+
+    def _dt_at(self, t):
+        """Variable time step (flight-profile runs, and any run with release windows). With a profile and free
+        grains: dt_launch_s until the microgravity window, the base step after, never more than 0.02 rad of payload
+        roll per step, and shorter steps for fast grains. Every release window or shock starts exactly at a step
+        start and is resolved with >= 20 steps; the last step ends exactly at the end of the run."""
+        T = self.env.t0_flight + t
+        prof = self.env.profile
+        dt = self.dt_base
+        if prof is not None and (self.alive & ~self.frozen).any():
+            # free grains: short steps while boosting / spinning fast (while every grain is wall-bound nothing
+            # moves, and the base step is enough to follow the loads)
+            if T < prof.ug_start_s:
+                dt = min(dt, self.dt_launch)
+            W = 2 * math.pi * max(abs(prof.spin_hz(T)), abs(prof.spin_hz(T + dt)))
+            if W > 0:
+                dt = min(dt, 0.02 / W)
+            # fast grains (just after a kick): shorter steps keep the neighbour-list skin (3 v dt) at its base
+            # size; otherwise nearly every pair in the tubule becomes a candidate. Collisions are found as events
+            # either way; in microgravity this changes only the cost (under launch loads it also lowers the
+            # resting-contact cut-off a_n dt, a numerical threshold). Powers of two of the base step, so the list
+            # is rebuilt only when the speed changes by 2x.
+            vb = self._speed_bound(self._mono_vel())
+            if vb > 0 and 3 * vb * dt > self.skin:
+                k = math.ceil(math.log2(3 * vb * self.dt_base / self.skin))
+                dt = min(dt, max(self.dt_base / 2 ** k, 1e-5))
+        windows = [(r["start_s"], r["end_s"]) for r in self.release]
+        if prof is not None:
+            windows += [(float(i["t_s"]), float(i["t_s"]) + float(i["duration_s"])) for i in prof.impulses]
+        eps = 1e-12
+        for a, b in windows:
+            if T < a - eps and T + dt > a:                  # never step over the start of a window
+                dt = min(dt, a - T)
+        for a, b in windows:
+            if a - eps <= T < b - eps:                       # inside a window: >= 20 steps across it
+                dt = min(dt, max((b - a) / 20, 1e-7))
+        return min(dt, self.duration - t) if self.duration - t > 1e-12 else dt
 
     def _record(self, t):
         self.frame_t.append(t)
@@ -1269,14 +1572,25 @@ class ChamberSim:
         self._build_neighbors()
         t, next_out = 0.0, 0.0
         n_steps = int(round(self.duration / self.dt))
+        prof = self.env.profile
+        variable = prof is not None or bool(self.release)
+        if variable:
+            n_steps = 10 ** 9          # variable step: loop until the end of the window
         t0 = time.time()
         last = last_cb = t0
         for s in range(n_steps):
+            if variable:
+                if t >= self.duration - 1e-12:
+                    break
+                dt = self._dt_at(t)
+                if abs(dt / self.dt - 1) > 1e-9:
+                    self.dt = dt
+                    self._build_neighbors()
             if t >= next_out - 1e-12:
                 self._record(t)
                 next_out += self.out_dt
             self.step(t)
-            t = (s + 1) * self.dt
+            t = t + self.dt if variable else (s + 1) * self.dt
             if callback is not None and time.time() - last_cb > callback_interval_s:
                 last_cb = time.time()
                 callback(t, self.duration, dict(self.n_events))

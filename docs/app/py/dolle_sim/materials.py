@@ -129,6 +129,38 @@ MATERIALS: dict[str, Material] = {
         thermal_conductivity=1.1, absorptivity=0.01,
         note="Glass with a fluorinated anti-stick monolayer (FDTS-type): hard "
              "and low surface energy -> low wall adhesion."),
+    # ---------------------------------------------------------- tubule glasses (sourced elastic data)
+    # gamma here is an EFFECTIVE value for the mixing rule w = 2 sqrt(gamma_grain gamma_wall): 0.0203 J/m^2
+    # reproduces the measured work of adhesion w = 0.045 J/m^2 of ~90 um glass beads on clean glass in room air
+    # (Sansao et al. 2021, Powder Technol. 384, 267) for silica grains (gamma 0.025), and gives 0.078 J/m^2 for
+    # graphite (inside the 0.04-0.10 J/m^2 range estimated from dispersive surface energies; no measurement).
+    "glass_borosilicate": Material(
+        "glass_borosilicate", rho=2230.0, E=63e9, nu=0.20, gamma=0.0203, e_dry=0.8,
+        work_function=5.0, permittivity=4.6, yield_pressure=5e9,
+        thermal_conductivity=1.2, absorptivity=0.01,
+        note="Borosilicate 3.3 tubing (SCHOTT DURAN datasheet: E 63 GPa, nu 0.2, rho 2.23 g/cm3; BOROFLOAT 33: "
+             "E 64 GPa). gamma: effective value reproducing w = 0.045 J/m^2 measured for ~90 um beads on clean "
+             "glass in air (Sansao+2021); dry/vacuum surfaces may be several times stickier (Kimura+2015). "
+             "e_dry, work function, yield pressure assumed."),
+    "glass_soda_lime": Material(
+        "glass_soda_lime", rho=2530.0, E=72e9, nu=0.23, gamma=0.0203, e_dry=0.8,
+        work_function=5.0, permittivity=7.0, yield_pressure=5e9,
+        thermal_conductivity=1.0, absorptivity=0.01,
+        note="Soda-lime-silica float glass (E 72 GPa, nu 0.23, rho 2.53 g/cm3, compilation; lower confidence). "
+             "gamma as for borosilicate (measured w for beads on clean glass, Sansao+2021). Others assumed."),
+    "fused_silica_glass": Material(
+        "fused_silica_glass", rho=2200.0, E=73e9, nu=0.16, gamma=0.0203, e_dry=0.8,
+        work_function=5.0, permittivity=3.8, yield_pressure=5e9,
+        thermal_conductivity=1.38, absorptivity=0.01,
+        note="Fused silica (Corning HPFS 7980 datasheet: E 73 GPa, nu 0.16, rho 2.20 g/cm3). gamma as for "
+             "borosilicate (Sansao+2021). Others assumed."),
+    "glass_silanized": Material(
+        "glass_silanized", rho=2230.0, E=63e9, nu=0.20, gamma=0.0068, e_dry=0.8,
+        work_function=5.0, permittivity=4.6, yield_pressure=5e9,
+        thermal_conductivity=1.2, absorptivity=0.01,
+        note="Borosilicate with a hydrophobic silane (OTS/TCOD-type). gamma: effective value reproducing "
+             "w = 0.026 J/m^2, the middle of 0.022-0.030 J/m^2 measured for silanised ~90 um beads on silanised "
+             "glass (Sansao+2021; Zafar+2014, Powder Technol. 264, 236). Untreated grains may stick more."),
     "sapphire": Material(
         "sapphire", rho=3980.0, E=345e9, nu=0.29, gamma=0.04, e_dry=0.85,
         work_function=4.7, permittivity=9.4, yield_pressure=8e9,

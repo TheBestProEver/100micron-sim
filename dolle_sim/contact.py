@@ -62,7 +62,13 @@ class ContactResult:
 class JKRContact:
     """Normal-direction JKR contact for one material/size pair."""
 
-    def __init__(self, props: PairProps, steps: int = 300):
+    def __init__(self, props: PairProps, steps: int = 300, separation: str = "displacement"):
+        """separation: where an elastic contact breaks during a collision.
+        "displacement" (default): at the end of the stable JKR branch, a = a0/6^(2/3), delta = delta_c, as
+            in Chokshi et al. (1993) and Dominik & Tielens (1997);
+        "force": at the maximum tensile force, a = a0/4^(1/3), F = -F_c, as LAMMPS pair_style granular jkr
+            does (used for the LAMMPS cross-check). The two give different hysteresis energies (see
+            provenance.py)."""
         p = self.p = props
         self.steps = int(steps)            # integration sub-steps per contact time (300: ~0.06% accuracy)
         e = max(min(props.e_dry, 0.9999), 1e-4)
@@ -72,7 +78,15 @@ class JKRContact:
         self.B = math.sqrt(8 * math.pi * p.w * p.E_star)
         self.C = math.sqrt(2 * math.pi * p.w / p.E_star)
         self.a_c = p.a0 / 6.0 ** (2.0 / 3.0)
-        self.G_c = self._G(self.a_c)
+        if separation == "displacement":
+            a_b = self.a_c
+        elif separation == "force":
+            a_b = p.a0 / 4.0 ** (1.0 / 3.0)
+        else:
+            raise ValueError("separation must be 'displacement' or 'force'")
+        self.separation = separation
+        self.delta_break = a_b * a_b / p.R_star - self.C * math.sqrt(a_b)
+        self.G_c = self._G(a_b)                    # energy reference: the broken contact
         self.a_snap = self.solve_a(0.0, p.a0)
         if math.isfinite(p.p_y):
             self.delta_y = p.R_star * (math.pi * p.p_y / (2 * p.E_star)) ** 2
@@ -140,7 +154,7 @@ class JKRContact:
         dy = self.delta_y if math.isfinite(self.delta_y) else 1e30
         py = p.p_y if math.isfinite(p.p_y) else 1e30
         out = _resolve_core(p.R_star, self.C, self.A, self.B, self.a_c, self.G_c, self.a_snap,
-                            self.U0, p.delta_c, p.E_star, p.a0, self.beta, abs(v_in), m_eff, dy, py,
+                            self.U0, self.delta_break, p.E_star, p.a0, self.beta, abs(v_in), m_eff, dy, py,
                             float(self.steps))
         stuck, v_out, d_peak, F_peak, t, a_peak, yielded = out
         v_in = max(abs(v_in), 1e-12)

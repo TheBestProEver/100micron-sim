@@ -12,6 +12,8 @@ const worker = new Worker('worker.js');
 let nextId = 1;
 const pending = new Map();
 let INFO = null, CFG = null, CH2 = null, TEMPLATE = null, BUSY = false;
+// state of the lazily loaded tabs (declared here: showTab() runs before the code further down)
+let SOURCES_LOADED = false, MISSION = null, FLIGHT_LOADED = false;
 
 worker.onmessage = (ev) => {
   const m = ev.data;
@@ -66,7 +68,7 @@ async function onReady(version) {
   fillQuick();
   if (!CFG) setConfig(INFO.default_config);
   buildVerifyTable();
-  ['btn-run', 'btn-preflight', 'btn-stick', 'btn-inv', 'btn-verify'].forEach((b) => ($(b).disabled = false));
+  ['btn-run', 'btn-preflight', 'btn-stick', 'btn-inv', 'btn-verify', 'btn-loads'].forEach((b) => ($(b).disabled = false));
   document.querySelectorAll('#load-steps li').forEach((li) => (li.className = 'done'));
   $('load-bar').style.width = '100%';
   clearInterval(loadTimer);
@@ -76,8 +78,9 @@ async function onReady(version) {
 /* ------------------------------------------------------------------ tabs */
 function showTab() {
   const t = (location.hash || '#simulate').slice(1);
-  const tab = ['simulate', 'sticking', 'verify', 'sources'].includes(t) ? t : 'simulate';
+  const tab = ['simulate', 'sticking', 'flight', 'verify', 'sources'].includes(t) ? t : 'simulate';
   if (tab === 'sources') loadSources();
+  if (tab === 'flight') loadFlight();
   document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === tab));
   document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('on', p.id === 'pane-' + tab));
 }
@@ -364,7 +367,7 @@ function download(name, text, type) {
 
 function setBusy(b) {
   BUSY = b;
-  ['btn-run', 'btn-preflight', 'btn-stick', 'btn-inv', 'btn-verify'].forEach((id) => ($(id).disabled = b));
+  ['btn-run', 'btn-preflight', 'btn-stick', 'btn-inv', 'btn-verify', 'btn-loads'].forEach((id) => ($(id).disabled = b));
 }
 
 /* ------------------------------------------------------------------ pre-flight */
@@ -565,12 +568,134 @@ $('btn-inv').addEventListener('click', async () => {
   setBusy(false);
 });
 
+/* ------------------------------------------------------------------ flight (mission) */
+const escA = (s) => esc(s).replace(/"/g, '&quot;');
+const g3 = (x) => (Math.abs(x) >= 1e-3 && Math.abs(x) < 1e4 ? String(+x.toPrecision(3)) : x.toExponential(1));
+const SCENARIOS = {
+  nominal: 'Shaker: 50 g at 200 Hz from T+90 s for 10 s (vacuum, tubules standing)',
+  no_release: 'No release mechanism',
+  kick: 'Three single-cycle kicks: 5000 g at 5 kHz, at T+90, 150 and 210 s',
+  strong_shaker: 'Strong shaker: 500 g at 1 kHz from T+90 s for 5 s',
+  rough_grains: 'Nominal shaker, wall stickiness × 0.02 (rough grains or an anti-stick coating)',
+  lying: 'Nominal shaker, tubules lying flat on the deck',
+  spin_1hz: 'Nominal shaker, 1 Hz residual spin after de-spin (the guide’s upper value)',
+  gas_100pa: 'Nominal shaker, 100 Pa of air in the tubules',
+  gas_1atm: 'Nominal shaker, 1 atm of air in the tubules',
+  no_drag: 'Nominal shaker, no drag deceleration in the coasts',
+  'kick+lying': 'Kicks, tubules lying flat on the deck',
+  'kick+spin_1hz': 'Kicks, 1 Hz residual spin after de-spin (the guide’s upper value)',
+  'kick+gas_100pa': 'Kicks, 100 Pa of air in the tubules',
+  'kick+gas_1atm': 'Kicks, 1 atm of air in the tubules',
+};
+
+async function loadFlight() {
+  if (FLIGHT_LOADED || !INFO) return;
+  FLIGHT_LOADED = true;
+  try {
+    MISSION = await (await fetch('../data/mission_config.json', { cache: 'no-cache' })).json();
+    renderTubeEditor();
+  } catch (e) { $('fl-tubes').innerHTML = '<p class="fail">Could not load the mission configuration.</p>'; }
+  fetch('../data/mission_results.json', { cache: 'no-cache' }).then((r) => r.json()).then(renderMissionResults)
+    .catch(() => { $('fl-results').innerHTML = '<p class="muted small">No stored runs yet.</p>'; });
+}
+
+function renderTubeEditor() {
+  const opt = (list, v) => list.map((m) => `<option${m === v ? ' selected' : ''}>${esc(m)}</option>`).join('');
+  let h = '<div style="overflow-x:auto"><table class="small"><tr><th>Tubule</th><th>Dust</th><th>Sizes (µm)</th><th>Glass</th>' +
+    '<th title="Multiplies the work of adhesion: roughness or coatings lower it">Stickiness ×</th><th>Orientation</th><th>Deck position x, y (cm)</th></tr>';
+  MISSION.tubules.forEach((t, i) => {
+    const sd = t.dust.size_distribution || {};
+    h += `<tr><td><input id="fl-n${i}" value="${escA(t.name)}" style="min-width:150px"></td>` +
+      `<td><select id="fl-d${i}">${opt(INFO.dust_materials, t.dust.material)}</select></td>` +
+      `<td><input id="fl-lo${i}" type="number" step="any" value="${sd.min_m * 1e6}" style="width:62px"> – ` +
+      `<input id="fl-hi${i}" type="number" step="any" value="${sd.max_m * 1e6}" style="width:62px"></td>` +
+      `<td><select id="fl-w${i}">${opt(INFO.wall_materials, t.wall_material)}</select></td>` +
+      `<td><input id="fl-f${i}" type="number" step="any" value="${t.wall_adhesion_factor ?? 1}" style="width:64px"></td>` +
+      `<td><select id="fl-o${i}">${opt(['standing', 'lying'], t.orientation || 'standing')}</select></td>` +
+      `<td><input id="fl-x${i}" type="number" step="any" value="${(t.deck_position_m[0] * 100).toFixed(1)}" style="width:62px"> ` +
+      `<input id="fl-y${i}" type="number" step="any" value="${(t.deck_position_m[1] * 100).toFixed(1)}" style="width:62px"></td></tr>`;
+  });
+  $('fl-tubes').innerHTML = h + '</table></div><p class="small muted">Sizes: a sieve range with 90% of grains inside it ' +
+    '(assumed log-normal). Stickiness scatter: log-normal, σ = 0.6 in ln w.</p>';
+}
+
+function readTubes() {
+  const m = JSON.parse(JSON.stringify(MISSION));
+  m.tubules.forEach((t, i) => {
+    t.name = $('fl-n' + i).value || `T${i + 1}`;
+    t.dust.material = $('fl-d' + i).value;
+    t.dust.size_distribution = { type: 'sieve', min_m: +$('fl-lo' + i).value * 1e-6, max_m: +$('fl-hi' + i).value * 1e-6,
+      fraction_in_range: t.dust.size_distribution?.fraction_in_range ?? 0.9 };
+    t.wall_material = $('fl-w' + i).value;
+    t.wall_adhesion_factor = +$('fl-f' + i).value;
+    t.orientation = $('fl-o' + i).value;
+    t.deck_position_m = [+$('fl-x' + i).value / 100, +$('fl-y' + i).value / 100];
+  });
+  return m;
+}
+
+$('btn-loads').addEventListener('click', async () => {
+  if (BUSY) return;
+  setBusy(true);
+  $('fl-msg').textContent = 'Computing…';
+  try {
+    const r = await call('launch_loads', readTubes());
+    let h = '';
+    for (const t of r.tubules) {
+      const th = t.threshold_g;
+      h += `<h3 style="margin:22px 0 6px">${esc(t.name)}</h3><p class="small muted" style="margin:0 0 8px">${esc(t.dust)} on ` +
+        `${esc(t.wall)}, ${esc(t.orientation)}, ${g3(t.r_far_m * 100)} cm from the spin axis. Pull-off thresholds: ` +
+        `<b>10% of grains below ${g3(th.p10)} g, half below ${g3(th.median)} g</b>, 90% below ${g3(th.p90)} g.</p>` +
+        '<div style="overflow-x:auto"><table class="small"><tr><th>Phase</th><th>T+ (s)</th><th title="+ pulls grains off the bottom face, − presses them onto it">Load off the bottom (g)</th>' +
+        '<th title="Spin (centrifugal + Euler), plus the guide’s ~10 g lateral load during the ascent (worst case). May roll grains (not modelled).">Load along the face (g)</th><th>Grains pulled off</th></tr>';
+      for (const p of t.phases) {
+        h += `<tr><td>${esc(p.phase)}</td><td class="num">${p.t0.toFixed(1)}–${p.t1.toFixed(1)}</td>` +
+          `<td class="num">${g3(p.max_pull_off_aft_g)}</td><td class="num">${g3(p.max_tangential_g)}</td>` +
+          `<td class="num">${(100 * p.fraction_pulled_off_quasi_static).toFixed(1)}%</td></tr>`;
+      }
+      const v = t.vibration_estimate;
+      h += '</table></div>' + `<p class="small muted" style="margin:6px 0 0">Random-vibration estimate (test level, ` +
+        `Gaussian): ${(100 * v.ground_random_test).toFixed(1)}% freed in the ground vibration test, ` +
+        `${(100 * v.flight_lift_off_to_burnout).toFixed(1)}% from lift-off to burnout.</p>`;
+    }
+    $('fl-out').innerHTML = h + '<p class="small muted">"Pulled off" counts pull-off straight away from the face only. ' +
+      'Rolling along the face is not modelled; it may start at ~0.1–1 g for ~100 µm grains (an uncertain estimate), ' +
+      'below the spin loads.</p>';
+    $('fl-msg').textContent = '';
+  } catch (e) { $('fl-msg').innerHTML = `<span class="fail">${esc(e.message)}</span>`; }
+  setBusy(false);
+});
+
+function renderMissionResults(d) {
+  const order = Object.keys(SCENARIOS).filter((k) => d[k]).concat(Object.keys(d).filter((k) => !SCENARIOS[k]));
+  if (!order.length) { $('fl-results').innerHTML = '<p class="muted small">No stored runs yet.</p>'; return; }
+  const names = d[order[0]].tubules.map((t) => t.tubule);
+  let h = '<div style="overflow-x:auto"><table class="small"><tr><th>Design option</th>' +
+    names.map((n) => `<th>${esc(n.replace(/_/g, ' '))}</th>`).join('') + '</tr>';
+  for (const k of order) {
+    h += `<tr><td><b>${esc(k.replace(/_/g, ' '))}</b><br><span class="muted">${esc(SCENARIOS[k] || '')}</span></td>`;
+    for (const t of d[k].tubules) {
+      const med = t.ug_median_impact_speed_m_s;
+      h += `<td class="num">${t.grains_released} of ${t.n_grains} grains released (${t.detachment_events} release events), ` +
+        `${t.free_at_end} free at power-off<br>` +
+        `${t.ug_grain_grain_impacts} grain–grain impacts (${t.ug_monomer_sticks} of ${t.ug_monomer_impacts} single-grain stuck` +
+        `${med != null ? `, median ${g3(med * 1e3)} mm/s` : ''})</td>`;
+    }
+    h += '</tr>';
+  }
+  $('fl-results').innerHTML = h + '</table></div><p class="small muted">Grains released: distinct grains pulled off a ' +
+    'wall at least once; a grain that sticks again and is freed again counts once, but each release is an event. ' +
+    'Impacts are counted in the microgravity window only (T+88 to T+313 s, above ~100 km). 800 grains per tubule is ' +
+    'an example amount.</p>';
+}
+
 /* ------------------------------------------------------------------ verification */
 function buildVerifyTable() {
   const tb = document.querySelector('#vtable tbody');
   $('btn-verify').textContent = `Run all ${INFO.checks.length} tests`;
   tb.innerHTML = INFO.checks.map((c) => `<tr id="v-${c}"><td>${c.replace(/^check_/, '').replace(/_/g, ' ')}</td><td class="muted small">not run yet</td><td></td></tr>`).join('');
   fetch('../data/rebound_check.json').then((r) => r.json()).then(renderRebound).catch(() => {});
+  fetch('../data/lammps_check.json').then((r) => r.json()).then(renderLammps).catch(() => {});
 }
 
 $('btn-verify').addEventListener('click', async () => {
@@ -608,8 +733,29 @@ function renderRebound(d) {
   $('rebound').innerHTML = h + '</div>';
 }
 
+function renderLammps(d) {
+  const pct = (x) => `${(100 * x).toFixed(2)}%`;
+  let h = '<div class="grid c2"><div class="card"><h3>Collisions (undamped, 100 µm grains)</h3><table>' +
+    '<tr><th></th><th>DOLL-E</th><th>LAMMPS</th><th>LAMMPS − DOLL-E</th></tr>';
+  for (const c of d.collisions) {
+    h += `<tr><td>${esc(c.material)}: sticking threshold (mm/s)</td><td class="num">${fmt(c.dolle_threshold_force_break_m_s * 1e3)}</td>` +
+      `<td class="num">${fmt(c.lammps_threshold_m_s * 1e3)}</td><td class="num">${pct(c.rel_diff_same_criterion)}</td></tr>`;
+    for (const e of c.restitution) {
+      h += `<tr><td class="small">restitution at ${fmt(e.v_m_s * 1e3)} mm/s</td><td class="num">${e.dolle_e.toFixed(4)}</td>` +
+        `<td class="num">${e.lammps_e.toFixed(4)}</td><td class="num">${(e.lammps_e - e.dolle_e >= 0 ? '+' : '') + (e.lammps_e - e.dolle_e).toFixed(4)}</td></tr>`;
+    }
+  }
+  h += '</table></div><div class="card"><h3>Pull-off from a glass wall</h3><table><tr><th></th><th>1.5πwR (N)</th><th>LAMMPS (N)</th><th>LAMMPS − 1.5πwR</th></tr>';
+  for (const p of d.pulloff) {
+    h += `<tr><td>${esc(p.grain)} on ${esc(p.wall)}</td><td class="num">${p.jkr_pulloff_N.toExponential(4)}</td>` +
+      `<td class="num">${p.lammps_detach_force_N.toExponential(4)}</td><td class="num">${pct(p.rel_diff)}</td></tr>`;
+  }
+  h += '</table><p class="small muted" style="margin-bottom:0">A grain resting on a flat wall is pulled by a slowly rising ' +
+    'force until it comes off. DOLL-E uses 1.5πwR (JKR) to decide when wall-bound grains are released.</p></div></div>';
+  $('lammps').innerHTML = h;
+}
+
 /* ------------------------------------------------------------------ sources (provenance) */
-let SOURCES_LOADED = false;
 async function loadSources() {
   if (SOURCES_LOADED) return;
   SOURCES_LOADED = true;

@@ -9,6 +9,10 @@
     python -m dolle_sim rebound-check configs/flight_carbon_vs_silica.json --duration 60 --max-grains 600
     python -m dolle_sim verify
     python -m dolle_sim sources        # where every part of the physics comes from
+    python -m dolle_sim mission configs/mission_quarter_deck.json [--scenario kick] [--loads-only]
+    python -m dolle_sim sizes --d10 90e-6 --d50 100e-6 --d90 112e-6 --weighting volume
+    python -m dolle_sim sizes --image photo.png --um-per-px 1.25
+    python -m dolle_sim lammps-check   # cross-check of the JKR contact model against LAMMPS
 
 Provenance: Command-line wrapper only (no physics).
 """
@@ -230,6 +234,93 @@ def cmd_materials(a):
         print(f"{'':22s} {m.note}")
 
 
+def cmd_mission(a):
+    from .mission import run_mission, launch_report, apply_scenario
+    mission = _load(a.config)
+    m = apply_scenario(mission, a.scenario)
+    rep = launch_report(m)
+    print(f"Launch loads ({m.get('scenario') or 'nominal'}): per-grain wall pull-off thresholds and the loads of each phase")
+    for t in rep["tubules"]:
+        th = t["threshold_g"]
+        print(f"\n  {t['name']}: {t['dust']} on {t['wall']}, {t['orientation']}, r = {t['r_far_m'] * 100:.1f} cm; "
+              f"pull-off thresholds p10 {th['p10']:.3g} g, median {th['median']:.3g} g, p90 {th['p90']:.3g} g")
+        for ph in t["phases"]:
+            print(f"    {ph['phase']:32s} T+{ph['t0']:6.1f}-{ph['t1']:6.1f} s  pull off aft face {ph['max_pull_off_aft_g']:+8.3g} g"
+                  f"  along it {ph['max_tangential_g']:7.3g} g  pulled off: {100 * ph['fraction_pulled_off_quasi_static']:5.1f}%"
+                  f"  could slide: {100 * ph['fraction_could_slide']:5.1f}%")
+        v = t["vibration_estimate"]
+        print(f"    random-vibration estimate (Gaussian at the test level; see PROVENANCE.md): freed in the ground test "
+              f"{100 * v['ground_random_test']:.1f}% (sine test {100 * v['ground_sine_test']:.1f}%), lift-off to burnout "
+              f"{100 * v['flight_lift_off_to_burnout']:.1f}%, all {100 * v['all']:.1f}%")
+    print("\n  'pulled off' = pull-off normal to the aft face only. Rolling along the face is not modelled: it may start"
+          "\n  at ~0.1-1 g of tangential load for ~100 um grains (estimate, see PROVENANCE.md), below the spin loads.")
+    out = Path(a.out or Path("results") / "mission" / (a.scenario or "nominal"))
+    if a.loads_only:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "launch_loads.json").write_text(json.dumps(_jsonable(rep), indent=2))
+        print(f"\nWrote {out / 'launch_loads.json'}")
+        return 0
+    print(f"\nSimulating {len(m['tubules'])} tubules from T+{m.get('simulate_from_s', 0):g} s to power-off ...")
+    summary, _ = run_mission(mission, out, a.scenario, jobs=a.jobs)
+    for t in summary["tubules"]:
+        print(f"  {t['tubule']}: {t['grains_released']} of {t['n_grains']} grains released at least once "
+              f"({t['detachment_events']} release events: {t['detachments_by_phase']}); {t['free_at_end']} free at power-off; "
+              f"microgravity grain-grain impacts {t['ug_grain_grain_impacts']} ({t['ug_monomer_impacts']} single-grain, "
+              f"{t['ug_monomer_sticks']} stuck)")
+    print(f"\nResults written to {out.resolve()}")
+    return 0
+
+
+def cmd_sizes(a):
+    from . import sizes
+    if a.image:
+        if not a.um_per_px:
+            print("--image needs --um-per-px (the calibration, e.g. from a stage micrometer)")
+            return 1
+        from .sizing import measure_image
+        d_all = []
+        for img in a.image:
+            m = measure_image(img, a.um_per_px, dark_on_light=a.dark_on_light, split_touching=not a.no_split)
+            d_all.append(m["diameters_m"])
+            print(f"{img}: {m['n']} grains measured")
+        d = np.concatenate(d_all) if d_all else np.zeros(0)
+        if len(d):
+            st = sizes.summary(d)
+            print(f"all images: {len(d)} grains; number D10/D50/D90 = {st['number_d10_m']*1e6:.1f} / "
+                  f"{st['number_d50_m']*1e6:.1f} / {st['number_d90_m']*1e6:.1f} um; volume D10/D50/D90 = "
+                  f"{st['volume_d10_m']*1e6:.1f} / {st['volume_d50_m']*1e6:.1f} / {st['volume_d90_m']*1e6:.1f} um")
+        if a.out:
+            np.savetxt(a.out, d, header="area-equivalent diameter [m]")
+            print(f"wrote {a.out} ({len(d)} grains from {len(a.image)} image(s); use as size_distribution "
+                  "{'type': 'measured', 'csv': ...})")
+        return 0
+    if a.d10 and a.d50 and a.d90:
+        f = sizes.lognormal_from_percentiles(a.d10, a.d50, a.d90, a.weighting)
+        print(f"log-normal through {a.weighting}-weighted D10/D50/D90: count median {f['cmd_m']*1e6:.2f} um, "
+              f"sigma_g {f['gsd']:.4f}, misfit (max |ln d - fit|) {f['lognormal_misfit_ln']:.3f}")
+        mu, s_ = math.log(f["cmd_m"]), math.log(f["gsd"])
+        print(f"  volume median {math.exp(mu + 3 * s_ * s_) * 1e6:.2f} um, Sauter d32 {math.exp(mu + 2.5 * s_ * s_) * 1e6:.2f} um")
+        return 0
+    print("give --image (and --um-per-px) or --d10 --d50 --d90")
+    return 1
+
+
+def cmd_lammps(a):
+    from .lammps_check import compare
+    res = compare(Path(a.out))
+    for r in res["collisions"]:
+        print(f"{r['material']}: undamped sticking threshold LAMMPS {r['lammps_threshold_m_s']*1e3:.4f} mm/s vs DOLL-E "
+              f"(same break criterion) {r['dolle_threshold_force_break_m_s']*1e3:.4f} mm/s "
+              f"({100 * r['rel_diff_same_criterion']:+.2f}%); DOLL-E default criterion {r['dolle_threshold_default_m_s']*1e3:.4f} mm/s")
+        for e in r["restitution"]:
+            print(f"    v = {e['v_m_s']*1e3:.3f} mm/s: e LAMMPS {e['lammps_e']:.4f}, DOLL-E {e['dolle_e']:.4f}")
+    for p_ in res["pulloff"]:
+        print(f"pull-off {p_['grain']} on {p_['wall']}: LAMMPS {p_['lammps_detach_force_N']:.4e} N vs 1.5 pi w R "
+              f"{p_['jkr_pulloff_N']:.4e} N ({100 * p_['rel_diff']:+.2f}%; checked every {100 * p_['detection_step_rel']:.4f}% of F_c)")
+    print(f"Wrote {Path(a.out).resolve() / 'lammps_check.json'}")
+    return 0
+
+
 def cmd_sources(a):
     from .provenance import as_text, as_markdown
     print(as_markdown() if a.markdown else as_text())
@@ -284,6 +375,30 @@ def main(argv=None):
     v.set_defaults(fn=cmd_verify)
     m = sub.add_parser("materials", help="list the material database")
     m.set_defaults(fn=cmd_materials)
+    mi = sub.add_parser("mission", help="all tubules through the whole flight on one clock (launch to power-off)")
+    mi.add_argument("config")
+    mi.add_argument("--scenario")
+    mi.add_argument("--out")
+    mi.add_argument("--jobs", type=int, default=1, help="run tubules in parallel processes")
+    mi.add_argument("--loads-only", action="store_true", help="only the analytic launch-load report")
+    mi.set_defaults(fn=cmd_mission)
+    sz = sub.add_parser("sizes", help="size distributions: fit D10/D50/D90 or measure microscope images")
+    sz.add_argument("--image", nargs="+")
+    sz.add_argument("--um-per-px", type=float)
+    sz.add_argument("--dark-on-light", dest="dark_on_light", action="store_true", default=None,
+                    help="grains darker than the background (default: grains are the minority phase)")
+    sz.add_argument("--light-on-dark", dest="dark_on_light", action="store_false",
+                    help="grains brighter than the background (e.g. dark field)")
+    sz.add_argument("--no-split", action="store_true", help="do not split touching grains (watershed)")
+    sz.add_argument("--d10", type=float)
+    sz.add_argument("--d50", type=float)
+    sz.add_argument("--d90", type=float)
+    sz.add_argument("--weighting", default="volume", choices=["number", "volume"])
+    sz.add_argument("--out")
+    sz.set_defaults(fn=cmd_sizes)
+    lc = sub.add_parser("lammps-check", help="cross-check the JKR contact model against LAMMPS (pip install lammps)")
+    lc.add_argument("--out", default="results/lammps_check")
+    lc.set_defaults(fn=cmd_lammps)
     so = sub.add_parser("sources", help="where every part of the physics comes from, how it is checked, what is assumed")
     so.add_argument("--markdown", action="store_true")
     so.set_defaults(fn=cmd_sources)

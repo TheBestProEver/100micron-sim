@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dolle-sim"
-version = "0.3.0"
+version = "0.4.0"
 description = "DOLL-E: microgravity dust-collision simulator for 100 um grains on a sounding-rocket flight"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +13,8 @@ dependencies = ["numpy>=1.24", "scipy>=1.10", "matplotlib>=3.7"]
 [project.optional-dependencies]
 fast = ["numba>=0.58"]
 rebound = ["rebound>=4.0"]
+lammps = ["lammps>=2025.7.22"]
+image = ["scikit-image>=0.21"]
 test = ["pytest>=7"]
 
 [project.scripts]

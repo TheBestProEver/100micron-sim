@@ -1,8 +1,9 @@
 {
  "summary": [
-  "<b>None of the DOLL-E physics comes from REBOUND.</b> No REBOUND code is copied, translated or called by the simulator, and it runs with REBOUND unavailable (tested).",
-  "REBOUND is used in one optional file, <b>dolle_sim/rebound_check.py</b> (417 of 4963 lines). That file re-runs a simplified chamber inside REBOUND as an outside check of our trajectory integration and collision bookkeeping; it does not check the sticking physics. Two of our methods are standard ones REBOUND also uses (second-order leapfrog / velocity Verlet and direct-sum gravity), and our collision detection is related to its 'line' mode, all written independently.",
-  "The physics comes from published contact-mechanics and aerosol papers, textbook mechanics and electrostatics, and some derivations and choices of our own. Of the 38 components listed: 8 published, 15 standard, 8 derived or adapted here, 7 assumed. Each lists how it is checked: 22 automated verification checks (python -m dolle_sim verify, also part of the test suite), which you can also run in your browser on the Verify tab. Some components have no automated check, and say so.",
+  "<b>None of the DOLL-E physics comes from REBOUND or LAMMPS.</b> No code from either is copied, translated or called by the simulator, and it runs with both unavailable (tested).",
+  "REBOUND is used in one optional file, <b>dolle_sim/rebound_check.py</b> (417 of 6849 lines). That file re-runs a simplified chamber inside REBOUND as an outside check of our trajectory integration and collision bookkeeping; it does not check the sticking physics. Two of our methods are standard ones REBOUND also uses (second-order leapfrog / velocity Verlet and direct-sum gravity), and our collision detection is related to its 'line' mode, all written independently.",
+  "LAMMPS, a widely used open-source particle code, is likewise used only in one optional file, <b>dolle_sim/lammps_check.py</b> (195 lines). That file compares the JKR contact with LAMMPS's own implementation. With the same rule for when a contact breaks, the undamped sticking speeds agree to 0.1-0.3%, the restitution to within 0.011 and the pull-off force from a wall to 0.14%. With DOLL-E's default rule (the one all simulations use) the undamped sticking speeds are 1.42x higher.",
+  "The physics comes from published contact-mechanics and aerosol papers, textbook mechanics and electrostatics, and some derivations and choices of our own. Of the 50 components listed: 11 published, 18 standard, 12 derived or adapted here, 9 assumed. Each lists how it is checked: 25 automated verification checks (python -m dolle_sim verify, also part of the test suite), which you can also run in your browser on the Verify tab. Some components have no automated check, and say so.",
   "<b>What is not certain is the material data, and it matters a lot.</b> With the commonly used values, carbon (graphite) is predicted to stick below 38 mm/s and silica below 6.2 mm/s. Of that 6.2x ratio, 2.5x comes from the published surface energies, 1.7x from the published elastic constants and 1.5x from our assumed restitution values. The assumed damping also sets most of each threshold: without it graphite would stick only below 16 mm/s. Published estimates for dry silica in vacuum are up to ten times the commonly used surface energy, which would make silica about as sticky as graphite. Measuring this is what DOLL-E is for."
  ],
  "sections": [
@@ -218,15 +219,15 @@
     },
     {
      "component": "Neighbour lists",
-     "code": "simulation.py: _build_neighbors, _needs_rebuild",
+     "code": "simulation.py: _build_neighbors, _needs_rebuild, _dt_at, _forces_pos",
      "origin": "standard",
      "rebound": "none",
-     "basis": "Verlet neighbour lists. The skin adapts to the fastest grain, including speed gained from vibrating walls. If a bounce makes a grain faster than the list allows, the list is rebuilt immediately (counted in n_events['midstep_neighbor_rebuild']).",
+     "basis": "Verlet neighbour lists. The skin adapts to the fastest grain, including speed gained from vibrating walls. If a bounce makes a grain faster than the list allows, the list is rebuilt immediately (counted in n_events['midstep_neighbor_rebuild']). In mission runs the step is halved (in powers of two) while grains are fast, e.g. just after a kick, so the skin keeps its base size; in microgravity this changes only the cost (under launch loads it also lowers the resting-contact cut-off). While every grain is wall-bound, the pair forces cannot change and the last result is reused.",
      "refs": "Verlet (1967) Phys. Rev. 159, 98",
      "checks": [
       "no_overlap"
      ],
-     "checked": "Covered by the no-overlap and wall checks.",
+     "checked": "Covered by the no-overlap and wall checks. tests/test_flight.py checks that reusing the pair forces gives a bit-identical run (charged grains, a kick, bounces, re-sticking).",
      "limits": "Grains only change speed in impacts (which trigger the check) and in the kicks (covered by the per-step bound)."
     }
    ]
@@ -245,7 +246,7 @@
       "free_flight"
      ],
      "checked": "The constant part is covered by the free-flight check. The jitter has no check.",
-     "limits": "The preset values are representative assumptions, not taken from a launch provider's document. Replace them with real flight or vehicle data (accel_csv). The CSV is used as the apparent acceleration of a free grain, i.e. minus the accelerometer reading."
+     "limits": "The preset values are representative assumptions, not taken from a launch provider's document. Mission runs replace the constant part by the flight timeline (below). Replace them with real flight or vehicle data (accel_csv). The CSV is used as the apparent acceleration of a free grain, i.e. minus the accelerometer reading."
     },
     {
      "component": "Gas drag",
@@ -341,6 +342,124 @@
      "checks": [],
      "checked": "Included in the REBOUND comparison. Negligible (~1e-12 g).",
      "limits": "Truncated at the pair cutoff (negligible)."
+    }
+   ]
+  },
+  {
+   "title": "Launch, flight timeline and release (mission runs)",
+   "items": [
+    {
+     "component": "Flight timeline",
+     "code": "flight.py: FlightProfile, axial_g, spin_hz, spin_angle, phases",
+     "origin": "published",
+     "rebound": "none",
+     "basis": "All tubules share one flight clock from lift-off (T+0). From the RockSat User Guide 2026 (Table 3-1, Sec. 3.3): a 5.2 s first-stage burn, a 12.2 s coast and an 11.7 s second-stage burn (burnout at T+29.1 s); a 25 g sustained ascent load; spin of ~4.8 Hz at second-stage burnout, de-spun to 0-1 Hz; apogee ~160 km; experiment power-off at T+332 s. From mission fact sheets of the same vehicle: de-spin at T+54 s and the ~100 km crossings at ~T+88 s and ~T+313 s (the microgravity window; impact statistics are counted only inside it, and T+313-332 s is a separate descent phase). The yo-yo de-spin takes 0.9 s (Ettl & Pfaender 2009).",
+     "refs": "RockSat User Guide 2026 (NASA Wallops Flight Facility, Rev-A), Table 3-1, Secs. 3.3 and 5.2.5; NASA Sounding Rocket Program Office mission fact sheets (AWESOME 46.034/46.035, SEED 46.026/46.037, 2025); Ettl & Pfaender (2009) Proc. 19th ESA Symposium on European Rocket and Balloon Programmes",
+     "checks": [
+      "flight_frame"
+     ],
+     "checked": "tests/test_flight.py checks the guide values, that the roll angle is the integral of the spin rate (to 1e-6) and the rotating-frame loads. The integration through spin-up and de-spin is checked against an ODE solver (flight_frame).",
+     "limits": "The guide gives envelope values, not a measured history of this flight. Assumed: the thrust is flat at the 25 g envelope inside each burn, spin-up is linear to 4.8 Hz, and the residual spin after de-spin is 1 rpm (the options listed with sources in flight.py run from ~0.0006 Hz to the guide's 1 Hz; the spin_1hz scenario uses 1 Hz). Also assumed: the payload keeps its attitude after burnout (no re-orientation), so drag reverses at apogee. The guide's 50 g+ axial impulses are not in the default timeline (they can be added as 'impulses'). The guide's ~+/-10 g lateral ascent loads have no time history; they enter the launch-load report as a worst-case sideways load, not the simulation. Replace the profile with flight accelerometer data when available."
+    },
+    {
+     "component": "Drag and residual acceleration",
+     "code": "flight.py: axial_g, post_burn_drag, ballistic_speed",
+     "origin": "derived",
+     "rebound": "none",
+     "basis": "Between the burns the payload decelerates at ~3-5 g, estimated from fact-sheet trajectory points (burnout and ignition times and altitudes) assuming constant accelerations. After second-stage burnout the drag is scaled as air density times speed squared (exponential atmosphere, scale height 7 km) along a ballistic vertical flight from 17.2 km at ~1.65 km/s. Default 3 g at the start of each coast. Drag opposes the velocity: on the way up it pulls dust toward the nose end of a standing tubule, after apogee (T+~197 s) it pushes it toward the aft end, and below ~100 km on the way down it grows again (to ~1.5e-3 g by power-off). Its magnitude never drops below the residual acceleration, 1e-4 g by default.",
+     "refs": "Mission fact sheets (as above)",
+     "checks": [],
+     "checked": "Not checkable by simulation. The no_drag scenario switches it off.",
+     "limits": "An order-of-magnitude estimate: no drag or accelerometer data for this vehicle were found. In this model it falls to ~0.01 g by de-spin (T+54 s). It is far below the pull-off thresholds of the example dust (hundreds of g or more), so it does not decide whether grains stay on the aft face. The 1e-4 g residual is an assumed order of magnitude (Ettl & Pfaender give drag alone falling to ~2e-6 g at apogee); it sets where freed grains drift in the microgravity window, and its direction follows the drag (an assumption)."
+    },
+    {
+     "component": "Time-dependent payload spin",
+     "code": "simulation.py: _update_time, _frame_rotation; environment.py: update, spin_angle",
+     "origin": "standard",
+     "rebound": "none",
+     "basis": "While the spin rate Omega(t) changes, grains feel the Euler acceleration -dOmega/dt x r in addition to the centrifugal and Coriolis terms. A change of Omega leaves each free body's absolute angular momentum unchanged, so its spin relative to the tubule changes by I (Omega_old - Omega_new). Omega is advanced to the end of each step before the end-of-step forces, and the frame rotation uses the mid-step rate, which keeps the step second order.",
+     "refs": "",
+     "checks": [
+      "flight_frame",
+      "rotating_frame"
+     ],
+     "checked": "A grain released during the de-spin matches an independent ODE solution and converges at second order (error ratio ~4 when the step is halved). A spinning grain keeps its absolute angular momentum to ~1e-11 while the payload spins up to 4.8 Hz (flight_frame).",
+     "limits": "The spin axis is fixed along the rocket axis: coning and nutation of the payload are not modelled."
+    },
+    {
+     "component": "Dust settled on the aft face at lift-off",
+     "code": "simulation.py: _settle_on_face",
+     "origin": "assumed",
+     "rebound": "none",
+     "basis": "Before launch the dust rests on the aft face of each tubule as one layer of grains placed at random without overlap (random sequential placement; centre spacing at least 1.06 x the sum of the radii). Each grain is in adhesive contact with the face and stays there until the load exceeds its pull-off force.",
+     "refs": "",
+     "checks": [
+      "settling"
+     ],
+     "checked": "Under a 25 g load, moving grains come to rest on the aft face and none leaves the tubule (settling). In the mission runs every settled grain stays on the aft face through both burns.",
+     "limits": "Real powder forms a compacted, multi-layer bed with grain-grain contacts and pre-formed clusters. Here the grains do not touch each other, and only as much dust as fits in one layer is allowed (an error is raised otherwise). 800 grains of 90-106 um cover ~4% of a 0.5 x 0.5 in face. The amount of dust per tubule is not decided yet (800 is an example)."
+    },
+    {
+     "component": "Grains coming to rest under load",
+     "code": "simulation.py: _comes_to_rest",
+     "origin": "derived",
+     "rebound": "none",
+     "basis": "Under a sustained load pressing a grain onto a wall or onto a wall-bound grain, a bounce whose outgoing speed is below (load x time step) would return within one step. That is the start of an endless sequence of ever smaller bounces (inelastic collapse). Such a grain is treated as at rest in adhesive contact and is stuck.",
+     "refs": "",
+     "checks": [
+      "settling"
+     ],
+     "checked": "The settling check depends on it. It never acts in microgravity: at 1e-4 g, load x time step is ~4e-6 m/s, far below any sticking speed.",
+     "limits": "The grain stays where it lands; it does not roll or slide to a resting place."
+    },
+    {
+     "component": "Release from the wall (pull-off)",
+     "code": "simulation.py: _check_detachment, _detach_aggregate, _free_body",
+     "origin": "published",
+     "rebound": "none",
+     "basis": "A wall-bound grain comes off when the load pulling it away from the wall exceeds the JKR pull-off force F_c = 1.5 pi w R (Johnson, Kendall & Roberts 1971). The load is the grain's mass times the apparent acceleration (thrust or drag, centrifugal, Euler, tidal), plus its own forces (electrostatic, phoretic), plus the wall's peak acceleration while the tubule is shaken. For a wall-bound aggregate, the bond to the wall carries the whole aggregate and each grain-grain bond carries the part beyond it (tree statics); a bond loaded past its own pull-off force breaks.",
+     "refs": "Johnson, Kendall & Roberts (1971); Heim et al. (1999) PRL 83, 3328; Dominik & Tielens (1995) Phil. Mag. A 72, 783",
+     "checks": [
+      "detachment"
+     ],
+     "checked": "A steady 30 g pull frees exactly the grains whose thresholds lie below it, and a 40 g shaker exactly those below its peak, with the predicted release speeds (detachment). LAMMPS, an independent JKR implementation, gives the same pull-off force to 0.5% (lammps-check).",
+     "limits": "Only pull-off normal to the wall is modelled. ROLLING and sliding along the wall are not. Rolling needs far smaller forces than pull-off. Heim et al. (1999) measured 0.85 nN for 1.9 um silica spheres; scaled with grain size as R^0 (Dominik & Tielens 1995) to R^(2/3), rolling of a 100 um grain could start at ~0.1-1 g of tangential load (derived, uncertain). The centrifugal load during the 4.8 Hz spin (~10 g for the example layout, up to ~14 g at the deck edge) could therefore roll grains across the aft face toward the outer wall; the launch report lists the tangential loads. The model uses smooth spheres; roughness lowers F_c, by up to orders of magnitude (wall_adhesion_factor; the rough_grains scenario uses 0.02). The quasi-static criterion holds because the contact's natural frequency (~0.6 MHz for a 100 um silica grain on glass, derived) is far above the 20-2000 Hz loads. The release speed of a shaken grain, A omega cos(phi), ignores the elastic energy stored in the contact."
+    },
+    {
+     "component": "Release mechanisms (shaker, kick)",
+     "code": "simulation.py: _update_time, _check_detachment; mission.py: apply_scenario",
+     "origin": "derived",
+     "rebound": "none",
+     "basis": "A release shakes the whole tubule sinusoidally along one axis (amplitude A, angular frequency omega) for a set time: a shaker (many cycles) or a kick (one short cycle). The wall's peak acceleration A omega^2 adds to the pull-off load of grains on the faces normal to the shaking axis, and a freed grain leaves with the wall's speed at that moment. Bouncing grains meet moving walls as in 'Vibrating walls'. The scenarios compare no release, a 50 g / 200 Hz shaker, a 500 g / 1 kHz shaker and three 5000 g / 5 kHz kicks.",
+     "refs": "",
+     "checks": [
+      "detachment",
+      "walls"
+     ],
+     "checked": "Detachment counts and release speeds match the analytic values exactly (detachment).",
+     "limits": "The mechanism is not chosen yet; all levels are examples. Shaking only acts on faces normal to its axis, so a z kick does not free grains stuck to the side walls. Real actuators give non-sinusoidal pulses and excite tubule resonances."
+    },
+    {
+     "component": "Launch-load report",
+     "code": "mission.py: launch_report, grain_thresholds_g, _vib_exceed_prob",
+     "origin": "derived",
+     "rebound": "none",
+     "basis": "For each flight phase and tubule the report gives the loads at the tubule corner farthest from the spin axis. These are the axial load, sampled through each phase and at the peak of any impulse, and the centrifugal and Euler loads. During the ascent it adds the guide's ~10 g lateral load (Sec. 5.2.5) to the load along the face as a worst-case sum. It reports the fraction of the dust whose pull-off thresholds F_c/m those loads exceed, sampled over the size distribution and the adhesion scatter. It also reports the fraction that could slide: load along the face above friction x (adhesion minus pull) at the same instant. A random-vibration ESTIMATE uses Rice's up-crossing rate of a Gaussian process at the test level (thrust axis 10 Grms, flat 20-2000 Hz; RockSat User Guide 2026, Appendix B), nu0 = sqrt(int f^2 S df / int S df) = 1160 Hz. It gives the probability that the vibration ever exceeds each grain's margin, for three exposures: lift-off to second-stage burnout (thrust pressing ignored, drag pull included); the ground random test (20 s at full level, 1 g pressing the dust); and the sine test (7 g peak).",
+     "refs": "Rice (1944) Bell Syst. Tech. J. 23, 282; RockSat User Guide 2026, Appendix B and Sec. 5.2.5",
+     "checks": [],
+     "checked": "Rice's formula is standard, and the thresholds use the same JKR relation as the simulation. Not compared with a vibration test.",
+     "limits": "Vehicle vibration is not Gaussian or flat, and the test level is an envelope; real, peakier vibration would free more. Every up-crossing is counted as freeing the grain, which is valid because the contact responds far faster than 2 kHz. The lateral test axes are not included: they load aft-face dust sideways, not off the face. Rolling is not modelled (see above). The time-resolved simulation applies only the steady loads, not random vibration. For weakly bound dust it can therefore miss detachment: in the rough_grains scenario (stickiness x 0.02) the ground random test alone frees ~18-88% of the grains (estimate), weeks before flight."
+    },
+    {
+     "component": "Tubules on the quarter deck",
+     "code": "mission.py: tubule_size_m, tubule_chamber, mission_cfg",
+     "origin": "assumed",
+     "rebound": "none",
+     "basis": "Each tubule is a 0.5 x 0.5 x 1.5 in (12.7 x 12.7 x 38.1 mm) rectangular glass box at a given position on the deck. It is standing (long axis along the rocket axis) or lying (long axis in the deck plane), and each is simulated as its own chamber on the shared flight clock. A quarter space is half of the ~12 in deck (a semicircle) with 5.00 in of height (RockSat User Guide 2026, Secs. 1.5 and 5); the deck centre is taken to be on the spin axis.",
+     "refs": "RockSat User Guide 2026, Secs. 1.5, 5.2",
+     "checks": [],
+     "checked": "tests/test_flight.py (geometry, end-to-end mission run).",
+     "limits": "The given size is used as the inside size, because the wall thickness is not known. The walls are flat and smooth with sharp corners. Positions (check them against the deck keep-out area), materials, dust amounts and orientations in configs/mission_quarter_deck.json are examples. The camera of each tubule looks across its short horizontal side, and its field of view covers the other two sides."
     }
    ]
   },
@@ -477,6 +596,33 @@
    ]
   },
   {
+   "title": "Grain sizes",
+   "items": [
+    {
+     "component": "Grain size distributions",
+     "code": "sizes.py: sample_diameters, lognormal_from_percentiles, sieve_lognormal",
+     "origin": "standard",
+     "rebound": "none",
+     "basis": "A dust group can take its sizes from a supplier's sieve range, percentiles (D10/D50/D90), a log-normal, or a list of measured diameters. Laser diffraction (ISO 13320) reports volume-weighted percentiles and microscopy (ISO 13322) number-weighted ones. For a log-normal the two share sigma_g, and their medians differ by the Hatch-Choate factor exp(3 ln^2 sigma_g), so a log-normal spec must say which weighting it is. The simulation samples number-weighted grains.",
+     "refs": "Hatch & Choate (1929) J. Franklin Inst. 207, 369; Hinds (1999) Aerosol Technology, 2nd ed., ch. 4; ISO 13320:2020; ISO 13322-1:2014",
+     "checks": [],
+     "checked": "tests/test_sizes.py: percentile fits recover the log-normal exactly; 200,000 samples reproduce the volume percentiles to 0.5%; a sieve range with a stated fraction inside it gives that fraction.",
+     "limits": "A sieve range alone does not fix the shape inside the band. With a stated fraction the code assumes a log-normal centred on the band; without one, a distribution uniform in ln d. Both are assumptions, and the pre-flight report warns about them (and about truncation, which changes the stated percentiles). Suppliers rarely say whether 'x% in range' is by number or by mass. Real powders may not be log-normal; the fit reports its misfit. Grains are spheres."
+    },
+    {
+     "component": "Measuring grain sizes from micrographs",
+     "code": "sizing.py: measure_image, segment, synthetic_image",
+     "origin": "standard",
+     "rebound": "none",
+     "basis": "Uses the standard scikit-image recipe. It applies an Otsu threshold, fills holes, removes specks and grains cut by the image border, and splits touching grains by a watershed seeded with the extended maxima of the distance transform (so isolated elongated grains are not cut up). Each grain's size is its area-equivalent circle diameter (ISO 13322-1), scaled by a stage-micrometer calibration. Run it with python -m dolle_sim sizes --image.",
+     "refs": "van der Walt et al. (2014) PeerJ 2, e453 (scikit-image); Otsu (1979) IEEE Trans. SMC 9, 62; ISO 13322-1:2014; Soille (2003) Morphological Image Analysis, 2nd ed. (extended maxima)",
+     "checks": [],
+     "checked": "tests/test_sizes.py: on synthetic images of 120 grains of known size (~40 px, with and without touching pairs) and of 150 grains of ~20 px, the count is within 2 and the median diameter within 1%. Isolated rods, ellipses and irregular flakes are kept whole, and touching pairs up to a 2.5:1 size ratio are split.",
+     "limits": "Not yet tested on real micrographs. Validate it on a certified reference powder (e.g. NIST SRM 1004b glass beads) and count several hundred grains. It needs grains in one focal plane, few overlaps and about 20 px or more across each grain. Non-spherical grains (graphite flakes) are reported as area-equivalent spheres. Clusters of touching flakes may be split wrongly (use --no-split to check)."
+    }
+   ]
+  },
+  {
    "title": "Material properties (inputs, not results)",
    "items": [
     {
@@ -502,6 +648,17 @@
      "limits": "The measured cleavage energy of graphite (0.37 J/m^2 for two surfaces, Wang et al. 2015) implies gamma ~0.19 J/m^2, which would raise the predicted threshold from 38 to 81 mm/s. e_dry 0.7 and yield pressure 0.3 GPa are representative values we chose (assumed)."
     },
     {
+     "component": "Glass tubule walls",
+     "code": "materials.py",
+     "origin": "published",
+     "rebound": "none",
+     "basis": "Elastic constants come from datasheets: borosilicate 3.3 (E 63 GPa, nu 0.2, rho 2.23 g/cm^3; SCHOTT DURAN tubing; BOROFLOAT 33 gives 64 GPa), fused silica (73 GPa, 0.16, 2.20; Corning HPFS 7980) and soda-lime glass (72 GPa, 0.23, 2.53; a compilation, lower confidence). Stickiness: the wall's effective gamma is set so that silica grains on clean glass have w = 0.045 J/m^2. That is the value measured for ~90 um glass beads on plasma-cleaned glass in air (44.8 +/- 5.9 mJ/m^2, Sansao et al. 2021). A silanised (hydrophobic) wall gives w = 0.026 J/m^2, the middle of the 0.022-0.030 J/m^2 measured for silanised beads on silanised glass (Sansao et al. 2021; Zafar et al. 2014). The example mission spreads w log-normally with sigma 0.6 in ln w, matching the ~70% scatter of AFM adhesion forces on clean glass (Rush et al. 2018).",
+     "refs": "SCHOTT DURAN and BOROFLOAT 33 datasheets; Corning HPFS 7980 product information (2015); Sansao et al. (2021) Powder Technol. 384, 267; Zafar et al. (2014) Powder Technol. 264, 236; Rush et al. (2018) J. Aerosol Sci., doi:10.1016/j.jaerosci.2018.06.002; Kimura et al. (2015) ApJ 812, 67; Steinpilz et al. (2019) ApJ 874, 60; Kreuzig et al. (2024) A&A 688",
+     "checks": [],
+     "checked": "Not checkable by simulation. The pull-off force these values give is checked against LAMMPS (lammps-check).",
+     "limits": "All of these were measured in room air on clean glass. Dry or vacuum surfaces may be several times stickier (Kimura et al. 2015; Steinpilz et al. 2019), though Kreuzig et al. (2024) found no such effect for hydrophobic silica. No measurement of graphite on glass was found. The combining rule gives w = 0.078 J/m^2, inside the 0.04-0.10 J/m^2 range estimated from dispersive surface energies (derived only). Untreated grains on silanised walls have not been measured. Wall roughness, coating wear and the humidity in a sealed tubule are unknown. e_dry 0.8 and the other glass values are assumed. A drop test (Zafar et al. 2014) on the real glass and powders would measure w directly."
+    },
+    {
      "component": "All other materials and walls",
      "code": "materials.py",
      "origin": "assumed",
@@ -515,7 +672,8 @@
    ]
   },
   {
-   "title": "The REBOUND cross-check",
+   "title": "Cross-checks against other codes (REBOUND, LAMMPS)",
+   "external": true,
    "items": [
     {
      "component": "REBOUND comparison",
@@ -527,6 +685,17 @@
      "checks": [],
      "checked": "Part 1: agreement to 0.3 nm, an independent check of our integration (not of the equations). Part 2 (600 grains, 60 s): impact counts, stick fractions, wall hits and the median single-grain impact speed agree within counting noise (see the Verify tab for the numbers).",
      "limits": "REBOUND does NOT check the contact physics, the material values, spin, friction, charging or fragmentation, nor any force switched off for the comparison (electrostatics, g-jitter, gravity gradient, thermo-/photophoresis, radiation pressure, Brownian motion, wall vibration). In part 2 our own contact model, our exact drag + Coriolis velocity step and our wall handling run inside REBOUND, so agreement there shows consistent bookkeeping, not independent physics. REBOUND merges stuck grains into one sphere; DOLL-E keeps rigid clusters."
+    },
+    {
+     "component": "LAMMPS comparison",
+     "code": "lammps_check.py (optional)",
+     "origin": "standard",
+     "rebound": "none",
+     "basis": "Re-runs two contact tests in LAMMPS, a widely used open-source particle code with its own JKR implementation (GRANULAR package; its source uses the same force law, overlap-radius relation and modulus mixing as DOLL-E). Test 1: undamped head-on collisions of equal spheres, giving the sticking threshold and the restitution. Test 2: a grain resting on a flat wall under a slowly increasing body force, giving the detachment force.",
+     "refs": "Thompson et al. (2022) Comput. Phys. Commun. 271, 108171 (LAMMPS)",
+     "checks": [],
+     "checked": "With the same break criterion the undamped sticking thresholds agree to 0.26% (silica, 2.684 vs 2.691 mm/s) and 0.11% (graphite, 10.94 vs 10.95 mm/s). Restitution agrees within 0.002 at 2x and 4x the threshold and within 0.011 at 1.2x it. The wall pull-off force matches 1.5 pi w R to 0.14% for silica and graphite on borosilicate (checked every ~0.004% of F_c; the offset is the lag of the finite loading rate).",
+     "limits": "LAMMPS breaks a JKR contact at the maximum tensile force. DOLL-E, like Chokshi et al. (1993), breaks it at the end of the stable branch, so the default undamped thresholds differ by a factor of 0.70; they agree when DOLL-E uses the same criterion (JKRContact(separation='force')). Damped collisions are not compared: LAMMPS refuses its Tsuji damping (DOLL-E's law) with JKR, and the laws it does allow with JKR differ. Plasticity, friction and everything else in DOLL-E are not compared either."
     }
    ]
   }

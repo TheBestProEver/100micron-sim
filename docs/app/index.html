@@ -115,6 +115,7 @@
   <div class="tabs">
     <a href="#simulate" data-tab="simulate">Simulate</a>
     <a href="#sticking" data-tab="sticking">Quick calculator</a>
+    <a href="#flight" data-tab="flight">Flight</a>
     <a href="#verify" data-tab="verify">Verify</a>
     <a href="#sources" data-tab="sources">Sources</a>
   </div>
@@ -200,10 +201,33 @@
     </details>
   </section>
 
+  <!-- ================================================================ FLIGHT -->
+  <section class="pane" id="pane-flight">
+    <p>The whole flight on one clock, for glass tubules (0.5 × 0.5 × 1.5 in) on a quarter deck: lift-off, two motor burns
+      at up to 25 g, spin at up to 4.8 Hz, de-spin, microgravity above ~100 km (T+88 to T+313 s), and the descent until
+      the experiment powers off at T+332 s. Timing and loads come from the RockSat User Guide 2026 and mission fact sheets of the same rocket; the
+      <a href="#sources">Sources</a> tab marks what is estimated or assumed.</p>
+    <div class="card">
+      <h3 style="margin-top:0">Will the dust come off the bottom of the tubules?</h3>
+      <p class="small muted">Each grain sticks to the glass with a pull-off force of 1.5πwR. Below, that force divided by
+        the grain's weight on Earth gives the "threshold" in g, spread over the grain sizes and the scatter in stickiness.
+        It is compared with the loads in each phase, at the tubule corner farthest from the spin axis. Edit the tubules
+        and recompute (takes about a second).</p>
+      <div id="fl-tubes"></div>
+      <div class="btns"><button class="btn" id="btn-loads" disabled>Compute launch loads</button><span class="status" id="fl-msg"></span></div>
+      <div id="fl-out"></div>
+    </div>
+    <h2>Full-flight simulations (stored desktop runs)</h2>
+    <p class="muted">Every grain in all four example tubules, from lift-off to power-off, for each design option (release
+      mechanism, gas, orientation, spin). These runs take hours, so they are not run in the browser. Run them with
+      <span class="tag">python -m dolle_sim mission configs/mission_quarter_deck.json --scenario NAME</span>.</p>
+    <div id="fl-results"><p class="muted small">Loading…</p></div>
+  </section>
+
   <!-- ================================================================ VERIFY -->
   <section class="pane" id="pane-verify">
-    <p>22 tests compare the simulator with exact solutions, independent calculations and conservation laws. They run the
-      real code in your browser and take one to two minutes. The <a href="#sources">Sources</a> tab says which part of the
+    <p>25 tests compare the simulator with exact solutions, independent calculations and conservation laws. They run the
+      real code in your browser and take a few minutes. The <a href="#sources">Sources</a> tab says which part of the
       physics each test covers.</p>
     <div class="btns"><button class="btn big" id="btn-verify" disabled>Run all tests</button><span class="status" id="vmsg"></span></div>
     <table id="vtable"><thead><tr><th>Test</th><th>Result</th><th></th></tr></thead><tbody></tbody></table>
@@ -215,6 +239,14 @@
       first 0.2 s, before any collision, REBOUND's high-accuracy IAS15 integrator and ours agree to under a nanometre for
       the same equations of motion.</p>
     <div id="rebound"></div>
+    <h2>Cross-check with LAMMPS</h2>
+    <p class="muted">LAMMPS is a widely used open-source particle simulator with its own, independent implementation of
+      the same adhesive (JKR) contact model. None of DOLL-E comes from it; it is used only for this comparison (stored
+      desktop results). LAMMPS ends a contact at the maximum pulling force, DOLL-E at the end of the stable contact curve;
+      DOLL-E can use either, so the comparison uses LAMMPS's rule. Collisions are compared without damping: LAMMPS
+      refuses the damping law DOLL-E uses (Tsuji's) with this contact model, and the ones it allows are different.
+      Differences are LAMMPS minus DOLL-E.</p>
+    <div id="lammps"></div>
   </section>
 
   <!-- ================================================================ SOURCES -->

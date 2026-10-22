@@ -52,8 +52,17 @@ def preflight(cfg: dict, chamber: dict) -> dict:
     for g in groups:
         m = get_material(g["material"], ov)
         r = float(g.get("radius_m", 50e-6))
+        if "size_distribution" in g:            # use the number-weighted median of the size distribution
+            from .sizes import describe, sample_diameters
+            r = 0.5 * float(np.median(sample_diameters(g["size_distribution"], 4000, np.random.default_rng(0))))
+            desc = describe(g["size_distribution"])
+            for key in ("assumption", "truncated"):
+                if key in desc:
+                    W.append(f"{g['material']} size distribution: {desc[key]}.")
         n = int(g["count"])
         v0 = float(g.get("velocity", {}).get("speed_mean_m_s", 0.01))
+        at_rest = v0 <= 0 or (g.get("initial_state") or {}).get("type") == "settled"
+        v0 = max(v0, 1e-6)                  # dust at rest: launch-speed estimates below are not meaningful
         mass = sphere_mass(m, r)
         c = float(env.drag_coeff(r))
         tau = mass / c if c > 0 else math.inf
@@ -114,6 +123,8 @@ def preflight(cfg: dict, chamber: dict) -> dict:
         rng0 = np.random.default_rng(0)
         n_s = 20000
         speeds = np.abs(v0 + vs * rng0.standard_normal(n_s))
+        if speeds.sum() <= 0:                # dust at rest (e.g. settled on a face): no wall hits to estimate
+            speeds = np.full(n_s, 1e-12)
         # wall-hit rate is proportional to the speed: resample speeds flux-weighted
         speeds = rng0.choice(speeds, n_s, p=speeds / speeds.sum())
         # flux-weighted normal component of an isotropic velocity: v cos(theta), cos(theta) = sqrt(U)
@@ -157,7 +168,10 @@ def preflight(cfg: dict, chamber: dict) -> dict:
             W.append(f"[{m.name}] gas stopping time {tau:.2g} s < chamber crossing time {t_cross:.2g} s: "
                      "grains will stall in the gas before colliding. Lower the pressure "
                      f"(currently {env.P:g} Pa).")
-        if coll_per_grain < 0.1:
+        if at_rest:
+            W.append(f"[{m.name}] dust starts at rest (settled on a face): the launch-speed estimates do not apply; "
+                     "the collision rate depends on how the release mechanism frees the grains.")
+        elif coll_per_grain < 0.1:
             W.append(f"[{m.name}] only ~{coll_per_grain:.2g} collisions per grain expected "
                      f"({d['expected_pp_collisions_total']:.0f} total). Increase number density, "
                      "use colliding jets/targets, or a longer window.")

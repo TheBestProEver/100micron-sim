@@ -1,5 +1,5 @@
 {
- "version": "0.3.0",
+ "version": "0.4.0",
  "files": [
   "__init__.py",
   "analysis.py",
@@ -7,9 +7,12 @@
   "design.py",
   "electrostatics.py",
   "environment.py",
+  "flight.py",
   "materials.py",
+  "mission.py",
   "results.py",
   "simulation.py",
+  "sizes.py",
   "verification.py",
   "webapi.py",
   "viewer_template.html"

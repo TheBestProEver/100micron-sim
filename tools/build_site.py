@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 PKG = ROOT / "dolle_sim"
 WEB_FILES = ["__init__.py", "analysis.py", "contact.py", "design.py", "electrostatics.py", "environment.py",
-             "materials.py", "results.py", "simulation.py", "verification.py", "webapi.py", "viewer_template.html"]
+             "flight.py", "materials.py", "mission.py", "results.py", "simulation.py", "sizes.py", "verification.py",
+             "webapi.py", "viewer_template.html"]
 
 
 def copy_package():
@@ -48,6 +49,19 @@ def copy_data():
     if rb:
         (DOCS / "data" / "rebound_check.json").write_text(json.dumps(rb, indent=1))
         print("wrote docs/data/rebound_check.json")
+    shutil.copy2(ROOT / "configs" / "mission_quarter_deck.json", DOCS / "data" / "mission_config.json")
+    lc = ROOT / "results" / "lammps_check" / "lammps_check.json"
+    if lc.exists():
+        shutil.copy2(lc, DOCS / "data" / "lammps_check.json")
+        print("wrote docs/data/lammps_check.json")
+    ms = {}
+    for p in sorted((ROOT / "results" / "mission").glob("*/mission_summary.json")):
+        d = json.loads(p.read_text())
+        ms[p.parent.name] = {"scenario": d.get("scenario") or "nominal", "gas": d.get("gas"),
+                             "tubules": d["tubules"], "launch_loads": d["launch_loads"]["tubules"]}
+    if ms:
+        (DOCS / "data" / "mission_results.json").write_text(json.dumps(ms, indent=1))
+        print(f"wrote docs/data/mission_results.json ({len(ms)} scenarios)")
     (DOCS / ".nojekyll").write_text("")
     write_provenance()
 
@@ -60,6 +74,11 @@ def write_provenance():
     (DOCS / "data" / "provenance.json").write_text(json.dumps(provenance.as_dict(counts), indent=1), encoding="utf-8")
     (ROOT / "PROVENANCE.md").write_text(provenance.as_markdown(counts), encoding="utf-8")
     print("wrote PROVENANCE.md and docs/data/provenance.json")
+    # keep the number of verification checks quoted on the pages in step with verification.py
+    n = provenance.n_checks()
+    for page in (DOCS / "index.html", DOCS / "app" / "index.html"):
+        html = page.read_text(encoding="utf-8")
+        page.write_text(re.sub(r"\b\d+ tests compare", f"{n} tests compare", html), encoding="utf-8")
 
 
 def _decimate_viewer(src: Path, dst: Path, title: str, max_particles=500, frame_step=2, t_max=60.0):

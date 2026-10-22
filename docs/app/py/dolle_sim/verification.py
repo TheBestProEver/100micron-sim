@@ -593,11 +593,129 @@ def check_brownian():
                 f"<m v^2>/kT = {ratio:.3f}", "within 5%", abs(ratio - 1) < 0.05)
 
 
+# ---------------------------------------------------------------------------- flight timeline
+_QUIET_EM = {"coulomb": False, "space_charge": False, "lorentz": False}
+
+
+def _flight_cfg(T0, T, dt, prof, extra_env=None):
+    env = {"preset": "ideal", "pressure_pa": 0.0, "gravity_gradient": False, "magnetic_field_t": [0, 0, 0],
+           "start_time_s": T0, "flight_profile": prof}
+    env.update(extra_env or {})
+    return {"dt_s": dt, "dt_launch_s": dt, "duration_s": T, "forces": {**QUIET, **_QUIET_EM},
+            "contact": {"contact_charging": False}, "environment": env}
+
+
+def check_flight_frame():
+    """Free flight through the de-spin (time-dependent spin, Euler force) vs an ODE; spins keep their absolute
+    angular momentum while the payload spins up and is de-spun."""
+    from scipy.integrate import solve_ivp
+    from .flight import FlightProfile
+    prof_cfg = {"residual_g": 0.0, "residual_spin_hz": 1.0 / 60.0, "coast_drag_g": 0.0, "post_burn_drag_g": 0.0}
+    prof = FlightProfile.from_config(prof_cfg)
+    T0, T = 53.8, 1.2
+    ch = {"name": "t", "size_m": [20.0] * 3, "center_from_spin_axis_m": [0.06, 0.02, 0.0],
+          "particles": [{"material": "silica", "count": 1, "radius_m": R, "region_m": {"center": [10, 10, 10], "size": [0, 0, 0]},
+                         "velocity": {"mode": "jet", "direction": [0.3, -0.2, 0.1], "cone_deg": 0,
+                                      "speed_mean_m_s": 0.01, "speed_sigma_m_s": 0}}]}
+
+    def rhs(t, y, off):
+        r, v = y[:3], y[3:]
+        Om = np.array([0, 0, 2 * math.pi * prof.spin_hz(T0 + t)])
+        Omd = np.array([0, 0, prof.spin_rate_dot(T0 + t, 1e-7)])
+        ra = r + off
+        return np.concatenate([v, -2 * np.cross(Om, v) - np.cross(Om, np.cross(Om, ra)) - np.cross(Omd, ra)])
+    errs, path = [], 0.0
+    for dt in (1e-3, 5e-4, 2.5e-4):
+        cfg = _flight_cfg(T0, T, dt, prof_cfg)
+        # a single grain has no neighbours: a large skin keeps the step at dt (fast grains otherwise get
+        # shorter steps, which would hide the convergence order this check measures)
+        cfg["contact"]["neighbor_skin_m"] = 100.0
+        sim = ChamberSim(cfg, ch, 0)
+        x0, v0, off = sim.pos[0].copy(), sim.V[0].copy(), sim.axis_offset
+        sim.run(progress=False)
+        sol = solve_ivp(rhs, (0, T), np.concatenate([x0, v0]), args=(off,), rtol=1e-12, atol=1e-15, max_step=5e-4)
+        errs.append(float(np.linalg.norm(sim.pos[0] - sol.y[:3, -1])))
+        path = float(np.linalg.norm(sol.y[:3, -1] - x0))
+    ratio = errs[1] / errs[2]
+    # absolute angular momentum of a spinning grain through the spin-up of the boost (0 -> 4.8 Hz)
+    chs = {"name": "t", "size_m": [50.0] * 3, "particles": [{"material": "silica", "count": 1, "radius_m": R,
+           "region_m": {"center": [25, 25, 25], "size": [0, 0, 0]}, "velocity": {"speed_mean_m_s": 0.0}}]}
+    s = ChamberSim(_flight_cfg(0.0, 3.0, 5e-4, {"burn1": [0.0, 1.0], "burn2": [1.5, 3.0], "burn_g": 0.0,
+                                                 "residual_g": 0.0, "despin_s": 10.0, "coast_drag_g": 0.0,
+                                                 "post_burn_drag_g": 0.0}), chs, 0)
+    I0 = s.Iiso[0]
+    s.L[0] = I0 * 2 * math.pi * 3 * np.array([0.6, 0.0, 0.8])
+    La0 = s.L[0] + I0 * s.env.omega
+    s.run(progress=False)
+    dL = float(np.linalg.norm(s.L[0] + I0 * s.env.omega - s.env.to_chamber(La0, s.duration)) / np.linalg.norm(La0))
+    ok = errs[1] < 2e-3 * path and ratio > 3.5 and dL < 1e-8
+    return _res("flight_frame", "Spin-up and de-spin (time-dependent spin)",
+                "A grain released during the yo-yo de-spin (4.8 Hz -> 1 rpm in 0.9 s; Coriolis, centrifugal and Euler "
+                "forces) vs a 1e-12 ODE solution; a spinning grain must keep its absolute angular momentum while the "
+                "payload spins up from 0 to 4.8 Hz in 3 s.",
+                f"error {100 * errs[1] / path:.2f}% of a {path:.1f} m path at dt = 0.5 ms, convergence ratio {ratio:.2f}; "
+                f"|dL_abs|/L = {dL:.1e}", "< 0.2%; ratio > 3.5; < 1e-8", ok)
+
+
+def _bed(n, prof_T0, T, prof, release=None, seed=1):
+    tub = {"name": "t", "size_m": [0.0127, 0.0127, 0.0381], "wall_material": "glass_fluorosilane",
+           "wall_adhesion_factor": 0.05, "release": release or [],
+           "particles": [{"material": "silica", "count": n, "surface_energy_log_sigma": 1.0,
+                          "size_distribution": {"type": "sieve", "min_m": 9e-5, "max_m": 1.06e-4},
+                          "initial_state": {"type": "settled", "face": "-z"}}]}
+    return ChamberSim(_flight_cfg(prof_T0, T, 4e-3, prof), tub, seed)
+
+
+def check_detachment():
+    """Wall-bound grains come off exactly when the load exceeds the JKR pull-off force 1.5 pi w R."""
+    from .environment import G0
+    s = _bed(300, 6.0, 0.05, {"coast_drag_g": 30.0, "spin_burnout_hz": 0.0})
+    a_th = s.Fc_wall / s.mass / G0
+    exp1 = int((a_th < 30.0).sum())
+    s.run(progress=False)
+    got1 = s.n_events["detach"]
+    s2 = _bed(300, 100.0, 0.05, {"residual_g": 0.0, "spin_burnout_hz": 0.0, "residual_spin_hz": 0.0,
+                                 "post_burn_drag_g": 0.0},
+              release=[{"type": "shake", "start_s": 100.01, "cycles": 4, "frequency_hz": 200, "peak_g": 40.0, "axis": "z"}],
+              seed=2)
+    a_th2 = s2.Fc_wall / s2.mass / G0
+    exp2 = int((a_th2 < 40.0).sum())
+    s2.run(progress=False)
+    A, w = s2.release[0]["amplitude_m"], s2.release[0]["omega"]
+    verr = max([abs(d["v"] - A * w * math.sqrt(1 - (a_th2[d["grain"]] / 40.0) ** 2)) for d in s2.detach_log] or [0.0])
+    ok = got1 == exp1 and s2.n_events["detach"] == exp2 and verr < 1e-9 and 0 < exp1 < 300 and 0 < exp2 < 300
+    return _res("detachment", "Release of wall-bound grains",
+                "300 grains settled on a tubule's aft face, with per-grain pull-off thresholds spread over ~2-1000 g: a "
+                "steady 30 g pull (drag deceleration) and a 40 g, 200 Hz shaker burst must free exactly the grains whose "
+                "JKR pull-off force 1.5 pi w R is exceeded; shaken grains leave at A w cos(phi), sin(phi) = a_th/(A w^2).",
+                f"steady pull: {got1} of {exp1} expected; shaker: {s2.n_events['detach']} of {exp2} expected, "
+                f"release speed error {verr:.1e} m/s", "exact; < 1e-9 m/s", ok)
+
+
+def check_settling():
+    """Under a sustained 25 g load every grain comes to rest on the loaded face, and none leaves the tubule."""
+    ch = {"name": "t", "size_m": [0.0127, 0.0127, 0.0381], "wall_material": "glass_fluorosilane", "wall_adhesion_factor": 0.05,
+          "particles": [{"material": "silica", "count": 200, "radius_m": R, "velocity": {"speed_mean_m_s": 0.05}}]}
+    s = ChamberSim(_flight_cfg(1.0, 0.4, 4e-3, {"spin_burnout_hz": 0.0}), ch, 3)
+    s.dt_launch = 5e-4
+    s.run(progress=False)
+    fz = s.frozen[s.body]
+    on_aft = int((fz & (s.fw_ax[s.body] == 2) & (s.fw_side[s.body] < 0)).sum())
+    inside = bool(np.all((s.pos >= s.rad[:, None] - 1e-12) & (s.pos <= s.size - s.rad[:, None] + 1e-12)))
+    ok = fz.mean() > 0.95 and on_aft > 0.9 * s.N and inside and s.contain_corrections == 0
+    return _res("settling", "Dust settles under the boost load",
+                "200 grains moving at 5 cm/s in a 0.5 x 0.5 x 1.5 in tubule under 25 g: within 0.4 s they must come to rest "
+                "on the aft face (bounces that would return within one step are resting contacts), with none outside.",
+                f"{int(fz.sum())}/{s.N} wall-bound, {on_aft} on the aft face; safety-net corrections {s.contain_corrections}",
+                "> 95%, > 90% aft, none outside", ok)
+
+
 CHECKS = [check_elastic_limit, check_damping, check_thornton_ning, check_plastic_damping, check_energy_scaling,
           check_threshold_limits, check_free_flight, check_rotating_frame, check_rigid_body, check_impulse,
           check_conservation, check_walls, check_no_overlap, check_space_charge, check_charge_saturation,
           check_threshold_fit, check_spin_rotating_frame, check_fragmentation_energy, check_friction_energy,
-          check_drag_limits, check_thermophoresis, check_brownian]
+          check_drag_limits, check_thermophoresis, check_brownian, check_flight_frame, check_detachment,
+          check_settling]
 
 
 def list_checks():

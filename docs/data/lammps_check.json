@@ -1,0 +1,72 @@
+{
+  "collisions": [
+    {
+      "material": "silica",
+      "radius_m": 5e-05,
+      "dolle_threshold_force_break_m_s": 0.0026905262084282503,
+      "dolle_threshold_default_m_s": 0.0038279380188233143,
+      "lammps_threshold_m_s": 0.002683629107552152,
+      "rel_diff_same_criterion": -0.002563476562500222,
+      "restitution": [
+        {
+          "v_m_s": 0.0032286314501139,
+          "lammps_e": 0.5553451372322037,
+          "dolle_e": 0.5494599515681398
+        },
+        {
+          "v_m_s": 0.005381052416856501,
+          "lammps_e": 0.8653628865621614,
+          "dolle_e": 0.8658409880665192
+        },
+        {
+          "v_m_s": 0.010762104833713001,
+          "lammps_e": 0.9696226494234141,
+          "dolle_e": 0.967712242897994
+        }
+      ]
+    },
+    {
+      "material": "graphite",
+      "radius_m": 5e-05,
+      "dolle_threshold_force_break_m_s": 0.010951690527609383,
+      "dolle_threshold_default_m_s": 0.015581484547408781,
+      "lammps_threshold_m_s": 0.010939658641043407,
+      "rel_diff_same_criterion": -0.001098632812499889,
+      "restitution": [
+        {
+          "v_m_s": 0.01314202863313126,
+          "lammps_e": 0.5597125864936916,
+          "dolle_e": 0.5494609288306187
+        },
+        {
+          "v_m_s": 0.021903381055218767,
+          "lammps_e": 0.8644020804029923,
+          "dolle_e": 0.8658408931959548
+        },
+        {
+          "v_m_s": 0.04380676211043753,
+          "lammps_e": 0.9679146067200078,
+          "dolle_e": 0.9677121804577069
+        }
+      ]
+    }
+  ],
+  "pulloff": [
+    {
+      "grain": "silica",
+      "wall": "glass_borosilicate",
+      "lammps_detach_force_N": 1.063042134178138e-05,
+      "jkr_pulloff_N": 1.0615957104987713e-05,
+      "rel_diff": 0.0013624995514414096,
+      "detection_step_rel": 3.75e-05
+    },
+    {
+      "grain": "graphite",
+      "wall": "glass_borosilicate",
+      "lammps_detach_force_N": 1.8412429878306718e-05,
+      "jkr_pulloff_N": 1.8387377076810526e-05,
+      "rel_diff": 0.0013625000124561915,
+      "detection_step_rel": 3.75e-05
+    }
+  ]
+}
