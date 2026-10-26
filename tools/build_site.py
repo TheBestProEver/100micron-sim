@@ -22,7 +22,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 PKG = ROOT / "dolle_sim"
-WEB_FILES = ["__init__.py", "analysis.py", "contact.py", "design.py", "electrostatics.py", "environment.py",
+WEB_FILES = ["__init__.py", "analysis.py", "atmosphere.py", "contact.py", "design.py", "electrostatics.py", "environment.py",
              "flight.py", "materials.py", "mission.py", "results.py", "simulation.py", "sizes.py", "verification.py",
              "webapi.py", "viewer_template.html"]
 

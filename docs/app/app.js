@@ -570,7 +570,7 @@ $('btn-inv').addEventListener('click', async () => {
 
 /* ------------------------------------------------------------------ flight (mission) */
 const escA = (s) => esc(s).replace(/"/g, '&quot;');
-const g3 = (x) => (Math.abs(x) >= 1e-3 && Math.abs(x) < 1e4 ? String(+x.toPrecision(3)) : x.toExponential(1));
+const g3 = (x) => (x === 0 ? '0' : Math.abs(x) >= 1e-3 && Math.abs(x) < 1e4 ? String(+x.toPrecision(3)) : x.toExponential(1));
 const SCENARIOS = {
   nominal: 'Shaker: 50 g at 200 Hz from T+90 s for 10 s (vacuum, tubules standing)',
   no_release: 'No release mechanism',
@@ -586,7 +586,10 @@ const SCENARIOS = {
   'kick+spin_1hz': 'Kicks, 1 Hz residual spin after de-spin (the guide’s upper value)',
   'kick+gas_100pa': 'Kicks, 100 Pa of air in the tubules',
   'kick+gas_1atm': 'Kicks, 1 atm of air in the tubules',
+  'rough_grains+shock_oblique': 'Weakly bound dust; parachute and splash shocks at 45 degrees (half sideways)',
+  'rough_grains+hang_nose_up': 'Weakly bound dust; hanging nose up under the parachute',
 };
+const FACE = { '-z': 'bottom (aft)', '+z': 'top (nose end)', '-x': 'side −x', '+x': 'side +x', '-y': 'side −y', '+y': 'side +y' };
 
 async function loadFlight() {
   if (FLIGHT_LOADED || !INFO) return;
@@ -646,11 +649,12 @@ $('btn-loads').addEventListener('click', async () => {
       h += `<h3 style="margin:22px 0 6px">${esc(t.name)}</h3><p class="small muted" style="margin:0 0 8px">${esc(t.dust)} on ` +
         `${esc(t.wall)}, ${esc(t.orientation)}, ${g3(t.r_far_m * 100)} cm from the spin axis. Pull-off thresholds: ` +
         `<b>10% of grains below ${g3(th.p10)} g, half below ${g3(th.median)} g</b>, 90% below ${g3(th.p90)} g.</p>` +
-        '<div style="overflow-x:auto"><table class="small"><tr><th>Phase</th><th>T+ (s)</th><th title="+ pulls grains off the bottom face, − presses them onto it">Load off the bottom (g)</th>' +
+        '<div style="overflow-x:auto"><table class="small"><tr><th>Phase</th><th>T+ (s)</th><th>Pressing onto the bottom, up to (g)</th><th>Pulling off the bottom, up to (g)</th>' +
         '<th title="Spin (centrifugal + Euler), plus the guide’s ~10 g lateral load during the ascent (worst case). May roll grains (not modelled).">Load along the face (g)</th><th>Grains pulled off</th></tr>';
       for (const p of t.phases) {
         h += `<tr><td>${esc(p.phase)}</td><td class="num">${p.t0.toFixed(1)}–${p.t1.toFixed(1)}</td>` +
-          `<td class="num">${g3(p.max_pull_off_aft_g)}</td><td class="num">${g3(p.max_tangential_g)}</td>` +
+          `<td class="num">${g3(p.max_press_onto_aft_g)}</td><td class="num">${p.max_pull_off_aft_g > 0 ? g3(p.max_pull_off_aft_g) : '0'}</td>` +
+          `<td class="num">${g3(p.max_tangential_g)}</td>` +
           `<td class="num">${(100 * p.fraction_pulled_off_quasi_static).toFixed(1)}%</td></tr>`;
       }
       const v = t.vibration_estimate;
@@ -677,16 +681,19 @@ function renderMissionResults(d) {
     for (const t of d[k].tubules) {
       const med = t.ug_median_impact_speed_m_s;
       h += `<td class="num">${t.grains_released} of ${t.n_grains} grains released (${t.detachment_events} release events), ` +
-        `${t.free_at_end} free at power-off<br>` +
+        `${t.free_at_power_off ?? '?'} free at power-off (T+332 s), ${t.free_at_end} at the end<br>` +
         `${t.ug_grain_grain_impacts} grain–grain impacts (${t.ug_monomer_sticks} of ${t.ug_monomer_impacts} single-grain stuck` +
-        `${med != null ? `, median ${g3(med * 1e3)} mm/s` : ''})</td>`;
+        `${med != null ? `, median ${g3(med * 1e3)} mm/s` : ''})<br><span class="muted">5 s after splashdown: ` +
+        Object.entries(t.wall_bound_by_face).sort((a, b) => b[1] - a[1]).map(([f, n]) => `${n} on the ${FACE[f] || f}`).join(', ') +
+        `</span></td>`;
     }
     h += '</tr>';
   }
   $('fl-results').innerHTML = h + '</table></div><p class="small muted">Grains released: distinct grains pulled off a ' +
     'wall at least once; a grain that sticks again and is freed again counts once, but each release is an event. ' +
-    'Impacts are counted in the microgravity window only (T+88 to T+313 s, above ~100 km). 800 grains per tubule is ' +
-    'an example amount.</p>';
+    'Impacts are counted in the microgravity window only (T+88 to T+313 s, above ~100 km); each run continues ' +
+    'through re-entry and the parachute to splashdown. 800 grains per tubule is an example amount. Faces are for ' +
+    'standing tubules (bottom = aft end).</p>';
 }
 
 /* ------------------------------------------------------------------ verification */

@@ -245,7 +245,8 @@ def cmd_mission(a):
         print(f"\n  {t['name']}: {t['dust']} on {t['wall']}, {t['orientation']}, r = {t['r_far_m'] * 100:.1f} cm; "
               f"pull-off thresholds p10 {th['p10']:.3g} g, median {th['median']:.3g} g, p90 {th['p90']:.3g} g")
         for ph in t["phases"]:
-            print(f"    {ph['phase']:32s} T+{ph['t0']:6.1f}-{ph['t1']:6.1f} s  pull off aft face {ph['max_pull_off_aft_g']:+8.3g} g"
+            print(f"    {ph['phase']:30s} T+{ph['t0']:6.1f}-{ph['t1']:6.1f} s  onto aft face up to {ph['max_press_onto_aft_g']:6.3g} g,"
+                  f" off it up to {max(ph['max_pull_off_aft_g'], 0.0):7.3g} g"
                   f"  along it {ph['max_tangential_g']:7.3g} g  pulled off: {100 * ph['fraction_pulled_off_quasi_static']:5.1f}%"
                   f"  could slide: {100 * ph['fraction_could_slide']:5.1f}%")
         v = t["vibration_estimate"]
@@ -260,11 +261,13 @@ def cmd_mission(a):
         (out / "launch_loads.json").write_text(json.dumps(_jsonable(rep), indent=2))
         print(f"\nWrote {out / 'launch_loads.json'}")
         return 0
-    print(f"\nSimulating {len(m['tubules'])} tubules from T+{m.get('simulate_from_s', 0):g} s to power-off ...")
+    print(f"\nSimulating {len(m['tubules'])} tubules from T+{m.get('simulate_from_s', 0):g} s to the end of the run "
+          f"(splashdown + 5 s unless simulate_to_s is set) ...")
     summary, _ = run_mission(mission, out, a.scenario, jobs=a.jobs)
     for t in summary["tubules"]:
         print(f"  {t['tubule']}: {t['grains_released']} of {t['n_grains']} grains released at least once "
-              f"({t['detachment_events']} release events: {t['detachments_by_phase']}); {t['free_at_end']} free at power-off; "
+              f"({t['detachment_events']} release events: {t['detachments_by_phase']}); {t['free_at_power_off']} free at "
+              f"power-off, {t['free_at_end']} at the end (T+{t['end_s']:.0f} s); "
               f"microgravity grain-grain impacts {t['ug_grain_grain_impacts']} ({t['ug_monomer_impacts']} single-grain, "
               f"{t['ug_monomer_sticks']} stuck)")
     print(f"\nResults written to {out.resolve()}")
@@ -375,7 +378,7 @@ def main(argv=None):
     v.set_defaults(fn=cmd_verify)
     m = sub.add_parser("materials", help="list the material database")
     m.set_defaults(fn=cmd_materials)
-    mi = sub.add_parser("mission", help="all tubules through the whole flight on one clock (launch to power-off)")
+    mi = sub.add_parser("mission", help="all tubules through the whole flight on one clock (launch to splashdown)")
     mi.add_argument("config")
     mi.add_argument("--scenario")
     mi.add_argument("--out")

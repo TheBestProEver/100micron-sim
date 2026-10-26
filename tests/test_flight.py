@@ -54,32 +54,34 @@ def test_scenarios_combine():
     assert all(t["orientation"] == "standing" for t in m["tubules"])          # the original is untouched
 
 
-def _kick_run(force_recompute, count=60):
+def _kick_run(force_recompute, count=150):
     from dolle_sim.mission import apply_scenario, mission_cfg, tubule_chamber
     from dolle_sim.simulation import ChamberSim
-    m = apply_scenario(json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text()), "kick")
-    m["simulate_from_s"], m["flight_profile"]["power_off_s"] = 89.8, 90.6
-    t = m["tubules"][0]
-    t["dust"].update(count=count, charge_e_mean=2e4, charge_e_sigma=1e4)   # nonzero pair forces
-    s = ChamberSim(mission_cfg(m), tubule_chamber(m, t), 3)
-    if force_recompute:
+    m = apply_scenario(json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text()), "kick+spin_1hz")
+    m["simulate_from_s"], m["simulate_to_s"] = 89.9, 100.0
+    t = m["tubules"][1]                                  # graphite: grains stick, aggregates land on the walls
+    t["dust"].update(count=count, charge_e_mean=2e4, charge_e_sigma=1e4)   # nonzero pair and space-charge forces
+    s = ChamberSim(mission_cfg(m), tubule_chamber(m, t), 1)
+    if force_recompute:                                  # no reuse of forces, no aggregate pre-check
         orig = s._forces_pos
 
         def always(vm):
-            s._pair_stale = True
+            s._pair_stale = s._charge_stale = s._sc_dirty = True
             return orig(vm)
         s._forces_pos = always
+        s._aggregate_may_fail = lambda b, a_sh: True
     s.run(progress=False)
     return s
 
 
-def test_pair_force_cache_is_exact():
-    """Reusing the pair forces while every grain is wall-bound must not change anything (charged grains, a kick
-    that frees them, bounces, re-sticking)."""
+def test_wall_bound_shortcuts_are_exact():
+    """Reusing the pair and charge forces while every grain is wall-bound, and skipping the tree statics of
+    aggregates that cannot fail, must not change anything (charged grains, a kick, aggregates on the walls)."""
     a, b = _kick_run(False), _kick_run(True)
-    assert a.n_events["detach"] > 0 and a.n_events["wall_bounce"] > 0
+    fb = np.flatnonzero(a.alive & a.frozen)
+    assert a.n_events["detach"] > 0 and a.n_events["stick"] > 0 and (a.nmono[fb] > 1).any()
     assert np.array_equal(a.pos, b.pos) and np.array_equal(a.V, b.V) and np.array_equal(a.q, b.q)
-    assert a.n_events == b.n_events
+    assert a.n_events == b.n_events and len(a.detach_log) == len(b.detach_log)
 
 
 def test_mission_end_to_end(tmp_path):
@@ -88,7 +90,7 @@ def test_mission_end_to_end(tmp_path):
     for t in m["tubules"]:
         t["dust"]["count"] = 40
     m["simulate_from_s"] = 89.0
-    m["flight_profile"]["power_off_s"] = 91.0
+    m["simulate_to_s"] = 91.0
     rep = launch_report(m)
     assert len(rep["tubules"]) == 2
     summary, sims = run_mission(m, tmp_path, scenario="kick", jobs=1)
@@ -99,11 +101,46 @@ def test_mission_end_to_end(tmp_path):
 
 
 def test_drag_reverses_at_apogee_and_window_ends_at_100_km():
-    p = FlightProfile()
+    p = FlightProfile(descent_attitude="tail_first")
     assert p.apparent_accel(150.0)[2] > 0 and p.apparent_accel(250.0)[2] < 0   # toward the nose, then the aft face
-    names = [ph["name"] for ph in p.phases()]
-    assert names[-1] == "descent below ~100 km" and p.phases()[-2]["t1"] == p.ug_end_s
+    d = FlightProfile()                     # default: ascent attitude until re-entering the air, then side-on
+    assert d.apparent_accel(250.0)[2] < 0 and d.apparent_accel(250.0)[0] == 0
+    assert d.apparent_accel(d.ug_end_s + 1.0)[0] < 0 and d.apparent_accel(d.ug_end_s + 1.0)[2] == 0
+    o = FlightProfile(shock_direction="oblique").apparent_accel(882.0 + 0.025)
+    assert o[0] != 0 and o[2] != 0 and abs(abs(o[0]) - abs(o[2])) < 1e-9
+    ph = {x["name"]: x for x in p.phases()}
+    assert ph["microgravity (above ~100 km)"]["t1"] == p.ug_end_s == ph["re-entry"]["t0"]
 
+
+def test_descent_to_splashdown():
+    """Guide times (chute T+460 s, splash T+882 s) and the fact-sheet chute altitude fix the fall; momentum and the
+    handbook's 5 g opening fix the shocks; the parachute descent reaches the sea exactly at splashdown."""
+    import math
+    from scipy.integrate import quad, trapezoid
+    from dolle_sim import atmosphere
+    p = FlightProfile()
+    assert p.end_s == p.splash_s + p.float_s and p.chute_s == 460.0 and p.splash_s == 882.0
+    assert p._h[-1] == pytest.approx(p.chute_altitude_m, rel=1e-3)            # solved fall reaches 4.6 km
+    g = 9.80665 * (6.371e6 / (6.371e6 + p._h)) ** 2                              # speed = integral of (g - drag)
+    assert p.chute_speed_m_s == pytest.approx(trapezoid(g - p._f, p._t), rel=2e-3)
+    rho0 = atmosphere.density(0.0)
+    v_d = p.v_sea * math.sqrt(rho0 / atmosphere.density(p.chute_altitude_m))
+    t1 = p.chute_s + p.chute_open_s
+    J, _ = quad(lambda t: (p.axial_g(t) - 1.0) * 9.80665, p.chute_s, t1, limit=200)
+    assert J == pytest.approx(p.chute_speed_m_s - v_d, rel=1e-6)               # opening impulse = momentum change
+    assert max(p.axial_g(t) for t in np.linspace(p.chute_s, t1, 2001)) == pytest.approx(p.opening_peak_g, rel=1e-5)
+    J, _ = quad(lambda t: (p.axial_g(t) - 1.0) * 9.80665, p.splash_s, p.splash_s + p.splash_stop_s, limit=200)
+    assert J == pytest.approx(p.v_sea, rel=1e-6)                               # impact impulse = momentum
+    h1 = p.chute_altitude_m - 0.5 * (p.chute_speed_m_s + v_d) * p.chute_open_s
+    T, _ = quad(lambda h: 1.0 / (p.v_sea * math.sqrt(rho0 / atmosphere.density(h))), 0.0, h1, limit=200)
+    assert t1 + T == pytest.approx(p.splash_s, abs=1.0)                        # reaches the sea at splashdown
+    assert 9.1 <= p.v_sea <= 12.2                                              # NASA-MSFC 1975: 30-40 ft/s
+    # directions: side-on in the fall, hanging nose down, afloat on its side
+    assert p.apparent_accel(p.reentry_peak_s)[0] < 0 and p.apparent_accel(600.0) == pytest.approx([0, 0, 9.80665])
+    assert p.apparent_accel(p.end_s - 1.0) == pytest.approx([-9.80665, 0, 0])
+    q = FlightProfile(descent_attitude="tumbling", hang_attitude="nose_up", float_attitude="nose_up")
+    a = np.array([q.apparent_accel(t) for t in np.linspace(360, 362, 9)])
+    assert a[:, 0].min() < 0 < a[:, 0].max() and q.apparent_accel(600.0)[2] < 0
 
 def _bed_cfg(prof, T0, T, **chamber):
     ch = {"name": "t", "size_m": [0.0127, 0.0127, 0.0381], "wall_material": "glass_borosilicate",

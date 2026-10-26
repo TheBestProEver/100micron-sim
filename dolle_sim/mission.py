@@ -6,9 +6,9 @@
 
 A mission config describes the payload (tubules on the deck), the flight timeline (flight.py) and the gas.
 Each tubule becomes one simulated chamber. All tubules share the same flight clock: the simulation starts at
-"simulate_from_s" (T+0 = lift-off, with the dust settled on the aft face as it is on the pad) and runs to the
-experiment power-off time, passing through the boost, coast, spin, de-spin, microgravity and descent phases
-with the correct timing. Impact statistics are counted in the microgravity window only (ug_start_s to
+"simulate_from_s" (T+0 = lift-off, with the dust settled on the aft face as it is on the pad) and runs to 5 s
+after splashdown (or to "simulate_to_s"), passing through the boost, coast, spin, de-spin, microgravity,
+re-entry, parachute, descent and splashdown phases with the correct timing. Impact statistics are counted in the microgravity window only (ug_start_s to
 ug_end_s, the ~100 km crossings). "scenarios" are named sets of overrides (gas, release mechanism,
 orientation, flight assumptions) for comparisons; "a+b" applies both.
 
@@ -121,7 +121,8 @@ def mission_cfg(m: dict) -> dict:
     env = {"preset": "ideal", "gravity_gradient": True, "start_time_s": t0,
            "flight_profile": m.get("flight_profile", {}), "jitter_rms_g": m.get("jitter_rms_g", 0.0), **gas}
     cfg = {"name": m.get("name", "mission"), "dt_s": m.get("dt_s", 4e-3), "dt_launch_s": m.get("dt_launch_s", 5e-4),
-           "duration_s": prof.power_off_s - t0, "output_fps": m.get("output_fps", 5), "seed": m.get("seed", 0),
+           "duration_s": min(float(m.get("simulate_to_s", prof.end_s)), prof.end_s) - t0,
+           "output_fps": m.get("output_fps", 5), "seed": m.get("seed", 0),
            "environment": env, "forces": m.get("forces", {}), "contact": m.get("contact", {}),
            "camera": m.get("camera", {}), "materials": m.get("materials", {})}
     return cfg
@@ -204,6 +205,7 @@ def launch_report(m: dict, n_samples: int = 4000) -> dict:
                 survive_flight *= 1 - p_vib
             phases.append(dict(phase=ph["name"], t0=ph["t0"], t1=ph["t1"], source=ph["source"],
                                axial_g_range=ph["axial_g_range"], max_pull_off_aft_g=pull_max,
+                               max_press_onto_aft_g=float(max(0.0, -pull.min())),
                                max_tangential_g=float(tang.max()), fraction_pulled_off_quasi_static=frac_qs,
                                fraction_could_slide=frac_slide, fraction_freed_by_vibration_estimate=float(p_vib.mean())))
         p_ground = _vib_exceed_prob(a_th + 1.0, vib["thrust_grms"], vib["test_s_per_axis"], f_lo, f_hi)
@@ -217,7 +219,7 @@ def launch_report(m: dict, n_samples: int = 4000) -> dict:
                          threshold_g={"p10": float(np.percentile(a_th, 10)), "median": float(np.median(a_th)),
                                       "p90": float(np.percentile(a_th, 90))},
                          phases=phases, vibration_estimate=vibration))
-    return {"profile": prof.__dict__, "tubules": tubs}
+    return {"profile": prof.to_dict(), "tubules": tubs}
 
 
 # ---------------------------------------------------------------------------- simulation
@@ -249,7 +251,10 @@ def summarize(sim, prof: FlightProfile) -> dict:
             b = sim.body[k]
             key = f"{'-+'[int(sim.fw_side[b] > 0)]}{'xyz'[int(sim.fw_ax[b])]}"
             face[key] = face.get(key, 0) + 1
-    return {"tubule": sim.name, "n_grains": int(sim.N), "free_at_end": int((~fz).sum()), "wall_bound_by_face": face,
+    ts = [r for r in sim.timeseries if r["t"] + t0 <= prof.power_off_s]
+    free_po = int(ts[-1]["free_monomers"]) if ts else None
+    return {"tubule": sim.name, "n_grains": int(sim.N), "end_s": float(t0 + sim.duration),
+            "free_at_power_off": free_po, "free_at_end": int((~fz).sum()), "wall_bound_by_face": face,
             "grains_released": len(sim._ever_freed), "detachments_by_phase": by_phase,
             "detachment_events": len(det),
             "ug_window_s": [prof.ug_start_s, prof.ug_end_s],
@@ -271,7 +276,7 @@ def run_mission(mission: dict, out: Path, scenario: str | None = None, jobs: int
             sims = list(ex.map(_run_one, args))
     else:
         sims = [_run_one(a) for a in args]
-    summary = {"name": m.get("name"), "scenario": m.get("scenario"), "flight_profile": prof.__dict__,
+    summary = {"name": m.get("name"), "scenario": m.get("scenario"), "flight_profile": prof.to_dict(),
                "gas": m.get("gas"), "launch_loads": launch_report(m),
                "tubules": [summarize(s, prof) for s in sims]}
     if write_outputs:
@@ -300,5 +305,6 @@ def run_mission(mission: dict, out: Path, scenario: str | None = None, jobs: int
         except Exception as e:  # pragma: no cover - plotting is optional
             summary["plot_error"] = repr(e)
         write_viewer(sims, out / "viewer.html", f"DOLL-E mission: {m.get('name')} ({m.get('scenario') or 'nominal'})")
-    (out / "mission_summary.json").write_text(json.dumps(summary, indent=2, default=float))
+    from .results import jsonable
+    (out / "mission_summary.json").write_text(json.dumps(jsonable(summary), indent=2))
     return summary, sims

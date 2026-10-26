@@ -8,8 +8,8 @@ mission question: *at what impact velocity do astrophysically relevant grains
 (carbon vs. silicates) stick, and can our payload measure it?*
 
 It can also simulate the **whole flight in one sweep**: several glass tubules
-on one deck, from lift-off through both motor burns, spin, de-spin and the
-microgravity window to experiment power-off, on one clock (see
+on one deck, from lift-off through both motor burns, spin, de-spin, the
+microgravity window, re-entry and the parachute to splashdown, on one clock (see
 [Mission runs](#mission-runs-the-whole-flight-in-one-sweep)).
 
 It was written from scratch for DOLL-E. It combines an event-driven granular
@@ -71,6 +71,40 @@ N-body engine with a time-resolved solver for adhesive micro-contacts:
   hydrophobic amorphous silica. **Measuring this is what DOLL-E is for.** The
   full sensitivity table is at the end of PROVENANCE.md.
 
+### Why our own engine, and not REBOUND or LAMMPS as the base?
+
+We checked both against their source code and documentation (the full notes are in PROVENANCE.md and
+`tools/lammps_benchmark.py`). What decides it is the time scales. A sticking contact between two 100 µm grains
+lasts about a microsecond and must be followed in ~10 ns steps, but the flight lasts 15 minutes.
+
+* **REBOUND** (v5.2) is an N-body code for planets and rings. It has no walls (its boundaries are open,
+  periodic or shear), no grain spin or moment of inertia, and no aggregates (it can only merge stuck grains
+  into one sphere). It also has no gas drag, no electrostatics and no adhesive contact. Its collision hook runs
+  after a full step without the contact time. Building on it would mean writing all of DOLL-E's physics
+  anyway, and it is GPL-3.0. We use it as an outside check of our trajectories and collision bookkeeping.
+* **LAMMPS** (GRANULAR package) is the closest established code. It has real JKR adhesion with hysteresis,
+  friction, rolling resistance, JKR walls that can vibrate, breakable bonds and rotating-frame forces through
+  its standard fixes. But it moves every grain with one global time step. Measured on this laptop,
+  `tools/lammps_benchmark.py` runs 2.3×10⁷ grain-steps per second per core with the grains in flight (no
+  contacts) and 6.1×10⁶ with the settled layer on the bottom (every grain in a JKR wall contact). At the
+  ~10 ns step real glass and silica need, one tubule from lift-off to power-off takes **13–49 core-days**
+  (35–130 to splashdown). DOLL-E takes 3 minutes to 10 hours for all four tubules from lift-off to
+  splashdown on 4 cores (the 10 hours are the 500 g shaker, whose fast walls force short steps).
+* **Softening the grains** is the usual DEM shortcut, but it does not work here. The JKR sticking speed scales
+  as E^-1/3, so a 1000× softer grain sticks 10× faster. The standard correction, lowering the surface energy
+  by (E_soft/E)^(2/5) (Hærvig et al. 2017; Chen et al. 2019; Washino et al. 2024), keeps the sticking
+  speed but cuts the force needed to pull a grain off a wall 16×. That force is what decides launch and
+  release.
+* LAMMPS also lacks sticking grains that merge into rigid aggregates and contact charging (new C++ code).
+  Free-molecular drag can be scripted with its variables but would need validating. A plugin could replace the
+  integrator, but every existing granular pair style and fix assumes the one global step.
+
+So DOLL-E is event-driven: grains fly freely in millisecond steps, and each impact is integrated on its own at
+nanosecond resolution. The price is two approximations that a soft-sphere code avoids: stuck grains form
+rigid aggregates, and fragmentation uses the Dominik & Tielens (1997) thresholds. LAMMPS is the right
+independent referee for the contact model, which is how we use it (`lammps-check`). It could also referee the
+few seconds after a release at full stiffness, which costs about 1–4 hours per tubule-second.
+
 ## Use it online
 
 **https://thebestproever.github.io/100micron-sim/** (GitHub Pages, served from `docs/`)
@@ -86,7 +120,7 @@ N-body engine with a time-resolved solver for adhesive micro-contacts:
 * **Flight:** the launch-load report for editable tubules (dust, sizes, glass,
   stickiness, orientation, deck position), computed in the browser, and the
   stored results of the full-flight scenario runs.
-* **Verify:** runs the 25-check physics verification suite in your browser,
+* **Verify:** runs the 26-check physics verification suite in your browser,
   with PASS/FAIL, measured values and tolerances, and shows the stored results
   of the desktop REBOUND cross-check.
 * **Sources:** where every part of the physics comes from (generated from
@@ -118,7 +152,7 @@ python -m dolle_sim mission configs/mission_quarter_deck.json --jobs 4       # w
 python -m dolle_sim sizes --d10 80e-6 --d50 95e-6 --d90 114e-6 --weighting volume   # supplier percentiles -> number distribution
 python -m dolle_sim sizes --image micrograph.png --um-per-px 1.25                 # measure grain sizes from a photo
 python -m dolle_sim materials                                           # material database
-python -m dolle_sim verify                                              # 25-check physics verification suite
+python -m dolle_sim verify                                              # 26-check physics verification suite
 python -m dolle_sim sources                                             # where every component comes from
 python -m pytest -q                                                     # all tests (includes the verification suite)
 ```
@@ -139,8 +173,8 @@ python -m pytest -q                                                     # all te
 ## Mission runs: the whole flight in one sweep
 
 `python -m dolle_sim mission configs/mission_quarter_deck.json` simulates every tubule on the deck through the
-whole flight on **one clock**, from lift-off (T+0, dust resting on the bottom of each tubule) to experiment
-power-off (T+332 s). The example config has four 0.5 × 0.5 × 1.5 in glass tubules on a quarter deck (half of
+whole flight on **one clock**, from lift-off (T+0, dust resting on the bottom of each tubule) through re-entry
+and the parachute to 5 s after splashdown (T+887 s). The example config has four 0.5 × 0.5 × 1.5 in glass tubules on a quarter deck (half of
 the ~12 in deck, 5.00 in high), with two dusts, two grain sizes and two glass surfaces. Materials, sizes, dust
 amounts (800 grains each) and positions are **examples**: replace them with the real ones.
 
@@ -152,25 +186,33 @@ amounts (800 grains each) and positions are **examples**: replace them with the 
 | coast | 29.1–54 | drag falling from ~3 g to ~0.01 g; 4.8 Hz spin | derived estimate |
 | de-spin | 54–54.9 | yo-yo de-spin to 1 rpm (Euler force) | fact sheets; Ettl & Pfaender (2009) |
 | coast to ~100 km | 54.9–88 | ~0.01 → 10⁻⁴ g | derived |
-| microgravity (above ~100 km) | 88–313 | 10⁻⁴ g residual (toward the top until apogee at T+197 s, toward the bottom after), 1 rpm residual spin | 100 km crossings derived from fact sheets; residual assumed |
-| descent below ~100 km | 313–332 | drag growing to ~1.5×10⁻³ g, toward the bottom | derived estimate; power-off from the guide |
+| microgravity (above ~100 km) | 88–313 | 10⁻⁴ g residual along the rocket axis (toward the top until apogee at T+197 s, toward the bottom after), 1 rpm residual spin | 100 km crossings derived from fact sheets; residual assumed |
+| re-entry | 313–460 | the payload turns side-on; drag rises to a **7.9 g** peak at T+369 s (~23 km); experiment power-off at T+332 s | point-mass fall through NRLMSIS 2.1 (integrator verified against Allen & Eggers with gravity off); such models read 5–20% low against measured flights, so ~8–11 g; side-on: DLR flight data |
+| parachute opening | 460–463 | from 94 m/s to the descent speed, peak **5 g** | chute time: guide; 4.6 km: NASA fact sheet; 5 g: NASA-MSFC (1975) |
+| under the parachute | 463–882 | 1 g toward the **nose** end (hanging nose down), 9.4 m/s at sea level | splash time: guide; nose down: a 2016 student flight log on a related rocket |
+| splashdown | 882 | ~**31 g** toward the nose end for ~0.05 s | momentum (9.4 m/s); stopping time and direction assumed (that log saturated sideways) |
+| afloat | 882–887 | 1 g sideways (floating on its side) | the same flight log |
 
 `--loads-only` prints the **launch-load report** in seconds. For each tubule it gives the pull-off thresholds
 of its dust: the JKR pull-off force 1.5πwR divided by the grain's weight, sampled over the size distribution
 and the scatter in stickiness. It then compares them with the loads of every phase. For the example tubules
 on clean or silanised glass:
 
-| tubule | pull-off threshold: 10% / 50% / 90% of grains below | largest load pulling dust off the bottom | sideways load: spin alone / with the guide's ±10 g lateral |
+| tubule | pull-off threshold: 10% / 50% / 90% of grains below | largest load pulling dust off the bottom: ascent / whole flight | sideways load: spin alone / with the guide's ±10 g lateral |
 |---|---|---|---|
-| T1 silica 90–106 µm, bare borosilicate | 498 / 1,087 / 2,386 g | +3 g (coast drag) | 9.6 / 19.5 g |
-| T2 graphite 90–106 µm, bare borosilicate | 784 / 1,712 / 3,757 g | +3 g | 7.4 / 17.4 g |
-| T3 silica 45–53 µm, silanised | 1,153 / 2,517 / 5,524 g | +3 g | 7.4 / 17.4 g |
-| T4 graphite 45–53 µm, silanised | 1,816 / 3,963 / 8,698 g | +3 g | 9.6 / 19.5 g |
+| T1 silica 90–106 µm, bare borosilicate | 498 / 1,087 / 2,386 g | 3 g (coast drag) / 31 g (splashdown) | 9.6 / 19.5 g |
+| T2 graphite 90–106 µm, bare borosilicate | 784 / 1,712 / 3,757 g | 3 / 31 g | 7.4 / 17.4 g |
+| T3 silica 45–53 µm, silanised | 1,153 / 2,517 / 5,524 g | 3 / 31 g | 7.4 / 17.4 g |
+| T4 graphite 45–53 µm, silanised | 1,816 / 3,963 / 8,698 g | 3 / 31 g | 9.6 / 19.5 g |
+
+Re-entry (7.9 g) presses sideways, along the bottom face, because the payload falls side-on. The 31 g
+splashdown pulls the dust off the bottom only if the payload hangs nose down, as assumed.
 
 **What this means for the design** (with the stated inputs):
 
 1. **Adhesion, not the boost, holds the dust down.** A 100 µm grain sticks to clean glass about a thousand
-   times harder than its own weight, so the 25 g boost is irrelevant: nothing comes off at any phase. This
+   times harder than its own weight, so the 25 g boost is irrelevant: nothing comes off at any phase, the
+   ~31 g splashdown included. This
    follows directly from the measured work of adhesion (w = 0.045 J/m² for ~90 µm glass beads on glass,
    Sansao et al. 2021).
 2. **A gentle shaker frees nothing.** The nominal 50 g / 200 Hz shaker releases 0 of 3,200 grains (full
@@ -189,7 +231,7 @@ on clean or silanised glass:
    estimate from Heim et al. (1999) puts the onset at ~0.1–1 g. Treat the dust layout at release as uncertain.
 
 The full simulations (`--scenario NAME`; combine with `+`, e.g. `kick+lying`; results go to
-`results/mission/<scenario>/`) follow every grain of all four tubules from lift-off to power-off. Each cell
+`results/mission/<scenario>/`) follow every grain of all four tubules from lift-off to splashdown. Each cell
 gives **grains released · grain–grain impacts in the microgravity window** (single-grain impacts that stuck /
 all single-grain impacts, and their median speed). Because the 50 g shaker frees nothing, the gas,
 orientation and spin options are compared on top of the kick release:
@@ -199,15 +241,17 @@ orientation and spin options are compared on top of the kick release:
 | `nominal`: 50 g / 200 Hz shaker, 10 s at T+90 s (vacuum, standing) | 0 · 0 | 0 · 0 | 0 · 0 | 0 · 0 |
 | `no_release`: no release mechanism | 0 · 0 | 0 · 0 | 0 · 0 | 0 · 0 |
 | `no_drag`: nominal, no drag in the coasts | 0 · 0 | 0 · 0 | 0 · 0 | 0 · 0 |
-| `rough_grains`: nominal, stickiness × 0.02 (rough grains or a coating) | 729 · 7051 (223/6189, 471 mm/s) | 577 · 3534 (117/2712, 449 mm/s) | 397 · 637 (39/368, 452 mm/s) | 178 · 124 (4/28, 421 mm/s) |
+| `rough_grains`: nominal, stickiness × 0.02 (rough grains or a coating) | 730 · 7051 (223/6189, 471 mm/s) | 588 · 3534 (117/2712, 449 mm/s) | 398 · 637 (39/368, 452 mm/s) | 179 · 124 (4/28, 421 mm/s) |
+| `rough_grains+hang_nose_up`: hanging and floating nose up | the same in the window; after it 48 releases (12 at the parachute opening, 36 at splashdown) | the same; 72 (2, 70) | the same; 37 (3 in re-entry, 1, 33) | the same; 6 (0, 6) |
+| `rough_grains+shock_oblique`: opening and splash shocks at 45° to the axis | the same; 1 (at splashdown) | the same; 13 | the same; 16 (3 in re-entry, 13) | the same; 8 |
 | `strong_shaker`: 500 g / 1 kHz shaker, 5 s at T+90 s | 88 · 125 (0/39, 1071 mm/s) | 28 · 36 (0/2, 882 mm/s) | 6 · 0 | 0 · 0 |
 | `kick`: three 5,000 g / 5 kHz single-cycle kicks (T+90, 150, 210 s) | 795 · 186 (3/66, 32 mm/s) | 772 · 239 (28/88, 60 mm/s) | 683 · 48 (0/20, 45 mm/s) | 502 · 28 (5/6, 43 mm/s) |
 | `kick+lying`: kicks, tubules lying flat | 795 · 124 (6/30, 12 mm/s) | 772 · 102 (10/34, 117 mm/s) | 691 · 51 (1/14, 15 mm/s) | 510 · 25 (0/1, 160 mm/s) |
 | `kick+spin_1hz`: kicks, 1 Hz residual spin (the guide's upper value) | 795 · 3740 (7/1737, 155 mm/s) | 770 · 1074 (21/551, 301 mm/s) | 683 · 778 (2/376, 224 mm/s) | 498 · 201 (4/94, 345 mm/s) |
-| `kick+gas_100pa`: kicks, 100 Pa of air | 795 · 48 (0/4, 1045 mm/s) | 771 · 13 (2/7, 973 mm/s) | 683 · 4; 1 floating at the end | 499 · 1 |
-| `kick+gas_1atm`: kicks, 1 atm of air | 795 · 57 (0/9, 548 mm/s); 6 floating at the end | 770 · 9 (1/7, 436 mm/s); 28 floating at the end | 683 · 1; 473 floating at the end | 498 · 3; 282 floating at the end |
+| `kick+gas_100pa`: kicks, 100 Pa of air | 795 · 48 (0/4, 1045 mm/s) | 771 · 13 (2/7, 973 mm/s) | 683 · 4 | 499 · 1 |
+| `kick+gas_1atm`: kicks, 1 atm of air | 795 · 57 (0/9, 548 mm/s) | 770 · 9 (1/7, 436 mm/s) | 683 · 1; 42 floating at power-off | 498 · 3; 20 floating at power-off |
 
-Reading the table (800 grains per tubule, example materials; run times 1–60 min per scenario on 4 cores):
+Reading the table (800 grains per tubule, example materials; run times 3 min to 10 h per scenario on 4 cores):
 
 * With dust on clean or silanised glass, **only the kicks free it** (500–800 grains per tubule). No release,
   the 50 g shaker and the 500 g shaker free 0–88.
@@ -218,9 +262,16 @@ Reading the table (800 grains per tubule, example materials; run times 1–60 mi
 * A **1 Hz residual spin** gives many more impacts (200–3,700), but its centrifugal push makes them fast
   (155–345 mm/s).
 * **Gas** stops the kicked grains within a fraction of a second: few impacts (1–57, mostly right after a
-  kick), and at 1 atm hundreds of the smaller grains are still floating at power-off.
+  kick). At 1 atm, 20–42 of the smaller grains are still floating at power-off (T+332 s); re-entry drag
+  (sideways, rising to ~0.02 g by then) has pushed the rest onto the side walls.
 * **Weakly bound dust** (`rough_grains`, stickiness × 0.02, thresholds ~10–170 g) is freed by the 50 g shaker
   (178–729 grains), but the shaking walls keep it fast (median ~420–470 mm/s).
+* **Re-entry, the parachute and splashdown** free nothing from clean or silanised glass: the largest load,
+  31 g at splashdown, is far below the ~500 g thresholds. Weakly bound dust loses a few more grains: 3 in
+  re-entry (one tubule) and 1–11 per tubule at splashdown, hanging nose down. The 50 g shaker has already
+  freed the weakest grains on the bottom. Hanging nose up, the opening shock and splashdown pull on the top
+  face instead, where grains stuck during the window, and free 6–72 per tubule; an oblique shock frees
+  1–13. None of this changes the impacts in the window, but it changes where the dust is at recovery.
 * None of the options gives many impacts near the sticking speeds. For a threshold measurement the
   release has to be gentler (higher frequency, or a peak just above the thresholds), or the grains slowed
   after release.
@@ -426,7 +477,7 @@ isotropic run. Its bias depends on the geometry and cannot be calibrated away.
 
 ## Validation
 
-`python -m dolle_sim verify` runs the 25-check verification suite (the same suite runs in the browser app). `python -m pytest -q` runs it plus 30 unit tests and 7 provenance tests:
+`python -m dolle_sim verify` runs the 26-check verification suite (the same suite runs in the browser app). `python -m pytest -q` runs it plus 41 unit tests and 7 provenance tests:
 
 | test | checks |
 |---|---|
@@ -443,6 +494,7 @@ isotropic run. Its bias depends on the geometry and cannot be calibrated away.
 | estimator | the logistic fit recovers known thresholds from synthetic data to < 5%, but its 1σ bootstrap intervals covered the truth in only 9 of 20 trials (nominal 68%), so quoted error bars are probably too narrow |
 | bookkeeping | impacts onto wall-bound grains are flagged |
 | flight timeline | a grain released during the yo-yo de-spin (Coriolis, centrifugal and Euler forces) vs a 10⁻¹² ODE solution, 2nd-order convergence; a spinning grain keeps its absolute angular momentum (~10⁻¹¹) while the payload spins up to 4.8 Hz; guide timings, roll angle and loads (`tests/test_flight.py`) |
+| re-entry | the descent integrator reproduces the closed-form ballistic entry of Allen & Eggers (1958) at 90° and 45°: with gravity off: peak deceleration to ~10⁻⁶, its altitude to < 1 m, v(h) to < 10⁻⁶ (pass limits 10⁻⁵, 5 m, 10⁻⁵); gravity and the NRLMSIS path are covered by tests: parachute and splash impulses equal the momentum changes; the fall reaches 4.6 km at T+460 s and the sea at T+882 s (`tests/test_flight.py`) |
 | launch and release | 200 moving grains settle on the aft face under 25 g, none escapes; wall-bound grains come off exactly when the load passes their JKR pull-off force (steady pull and shaker), with the predicted release speeds |
 | grain sizes | percentile fits and Hatch–Choate conversion exact; sampling reproduces volume percentiles to 0.5%; image sizing of synthetic micrographs recovers the count (±2) and median diameter (1%) (`tests/test_sizes.py`) |
 | provenance | REBOUND is imported only by `rebound_check.py` and LAMMPS only by `lammps_check.py`; the simulator runs with both blocked; every check and code location named in PROVENANCE.md exists; PROVENANCE.md and the website copy are up to date |
@@ -501,12 +553,34 @@ With DOLL-E's default break criterion the undamped thresholds are 1.42× higher
 Tsuji damping (the law DOLL-E uses) with JKR, and the damping laws it does allow
 with JKR differ from DOLL-E's.
 
-### Code reviews (v0.2, v0.3, v0.4)
+### Code reviews (v0.2 to v0.5)
 
 The code was put through automated adversarial reviews by AI reviewers, one
 per subsystem, with every finding re-checked by a second AI reviewer before it
 was fixed. v0.3 adds a provenance audit of every component and of the public
 text (68 confirmed findings), which is the basis of PROVENANCE.md.
+
+The v0.5 additions (re-entry to splashdown, the atmosphere table, the
+wall-bound shortcuts, the REBOUND/LAMMPS comparison) were reviewed the same
+way: 23 findings from independent reviewers (about a dozen distinct issues),
+all fixed. The main ones:
+
+* **The fall attitude started at apogee.** The side-on fall attitude began at
+  T+197 s, inside the microgravity window, so the 10⁻⁴ g residual turned
+  sideways instead of reversing along the axis. Nothing turns the payload in
+  vacuum: the attitude now changes at T+313 s, and every scenario was re-run.
+* **The re-entry peak was presented as validated.** The Allen & Eggers check
+  tests the integrator with gravity off; it does not validate the 7.9 g peak.
+  Point-mass models of this kind read 5–20% low against measured flights, so
+  the README now says ~8–11 g and quotes the measured check values instead of
+  "< 10⁻⁶".
+* **Shock directions.** The cited flight log shows the splash spike mostly
+  sideways. The direction is now an option (`shock_oblique` scenario) and the
+  default is marked assumed.
+* Smaller: the tumbling option rotated only the load direction (now stated,
+  and it starts at T+313 s); `np.trapezoid` needs NumPy 2; the summary JSON
+  contained `Infinity`; end-of-run counts were labelled "at power-off"; the
+  descent forced a neighbour-list rebuild on almost every step.
 
 The v0.4 additions (flight timeline, launch report, release, glass, sizes,
 LAMMPS check, web Flight tab) were reviewed in 7 areas. Each finding was

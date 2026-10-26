@@ -188,6 +188,9 @@ class ChamberSim:
         # pair forces depend only on positions, charges and which grains share a body; all three can change only
         # while some body is free, so with every body wall-bound the last result is still exact (step() marks it)
         self._pair_stale = True
+        # the same holds for the space-charge and image-charge forces; _sc_dirty marks motion since the last mesh solve
+        self._charge_stale, self._sc_dirty, self._F_charge = True, True, None
+        self._agg_strength = {}             # weakest bond (wall or grain-grain) of each wall-bound aggregate
         self.sc = None
         if self.f_space and self.f_coulomb and (self.q.any() or self.charging):
             self.sc = SpaceChargeSolver(self.size, self.coulomb_cut / 3.5)
@@ -651,34 +654,52 @@ class ChamberSim:
                 B = self.env.magnetic_field(self.t)
                 if B.any():
                     F += q * _crossN(vm, B[None, :])
-            if self.f_coulomb and self.sc is not None:
-                if self.sc.E is None or self._step_count % self.sc_every == 0:
-                    self.sc.solve(self.pos, self.q)
-                F += q * self.sc.field_at(self.pos)
-            if self.f_image:
-                # short-range image charge -beta q behind each nearby wall (the long-range part of the
-                # images of a grounded chamber is already in the space-charge mesh)
-                wc = self.wall_cand
-                if len(wc):
-                    # with the space-charge mesh the walls are grounded conductors (Dirichlet phi = 0), so use
-                    # the conductor image factor 1 for the short-range part too (consistent split); without the
-                    # mesh, a dielectric wall's image factor (eps-1)/(eps+1)
-                    beta = 1.0 if self.sc is not None else self.wall_mat.image_factor
-                    p = self.pos[wc]
-                    h_lo = np.maximum(p, self.rad[wc][:, None])
-                    h_hi = np.maximum(self.size[None, :] - p, self.rad[wc][:, None])
-                    k = K_E * beta * self.q[wc] ** 2
-                    if self.sc is not None:
-                        g_lo, g_hi = short_range_kernel(2 * h_lo, self.sc.sigma), short_range_kernel(2 * h_hi, self.sc.sigma)
-                    else:
-                        g_lo, g_hi = 1 / (2 * h_lo) ** 2, 1 / (2 * h_hi) ** 2
-                    F[wc] += k[:, None] * (g_hi - g_lo)
+            solve_due = self.sc is not None and (self.sc.E is None or self._step_count % self.sc_every == 0)
+            if self._F_charge is None or self._charge_stale or (solve_due and self._sc_dirty):
+                self._F_charge = self._charge_forces(q, solve_due)
+                self._charge_stale = False
+            f_sc, wc, f_img = self._F_charge          # added in the original order (bit-identical results)
+            if f_sc is not None:
+                F += f_sc
+            if f_img is not None:
+                F[wc] += f_img
         if len(self.lrlist) and self._long_range():
             if self._F_pair is None or (self._step_count % self.lr_every == 0 and self._pair_stale):
                 self._F_pair = self._pair_forces()
                 self._pair_stale = False
             F += self._F_pair
         return F
+
+    def _charge_forces(self, q, solve_due):
+        """Space-charge force [N] on every grain, and short-range image-charge forces on the wall candidates
+        (returned as (f_sc, wall_candidates, f_img)). They depend only on positions, charges and the neighbour list,
+        so while every body is wall-bound _forces_pos reuses them (re-solving the mesh once if anything moved since
+        its last solve): the result is the same as recomputing every step."""
+        f_sc = f_img = None
+        wc = self.wall_cand
+        if self.f_coulomb and self.sc is not None:
+            if solve_due:
+                self.sc.solve(self.pos, self.q)
+                self._sc_dirty = False
+            f_sc = q * self.sc.field_at(self.pos)
+        if self.f_image:
+            # short-range image charge -beta q behind each nearby wall (the long-range part of the
+            # images of a grounded chamber is already in the space-charge mesh)
+            if len(wc):
+                # with the space-charge mesh the walls are grounded conductors (Dirichlet phi = 0), so use
+                # the conductor image factor 1 for the short-range part too (consistent split); without the
+                # mesh, a dielectric wall's image factor (eps-1)/(eps+1)
+                beta = 1.0 if self.sc is not None else self.wall_mat.image_factor
+                p = self.pos[wc]
+                h_lo = np.maximum(p, self.rad[wc][:, None])
+                h_hi = np.maximum(self.size[None, :] - p, self.rad[wc][:, None])
+                k = K_E * beta * self.q[wc] ** 2
+                if self.sc is not None:
+                    g_lo, g_hi = short_range_kernel(2 * h_lo, self.sc.sigma), short_range_kernel(2 * h_hi, self.sc.sigma)
+                else:
+                    g_lo, g_hi = 1 / (2 * h_lo) ** 2, 1 / (2 * h_hi) ** 2
+                f_img = k[:, None] * (g_hi - g_lo)
+        return f_sc, wc, f_img
 
     def _pair_forces(self):
         """Short-range Coulomb, polarisation and mutual-gravity forces between nearby grains."""
@@ -735,6 +756,7 @@ class ChamberSim:
         else:
             self.nlist = self.lrlist = pairs
         self.pos_at_build = self.pos.copy()
+        self._charge_stale = True
         self._nl_vlim = 0.5 * self.skin_eff / self.dt     # no grain may move more than half the skin per step
         self._F_pair = None
         # grains close enough to a wall to possibly reach it before the next rebuild
@@ -1292,7 +1314,26 @@ class ChamberSim:
                     v = self.vib_A * self.vib_w * math.sqrt(max(0.0, 1.0 - sphi * sphi))
                 self._free_body(int(single[k]), u[k] * v, t_now, int(g[k]), "shake" if F_qs[k] < Fc[k] else "load")
         for b in fb[self.nmono[fb] > 1]:
+            if not self._aggregate_may_fail(int(b), a_sh):
+                continue
             self._detach_aggregate(int(b), a_sh, t_now)
+
+    def _aggregate_may_fail(self, b, a_sh):
+        """Cheap test before the tree statics of _detach_aggregate. The load on any part of the aggregate along any
+        bond is at most the sum of |m a| over all its grains (plus M a_sh while shaking). If that is below the weakest
+        bond (wall or grain-grain), no bond can fail and the full check can be skipped: same result, much faster."""
+        mem = self.members[b]
+        key = (b, tuple(mem))
+        if key not in self._agg_strength:
+            fc = float(self.Fc_wall[mem].min())
+            for i, k in enumerate(mem):
+                for j in mem[i + 1:]:
+                    if np.linalg.norm(self.pos[j] - self.pos[k]) < (self.rad[j] + self.rad[k]) * (1 + 1e-6):
+                        fc = min(fc, float(self._contact(k, j).p.F_c))
+            self._agg_strength[key] = fc
+        a = self._a_app_now[None, :] + self._F_pos[mem] / self.mass[mem][:, None]
+        load = float(np.linalg.norm(self.mass[mem][:, None] * a, axis=1).sum()) + float(self.M[b]) * a_sh
+        return load >= self._agg_strength[key]
 
     def _free_body(self, b, v, t_now, grain, how):
         self._ever_freed.update(int(g) for g in self.members[b])
@@ -1422,6 +1463,7 @@ class ChamberSim:
         self._check_detachment(t)
         if (self.alive & ~self.frozen).any():
             self._pair_stale = True          # something can move, collide or charge during this step
+            self._charge_stale = self._sc_dirty = True
         act = self._kick(self._F_pos, a_app, 0.5 * dt)
 
         remaining = dt
@@ -1508,8 +1550,9 @@ class ChamberSim:
 
     def _dt_at(self, t):
         """Variable time step (flight-profile runs, and any run with release windows). With a profile and free
-        grains: dt_launch_s until the microgravity window, the base step after, never more than 0.02 rad of payload
-        roll per step, and shorter steps for fast grains. Every release window or shock starts exactly at a step
+        grains: outside the microgravity window a step scaled to the load (dt_launch_s at 25 g, longer for smaller
+        loads, in powers of two), the base step inside it; never more than 0.02 rad of payload roll per step, and
+        shorter steps for fast grains. Every release window or shock starts exactly at a step
         start and is resolved with >= 20 steps; the last step ends exactly at the end of the run."""
         T = self.env.t0_flight + t
         prof = self.env.profile
@@ -1517,8 +1560,13 @@ class ChamberSim:
         if prof is not None and (self.alive & ~self.frozen).any():
             # free grains: short steps while boosting / spinning fast (while every grain is wall-bound nothing
             # moves, and the base step is enough to follow the loads)
-            if T < prof.ug_start_s:
-                dt = min(dt, self.dt_launch)
+            if T < prof.ug_start_s or T >= prof.ug_end_s:     # boost, coast, re-entry, parachute, landing
+                # between kicks a grain drifts on a straight segment; under a load a its true path bends away by
+                # a dt^2 / 8. Keep that at the value dt_launch allows at the 25 g boost load (~8 um at 0.5 ms):
+                # dt = dt_launch sqrt(25 g / a), e.g. 2.5 ms under the parachute (1 g), 0.9 ms at an 8 g re-entry.
+                # (in powers of two of dt_launch, so the neighbour list is rebuilt only when the load changes 4x)
+                a_g = max(float(np.linalg.norm(prof.apparent_accel(T))), 1e-6) / G0
+                dt = min(dt, self.dt_launch * 2.0 ** math.floor(math.log2(math.sqrt(25.0 / a_g))))
             W = 2 * math.pi * max(abs(prof.spin_hz(T)), abs(prof.spin_hz(T + dt)))
             if W > 0:
                 dt = min(dt, 0.02 / W)
@@ -1533,7 +1581,7 @@ class ChamberSim:
                 dt = min(dt, max(self.dt_base / 2 ** k, 1e-5))
         windows = [(r["start_s"], r["end_s"]) for r in self.release]
         if prof is not None:
-            windows += [(float(i["t_s"]), float(i["t_s"]) + float(i["duration_s"])) for i in prof.impulses]
+            windows += prof.event_windows()                 # impulses, parachute opening, splashdown
         eps = 1e-12
         for a, b in windows:
             if T < a - eps and T + dt > a:                  # never step over the start of a window

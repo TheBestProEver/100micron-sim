@@ -209,15 +209,19 @@ SECTIONS = [
            "tests after each step whether straight-line paths overlapped.",
            refs="Alder & Wainwright (1959) J. Chem. Phys. 31, 459 (event-driven dynamics)",
            checks=["no_overlap", "walls"], rebound="related method"),
-        _c("Neighbour lists", "simulation.py: _build_neighbors, _needs_rebuild, _dt_at, _forces_pos", "standard",
+        _c("Neighbour lists", "simulation.py: _build_neighbors, _needs_rebuild, _dt_at, _forces_pos, _charge_forces, "
+           "_aggregate_may_fail", "standard",
            "Verlet neighbour lists. The skin adapts to the fastest grain, including speed gained from "
            "vibrating walls. If a bounce makes a grain faster than the list allows, the list is rebuilt "
            "immediately (counted in n_events['midstep_neighbor_rebuild']). In mission runs the step is halved "
            "(in powers of two) while grains are fast, e.g. just after a kick, so the skin keeps its base size; in "
            "microgravity this changes only the cost (under launch loads it also lowers the resting-contact cut-off). "
-           "While every grain is wall-bound, the pair forces cannot change and the last result is reused.",
-           "Covered by the no-overlap and wall checks. tests/test_flight.py checks that reusing the pair forces "
-           "gives a bit-identical run (charged grains, a kick, bounces, re-sticking).",
+           "While every grain is wall-bound, the pair, space-charge and image-charge forces cannot change and the last "
+           "results are reused, and the tree statics of a wall-bound aggregate are skipped when the total load on it "
+           "is below its weakest bond (a strict upper bound, so no failure can be missed).",
+           "Covered by the no-overlap and wall checks. tests/test_flight.py checks that these shortcuts give a "
+           "bit-identical run (charged graphite grains, a kick, sticking, aggregates on the walls, re-sticking); a "
+           "300-grain run was also bit-identical to the engine before the shortcuts.",
            "Grains only change speed in impacts (which trigger the check) and in the kicks (covered by the "
            "per-step bound).",
            refs="Verlet (1967) Phys. Rev. 159, 98",
@@ -296,13 +300,13 @@ SECTIONS = [
     ]},
     {"title": "Launch, flight timeline and release (mission runs)", "items": [
         _c("Flight timeline", "flight.py: FlightProfile, axial_g, spin_hz, spin_angle, phases", "published",
-           "All tubules share one flight clock from lift-off (T+0). From the RockSat User Guide 2026 (Table 3-1, "
-           "Sec. 3.3): a 5.2 s first-stage burn, a 12.2 s coast and an 11.7 s second-stage burn (burnout at T+29.1 s); "
-           "a 25 g sustained ascent load; spin of ~4.8 Hz at second-stage burnout, de-spun to 0-1 Hz; apogee ~160 "
-           "km; experiment power-off at T+332 s. From mission fact sheets of the same vehicle: de-spin at T+54 s and "
-           "the ~100 km crossings at ~T+88 s and ~T+313 s (the microgravity window; impact statistics are counted only "
-           "inside it, and T+313-332 s is a separate descent phase). The yo-yo de-spin takes 0.9 s (Ettl & Pfaender "
-           "2009).",
+           "All tubules share one flight clock from lift-off (T+0) to 5 s after splashdown. From the RockSat User "
+           "Guide 2026 (Table 3-1, Sec. 3.3): a 5.2 s first-stage burn, a 12.2 s coast and an 11.7 s second-stage burn "
+           "(burnout at T+29.1 s); a 25 g sustained ascent load; spin of ~4.8 Hz at second-stage burnout, de-spun to "
+           "0-1 Hz; apogee ~160 km; experiment power-off at T+332 s; chute deploy at T+460 s; splashdown at T+882 s. "
+           "From mission fact sheets of the same vehicle: de-spin at T+54 s and the ~100 km crossings at ~T+88 s and "
+           "~T+313 s (the microgravity window; impact statistics are counted only inside it). The yo-yo de-spin "
+           "takes 0.9 s (Ettl & Pfaender 2009).",
            "tests/test_flight.py checks the guide values, that the roll angle is the integral of the spin rate "
            "(to 1e-6) and the rotating-frame loads. The integration through spin-up and de-spin is checked against "
            "an ODE solver (flight_frame).",
@@ -310,29 +314,87 @@ SECTIONS = [
            "the 25 g envelope inside each burn, spin-up is linear to 4.8 Hz, and the residual spin after de-spin "
            "is 1 rpm (the options listed with sources in flight.py run from ~0.0006 Hz to the guide's 1 Hz; the "
            "spin_1hz scenario uses 1 Hz). Also assumed: the payload keeps its attitude after burnout (no "
-           "re-orientation), so drag reverses at apogee. The guide's 50 g+ axial impulses are not in the default "
+           "re-orientation above ~100 km, where nothing turns it), so drag reverses at apogee; the fall attitude takes "
+           "over when it re-enters the atmosphere (T+313 s). The model's own climb and fall cross 100 km at T+~90 s "
+           "and T+~307 s, a few seconds from the fact-sheet values. The guide's 50 g+ axial impulses are not in the default "
            "timeline (they can be added as 'impulses'). The guide's ~+/-10 g lateral ascent loads have no time "
            "history; they enter the launch-load report as a worst-case sideways load, not the simulation. Replace "
            "the profile with flight accelerometer data when available.",
-           refs="RockSat User Guide 2026 (NASA Wallops Flight Facility, Rev-A), Table 3-1, Secs. 3.3 and 5.2.5; NASA "
+           refs="RockSat User Guide 2026 (NASA Wallops Flight Facility, Rev-A, marked DRAFT), Table 3-1, Secs. 3.3 "
+                "and 5.2.5; NASA "
                 "Sounding Rocket Program Office mission fact sheets (AWESOME 46.034/46.035, SEED 46.026/46.037, "
                 "2025); Ettl & Pfaender (2009) Proc. 19th ESA Symposium on European Rocket and Balloon Programmes",
            checks=["flight_frame"]),
-        _c("Drag and residual acceleration", "flight.py: axial_g, post_burn_drag, ballistic_speed", "derived",
+        _c("Drag and residual acceleration on the way up", "flight.py: axial_g, ballistic_speed; atmosphere.py: density",
+           "derived",
            "Between the burns the payload decelerates at ~3-5 g, estimated from fact-sheet trajectory points "
-           "(burnout and ignition times and altitudes) assuming constant accelerations. After second-stage burnout "
-           "the drag is scaled as air density times speed squared (exponential atmosphere, scale height 7 km) along "
-           "a ballistic vertical flight from 17.2 km at ~1.65 km/s. Default 3 g at the start of each coast. Drag "
-           "opposes the velocity: on the way up it pulls dust toward the nose end of a standing tubule, after apogee "
-           "(T+~197 s) it pushes it toward the aft end, and below ~100 km on the way down it grows again (to ~1.5e-3 g "
-           "by power-off). Its magnitude never drops below the residual acceleration, 1e-4 g by default.",
+           "(burnout and ignition times and altitudes) assuming constant accelerations; default 3 g. After "
+           "second-stage burnout the drag is rho(h) v^2 / (2 beta) along a ballistic vertical climb from 17.2 km at "
+           "~1.65 km/s, with the air density from NRLMSIS 2.1 and the ballistic coefficient beta set so that the drag "
+           "is 3 g at burnout. It pulls dust toward the nose end of a standing tubule and falls to ~0.01 g by "
+           "de-spin (T+54 s). Its magnitude never drops below the residual acceleration (1e-4 g by default), which "
+           "points the same way until apogee (T+~197 s) and the other way (toward the aft end) after it, until the "
+           "payload re-enters the atmosphere at T+313 s.",
            "Not checkable by simulation. The no_drag scenario switches it off.",
-           "An order-of-magnitude estimate: no drag or accelerometer data for this vehicle were found. In this model "
-           "it falls to ~0.01 g by de-spin (T+54 s). It is far below the pull-off thresholds of the example dust "
-           "(hundreds of g or more), so it does not decide whether grains stay on the aft face. The 1e-4 g residual "
-           "is an assumed order of magnitude (Ettl & Pfaender give drag alone falling to ~2e-6 g at apogee); it sets "
-           "where freed grains drift in the microgravity window, and its direction follows the drag (an assumption).",
-           refs="Mission fact sheets (as above)"),
+           "An order-of-magnitude estimate: no drag or accelerometer data for this vehicle were found. It is far below "
+           "the pull-off thresholds of the example dust (hundreds of g or more), so it does not decide whether "
+           "grains stay on the aft face. The 1e-4 g residual is an assumed order of magnitude (Ettl & Pfaender give "
+           "drag alone falling to ~2e-6 g at apogee); it sets where freed grains drift in the microgravity window, "
+           "and its direction follows the drag (an assumption).",
+           refs="Mission fact sheets (as above); Emmert et al. (2021) Earth Space Sci. 8, e2020EA001321 and (2022) "
+                "JGR Space Phys. 127, e2022JA030896 (NRLMSIS 2.0/2.1)"),
+        _c("Re-entry, parachute and splashdown", "flight.py: _fall, _descent_table, axial_g, load_direction",
+           "derived",
+           "Re-entry: a point-mass fall from apogee with gravity and drag rho v^2 / (2 beta) through the NRLMSIS 2.1 "
+           "atmosphere. beta (~320 kg/m^2) is solved so that the payload is at the parachute altitude, 4.6 km, at "
+           "the guide's chute time, T+460 s. It peaks at ~7.9 g near T+369 s at ~23 km and arrives at ~94 m/s. "
+           "Parachute: a half-sine deceleration to the descent speed, peaking at 5 g (the 'up to 5 g' of NASA-MSFC "
+           "1975), so the opening takes ~3.3 s; then 1 g, with the speed v_sea sqrt(rho_0/rho(h)) set by reaching "
+           "the sea at the guide's T+882 s (~9.4 m/s at sea level). Splashdown: the momentum m v_sea removed in "
+           "0.05 s (~31 g peak). Attitude: the ascent attitude until the payload re-enters the atmosphere (T+313 s), "
+           "then side-on (DLR flight data); hanging nose down under the canopy and on its side afloat (a 2016 "
+           "student flight log, cited). The opening and splash act along the hanging axis by default; "
+           "shock_direction = lateral or oblique tilts them.",
+           "With gravity off and an exponential atmosphere, the fall integrator reproduces the closed-form ballistic "
+           "entry of Allen & Eggers (1958) (reentry: peak deceleration to ~1e-6, its altitude to <1 m, v(h) to <1e-6). "
+           "That checks the integrator only; tests/test_flight.py covers gravity and the NRLMSIS path. They check "
+           "that the impulses equal the momentum changes, that the fall reaches 4.6 km at T+460 s, and that the "
+           "descent reaches the sea at T+882 s. A separate point-mass reconstruction (US Standard Atmosphere) gave "
+           "7.4-8.5 g at about T+370 s for this rocket. The same method gave 13.5 g for CUMA-2, matching a DLR "
+           "simulation (Stamminger 2011), so that is model against model. The REXUS manual says 'The typical "
+           "deceleration during re-entry is below 20 g'.",
+           "No measured re-entry, parachute or splashdown loads were found for this rocket. Against measured flights, "
+           "constant-coefficient point-mass models read 5-20% low on smoothed peaks and up to ~45% on spikes "
+           "(TEXUS-43, MAXUS-6/7), so the real re-entry peak may be ~8-11 g. The chute altitude (4.6 km) is "
+           "from a Terrier-Improved Orion fact sheet (nominal or flown not stated); the 2005 NASA handbook gives "
+           "15,000-20,000 ft for land recovery. Whether the guide's 'chute deploy' is the main canopy or a drogue "
+           "is not stated; the 5 g opening and 30-40 ft/s landing are a 1975 planned sequence for land recovery. "
+           "The splash stopping time is ASSUMED: the impulse is fixed by momentum, the peak scales as 1/time "
+           "(31 g at 0.05 s). Its direction is ASSUMED: the cited flight log saturated laterally at splashdown, so "
+           "the shocks may be partly sideways. The orientation under the canopy comes from a different vehicle "
+           "(spinning all flight, 119 km apogee; see the cited 2016 report) and is tested with hang_nose_up. The "
+           "tumbling option (NASA-MSFC 1975: loads up to +/-25 g along any axis at up to 2.5 Hz) only rotates the "
+           "load direction at an assumed 1 Hz; the tumble's own centrifugal, Coriolis and Euler loads (~1 g at "
+           "25 cm for 1 Hz) are not modelled, nor is the flat spin below Mach 1. The guide requires designs to take 25 g quasi-static in all axes during ascent and "
+           "descent, and the modelled peaks are within that except the splash impulse (<50 g impulse envelope).",
+           refs="RockSat User Guide 2026, Table 3-1 and Sec. 3.3.1; Allen & Eggers (1958) NACA Report 1381; NASA "
+                "fact sheet RockOn 41.134 (2025); NASA Sounding Rocket Program Handbook 810-HB-SRP (2005) Sec. "
+                "5.16.1; NASA-MSFC M-EH-75-2 (1975) Sec. III.1.c; Stamminger (2007) ESA PAC Visby and (2011) "
+                "IAC-11-A2.5.9; REXUS User Manual v7.16 (2018) Sec. 5.10; WV SPACE RockSat-C 2016 Final Report",
+           checks=["reentry"]),
+        _c("Air density", "atmosphere.py: density", "published",
+           "Air density from the ground to 250 km from NRLMSIS 2.1, the U.S. Naval Research Laboratory's empirical "
+           "atmosphere model. It was evaluated once with pymsis (MIT licence) for the launch site (37.9 N, 75.5 W) in "
+           "June at moderate solar "
+           "activity (F10.7 = 150, Ap = 4) and stored as a 1 km table (tools/make_atmosphere.py regenerates it). "
+           "Values: 1.19 kg/m^3 at sea level, 4.2e-7 at 100 km.",
+           "The table matches the model output by construction. Sea-level and 100 km values are within ~3% and ~25% "
+           "of the US Standard Atmosphere 1976.",
+           "Density varies with season, time of day and solar activity: by tens of percent below ~100 km and by "
+           "factors of several above ~150 km. The flight model needs it only to order of magnitude: the drag "
+           "coefficients are set by the burnout drag and the chute time.",
+           refs="Emmert et al. (2021) Earth Space Sci. 8, e2020EA001321; Emmert et al. (2022) JGR Space Phys. 127, "
+                "e2022JA030896; pymsis (G. Lucas, LASP/SWx TREC)"),
         _c("Time-dependent payload spin", "simulation.py: _update_time, _frame_rotation; environment.py: update, "
            "spin_angle", "standard",
            "While the spin rate Omega(t) changes, grains feel the Euler acceleration -dOmega/dt x r in addition to "
@@ -404,8 +466,9 @@ SECTIONS = [
            "excite tubule resonances.",
            checks=["detachment", "walls"]),
         _c("Launch-load report", "mission.py: launch_report, grain_thresholds_g, _vib_exceed_prob", "derived",
-           "For each flight phase and tubule the report gives the loads at the tubule corner farthest from the spin "
-           "axis. These are the axial load, sampled through each phase and at the peak of any impulse, and the "
+           "For each flight phase and tubule, from lift-off to splashdown, the report gives the loads at the tubule "
+           "corner farthest from the spin axis: the largest load pressing dust onto the aft face and pulling it off. "
+           "These are the axial load, sampled through each phase and at the peak of any impulse, and the "
            "centrifugal and Euler loads. During the ascent it adds the guide's ~10 g lateral load (Sec. 5.2.5) to the "
            "load along the face as a worst-case sum. It reports the fraction of the dust whose pull-off thresholds "
            "F_c/m those loads exceed, sampled over the size distribution and the adhesion scatter. It also reports "
@@ -661,6 +724,33 @@ SECTIONS = [
            "JKR differ. Plasticity, friction and everything else in DOLL-E are not compared either.",
            refs="Thompson et al. (2022) Comput. Phys. Commun. 271, 108171 (LAMMPS)",
            checks=[]),
+        _c("Why not build on REBOUND or LAMMPS", "lammps_check.py (optional); rebound_check.py (optional)", "standard",
+           "Both were checked against their source code and documentation (October 2026). REBOUND 5.2 (GPL-3.0) has "
+           "only open, periodic and shear boundaries (no walls), no grain spin or inertia, no aggregates (stuck "
+           "grains merge into one sphere), no gas drag, electrostatics or adhesive contact. Its collision hook runs "
+           "at the end of a step with no contact time; the default IAS15 integrator adapts its step, but to "
+           "gravitational accuracy. LAMMPS (GRANULAR) has hysteretic JKR, friction, rolling resistance, JKR walls "
+           "that can vibrate, breakable bonds, rotating-frame forces through standard fixes and linear drag "
+           "(Epstein drag is scriptable with variables but unvalidated). It moves every grain with one global "
+           "step. A plugin could add a new integrator, but every existing granular pair style and fix assumes that "
+           "step. It also has no sticking-driven merging into rigid aggregates and no contact charging.",
+           "tools/lammps_benchmark.py: 2.3e7 grain-steps per second per core with the grains in flight (no "
+           "contacts) and 6.1e6 with the settled layer (every grain in a JKR wall contact). At 20% of the Rayleigh "
+           "time (10 ns) that is 13-49 core-days per tubule from lift-off to power-off, 35-130 to splashdown, 1-4 "
+           "hours per tubule-second. DOLL-E takes 3 minutes to 10 hours for a whole mission (four tubules, lift-off "
+           "to splashdown, 4 cores; the slow end is the 500 g shaker). Softening the "
+           "grains raises the JKR sticking speed as E^-1/3. The standard correction gamma x (E_soft/E)^(2/5) keeps "
+           "it, but cuts the wall pull-off force by the same factor (16x at E/1000), and pull-off decides launch "
+           "and release.",
+           "Measured on one laptop core while other work ran; LAMMPS parallelises with MPI, which divides the "
+           "wall time but not the core-days. DOLL-E's event-driven "
+           "design trades two approximations for speed: rigid aggregates and the Dominik & Tielens fragmentation "
+           "thresholds. A full-stiffness LAMMPS run of the seconds after a release is affordable (1-4 hours per "
+           "tubule-second) and would test them.",
+           refs="REBOUND github.com/hannorein/rebound (v5.2.2); Rein & Liu (2012) A&A 537, A128; LAMMPS docs "
+                "(pair_style granular, run_style, plugin, Howto_bpm); Thornton & Ning (1998); Chokshi et al. "
+                "(1993); Haervig et al. (2017) Powder Technol.; Chen et al. (2019); Washino et al. (2024)",
+           checks=[], rebound="none"),
     ]},
 ]
 

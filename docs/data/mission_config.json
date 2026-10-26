@@ -1,12 +1,13 @@
 {
   "name": "mission_quarter_deck",
   "_comment": [
-    "Four 0.5 x 0.5 x 1.5 in glass tubules on a quarter-space deck, simulated together from lift-off (T+0) to",
-    "experiment power-off (T+332 s) on one flight clock. Timeline: RockSat User Guide 2026 Table 3-1, plus",
+    "Four 0.5 x 0.5 x 1.5 in glass tubules on a quarter-space deck, simulated together from lift-off (T+0) through",
+    "re-entry, parachute and splashdown (T+882 s) on one flight clock. Timeline: RockSat User Guide 2026 Table 3-1, plus",
     "fact-sheet analogs and derived estimates (see dolle_sim/flight.py). Dust materials, sizes, counts and",
     "positions are EXAMPLES: replace them with the team's actual powders, glass and layout. The quarter",
     "space is a semicircle of the ~12 in deck (radius ~6 in = 0.152 m), 5.00 in high.",
     "The microgravity window is T+88 to T+313 s (100 km crossings); impact statistics are counted only inside it.",
+    "Runs end 5 s after splashdown; the top-level key simulate_to_s stops them earlier (e.g. 332 for power-off).",
     "Scenarios compare the undecided design choices; run one with --scenario NAME, or combine them with '+'",
     "(e.g. --scenario kick+lying). The default release (a 50 g shaker) frees no dust, so compare gas, orientation",
     "and spin on top of a release that does (kick+gas_1atm, kick+lying, ...)."
@@ -28,7 +29,15 @@
     "residual_spin_hz": 0.0167,
     "residual_g": 0.0001,
     "ug_start_s": 88.0,
-    "power_off_s": 332.0
+    "power_off_s": 332.0,
+    "chute_s": 460.0,
+    "splash_s": 882.0,
+    "chute_altitude_m": 4600.0,
+    "opening_peak_g": 5.0,
+    "descent_attitude": "broadside",
+    "hang_attitude": "nose_down",
+    "float_attitude": "side",
+    "_comment": "descent and attitudes: see dolle_sim/flight.py"
   },
   "gas": {"pressure_pa": 0.001, "gas": "air", "temperature_k": 293.0},
   "forces": {"long_range_update_every": 1},
@@ -70,6 +79,9 @@
     "gas_100pa": {"gas": {"pressure_pa": 100.0}},
     "gas_1atm": {"gas": {"pressure_pa": 101325.0}},
     "spin_1hz": {"flight_profile": {"residual_spin_hz": 1.0}},
-    "no_drag": {"flight_profile": {"coast_drag_g": 0.0, "post_burn_drag_g": 0.0}}
+    "no_drag": {"flight_profile": {"coast_drag_g": 0.0, "post_burn_drag_g": 0.0}},
+    "descent_tumbling": {"flight_profile": {"descent_attitude": "tumbling"}},
+    "hang_nose_up": {"flight_profile": {"hang_attitude": "nose_up", "float_attitude": "nose_up"}},
+    "shock_oblique": {"flight_profile": {"shock_direction": "oblique"}}
   }
 }

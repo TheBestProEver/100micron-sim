@@ -36,7 +36,8 @@ def test_rebound_is_only_imported_by_the_cross_check():
 def test_lammps_is_only_imported_by_its_cross_check():
     users = sorted(str(f.relative_to(ROOT)).replace("\\", "/") for f in _py_files()
                    if IMPORTS_LAMMPS.search(f.read_text(encoding="utf-8")))
-    assert users == ["dolle_sim/lammps_check.py"]
+    # the cross-check, and the timing benchmark in tools/ (not part of the simulator)
+    assert users == ["dolle_sim/lammps_check.py", "tools/lammps_benchmark.py"]
     importers = sorted(f.name for f in PKG.glob("*.py") if IMPORTS_LCHECK.search(f.read_text(encoding="utf-8")))
     assert importers == ["__main__.py"]
 
@@ -65,7 +66,7 @@ def test_rebound_relations_are_as_stated():
 
 def test_every_named_check_exists():
     ids = set(re.findall(r'_res\("(\w+)"', (PKG / "verification.py").read_text(encoding="utf-8")))
-    assert len(ids) == 25
+    assert len(ids) == 26
     for c in _items():
         assert c["origin"] in provenance.ORIGINS, c["component"]
         for k in c["checks"]:

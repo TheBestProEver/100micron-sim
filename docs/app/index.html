@@ -204,9 +204,10 @@
   <!-- ================================================================ FLIGHT -->
   <section class="pane" id="pane-flight">
     <p>The whole flight on one clock, for glass tubules (0.5 × 0.5 × 1.5 in) on a quarter deck: lift-off, two motor burns
-      at up to 25 g, spin at up to 4.8 Hz, de-spin, microgravity above ~100 km (T+88 to T+313 s), and the descent until
-      the experiment powers off at T+332 s. Timing and loads come from the RockSat User Guide 2026 and mission fact sheets of the same rocket; the
-      <a href="#sources">Sources</a> tab marks what is estimated or assumed.</p>
+      at up to 25 g, spin at up to 4.8 Hz, de-spin, microgravity above ~100 km (T+88 to T+313 s), re-entry, the parachute
+      (T+460 s) and splashdown (T+882 s). Timing and loads come from the RockSat User Guide 2026, mission fact sheets of
+      the same and a related rocket, and an empirical atmosphere model (NRLMSIS 2.1); the <a href="#sources">Sources</a>
+      tab marks what is estimated or assumed.</p>
     <div class="card">
       <h3 style="margin-top:0">Will the dust come off the bottom of the tubules?</h3>
       <p class="small muted">Each grain sticks to the glass with a pull-off force of 1.5πwR. Below, that force divided by
@@ -218,7 +219,7 @@
       <div id="fl-out"></div>
     </div>
     <h2>Full-flight simulations (stored desktop runs)</h2>
-    <p class="muted">Every grain in all four example tubules, from lift-off to power-off, for each design option (release
+    <p class="muted">Every grain in all four example tubules, from lift-off to splashdown, for each design option (release
       mechanism, gas, orientation, spin). These runs take hours, so they are not run in the browser. Run them with
       <span class="tag">python -m dolle_sim mission configs/mission_quarter_deck.json --scenario NAME</span>.</p>
     <div id="fl-results"><p class="muted small">Loading…</p></div>
@@ -226,7 +227,7 @@
 
   <!-- ================================================================ VERIFY -->
   <section class="pane" id="pane-verify">
-    <p>25 tests compare the simulator with exact solutions, independent calculations and conservation laws. They run the
+    <p>26 tests compare the simulator with exact solutions, independent calculations and conservation laws. They run the
       real code in your browser and take a few minutes. The <a href="#sources">Sources</a> tab says which part of the
       physics each test covers.</p>
     <div class="btns"><button class="btn big" id="btn-verify" disabled>Run all tests</button><span class="status" id="vmsg"></span></div>

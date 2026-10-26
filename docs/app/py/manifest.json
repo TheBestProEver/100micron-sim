@@ -1,8 +1,9 @@
 {
- "version": "0.4.0",
+ "version": "0.5.0",
  "files": [
   "__init__.py",
   "analysis.py",
+  "atmosphere.py",
   "contact.py",
   "design.py",
   "electrostatics.py",

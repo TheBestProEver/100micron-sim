@@ -710,12 +710,40 @@ def check_settling():
                 "> 95%, > 90% aft, none outside", ok)
 
 
+def check_reentry():
+    """The descent integrator (flight.py) against the closed-form ballistic entry of Allen & Eggers (1958): no
+    gravity, exponential atmosphere, constant ballistic coefficient."""
+    from .flight import FlightProfile, G0
+    prof = FlightProfile()
+    rho0, H, beta, VE = 1.2, 7000.0, 356.0, 1500.0
+    worst_a = worst_h = worst_v = 0.0
+    for gam in (math.pi / 2, math.pi / 4):
+        y0 = (0.0, 120e3, VE * math.cos(gam), -VE * math.sin(gam))
+        t, h, v, f = prof._fall(beta, 400.0, dt=0.01, y0=y0, t0=0.0, gravity=False,
+                                density=lambda hh: rho0 * math.exp(-hh / H))
+        k = int(np.argmax(f))
+        a_ae = VE ** 2 * math.sin(gam) / (2 * math.e * H)              # peak deceleration
+        h_ae = H * math.log(rho0 * H / (beta * math.sin(gam)))         # where it occurs
+        m = (h > 5e3) & (h < 60e3)
+        v_ae = VE * np.exp(-rho0 * np.exp(-h[m] / H) * H / (2 * beta * math.sin(gam)))
+        worst_a = max(worst_a, abs(f[k] / a_ae - 1))
+        worst_h = max(worst_h, abs(h[k] - h_ae))
+        worst_v = max(worst_v, float(np.max(np.abs(v[m] / v_ae - 1))))
+    ok = worst_a < 1e-5 and worst_h < 5.0 and worst_v < 1e-5
+    return _res("reentry", "Re-entry deceleration (ballistic entry)",
+                "The fall integrator with gravity off and an exponential atmosphere (H = 7 km), entering at 1.5 km/s at "
+                "90 and 45 degrees, vs Allen & Eggers (1958): v(h) = V exp(-rho H / (2 beta sin g)), peak deceleration "
+                "V^2 sin g / (2 e H) at rho = beta sin g / H.",
+                f"peak deceleration within {worst_a:.1e}, its altitude within {worst_h:.1f} m, speed vs altitude "
+                f"within {worst_v:.1e}", "< 1e-5; < 5 m; < 1e-5", ok)
+
+
 CHECKS = [check_elastic_limit, check_damping, check_thornton_ning, check_plastic_damping, check_energy_scaling,
           check_threshold_limits, check_free_flight, check_rotating_frame, check_rigid_body, check_impulse,
           check_conservation, check_walls, check_no_overlap, check_space_charge, check_charge_saturation,
           check_threshold_fit, check_spin_rotating_frame, check_fragmentation_energy, check_friction_energy,
           check_drag_limits, check_thermophoresis, check_brownian, check_flight_frame, check_detachment,
-          check_settling]
+          check_settling, check_reentry]
 
 
 def list_checks():
