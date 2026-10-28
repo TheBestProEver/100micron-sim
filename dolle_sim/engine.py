@@ -36,11 +36,11 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import dem, roll1, statics
+from . import dem, roll1, slaved, statics
 from .environment import G0
 from .loads import Loads
 
-FREE, ACTIVE, ASLEEP, ROLL = 0, 1, 2, 3
+FREE, ACTIVE, ASLEEP, ROLL, SLAV = 0, 1, 2, 3, 4
 # a run saved at a checkpoint may continue under another scenario only if a fresh run of that scenario differs from a
 # fresh run of the saved one in these attributes alone (release schedule, flight-profile options) and its loads are
 # identical up to the checkpoint (branch())
@@ -79,6 +79,8 @@ class FullContactSim:
         self.d_cap = float(cc.get("capture_distance_m", 1e-7))
         self.use_roll = bool(cc.get("slaved_rolling", True))
         self.all_dem = bool(cc.get("all_dem", False))        # reference mode: every grain in the DEM throughout
+        self.use_slaved = bool(cc.get("slaved_clusters", True))
+        self.n_ppp_slv = int(cc.get("slaved_steps_per_period", 400))
         self.mu_tab = dict(MU_DEFAULT)
         for k, val in (cc.get("friction", {}) or {}).items():
             a, _, c = k.partition("-")
@@ -123,6 +125,9 @@ class FullContactSim:
         self._islands = {}          # id -> sleeping cluster (members, contacts, factorised stiffness, reference)
         self._island_of = {}        # grain -> island id
         self._next_island = 0
+        self._slv = {}              # id -> slaved cluster (regime SLAV): members, contact rows, local contact lists
+        self._slv_of = {}           # grain -> slaved cluster id
+        self._next_slv = 0
         self.max_island = int(cc.get("max_sleeping_cluster", 800))
         self._F_lr = np.zeros((N, 3))
         for k, ax, side in b._settled:
@@ -275,19 +280,8 @@ class FullContactSim:
         p, h = self._prm[row], self._hist[row]
         R, w, E = p[dem.P_REFF], p[dem.P_W], p[dem.P_ESTAR]
         Fn = -float(F @ n)
-        # JKR: F_el(a) = Fn on the stable branch (a > a0/4^(1/3)); solve by bisection in a
-        a0 = p[dem.P_A0]
-        lo, hi = a0 / 4 ** (1 / 3), a0
-        while dem.jkr_force(hi, R, w, E) < Fn:
-            hi *= 1.5
-        for _ in range(200):
-            mid = 0.5 * (lo + hi)
-            if dem.jkr_force(mid, R, w, E) < Fn:
-                lo = mid
-            else:
-                hi = mid
-        a = 0.5 * (lo + hi)
-        delta = a * a / R - math.sqrt(2 * math.pi * w * a / E)
+        # JKR: the overlap on the stable branch for F_el = Fn (the flattened branch, offset d_p, if yielded)
+        delta, a = slaved.jkr_overlap(p, h, Fn, h[dem.H_A] if h[dem.H_A] > 0 else p[dem.P_A0])
         ax = face // 2
         self.x[k, ax] = (self.rad[k] - delta) if face % 2 == 0 else (self.L[ax] - self.rad[k] + delta)
         Ft = F + Fn * n
@@ -298,13 +292,20 @@ class FullContactSim:
         # elastic tangential deflection held by the sliding and rolling springs before (centre moves with them:
         # v_t = d(xi_t)/dt + d(xi_r)/dt for a sphere on a wall)
         defl_old = (h[dem.H_XT:dem.H_XT + 3] + h[dem.H_XR:dem.H_XR + 3]).copy() if h[dem.H_TOUCH] > 0.5             else np.zeros(3)
+        plastic = (h[dem.H_YLD], h[dem.H_RP], h[dem.H_DP], h[dem.H_FCP], h[dem.H_DMAX])
         h[:dem.NHP] = 0.0
+        h[dem.H_YLD], h[dem.H_RP], h[dem.H_DP], h[dem.H_FCP], h[dem.H_DMAX] = plastic   # a flattening stays
         h[dem.H_TOUCH] = 1.0
         h[dem.H_A] = a
-        h[dem.H_DMAX] = delta
+        h[dem.H_DMAX] = max(h[dem.H_DMAX], delta)
         # contact force on the grain balances the load: tangential force fs = -Ft (fs = -k_t a xi_t), the rolling
         # pseudo-force fr balances the torque about the centre: R n x (fr - fs) = -T_tangential
-        ks = p[dem.P_KT] * a
+        if h[dem.H_YLD] > 0.5:                        # as dem.contact_force
+            ks = p[dem.P_KT] * (4.5 * math.pi * w * h[dem.H_RP] ** 2 / E) ** (1.0 / 3.0)
+        elif int(p[dem.P_TMODE]) == dem.TANG_MINDLIN:
+            ks = p[dem.P_KT] * a
+        else:
+            ks = p[dem.P_KT] * p[dem.P_A0]
         h[dem.H_XT:dem.H_XT + 3] = Ft / ks
         fr = -Ft + np.cross(n, Tt) / R
         h[dem.H_XR:dem.H_XR + 3] = -fr / p[dem.P_KR]
@@ -352,6 +353,10 @@ class FullContactSim:
         nb = self.loads.next_breakpoint(T)
         if T + dt > nb - 1e-12:
             dt = max(nb - T, 1e-9)
+        if self.loads.breakpoint_in(T - 1e-9, T + 1e-9):
+            # just after a load jump every grain on a wall is in the full model while its stiff modes ring (they
+            # decay in ~5 us); a short step, after which the usual tests hand them back to the cheap models
+            dt = min(dt, 5e-5)
         return min(dt, self.duration - t)
 
     def _motion_bound(self, H, T):
@@ -418,7 +423,8 @@ class FullContactSim:
                     hist=self._hist[:nr].copy(), nr=nr, F_lr=self._F_lr.copy(), sleep_face=dict(self._sleep_face),
                     roll_face=dict(self._roll_face), islands=dict(self._islands), island_of=dict(self._island_of),
                     next_island=self._next_island, last_face=getattr(self, "_last_face", -1),
-                    n_events=dict(self.n_events), rng=copy.deepcopy(self.base.rng.bit_generator.state))
+                    n_events=dict(self.n_events), rng=copy.deepcopy(self.base.rng.bit_generator.state),
+                    slv=copy.deepcopy(self._slv), slv_of=dict(self._slv_of), next_slv=self._next_slv)
 
     def _restore(self, sn):
         self.x[:], self.v[:], self.w[:], self.regime[:] = sn["x"], sn["v"], sn["w"], sn["regime"]
@@ -430,6 +436,7 @@ class FullContactSim:
         self._islands, self._island_of = dict(sn["islands"]), dict(sn["island_of"])
         self._next_island, self._last_face, self.n_events = sn["next_island"], sn["last_face"], dict(sn["n_events"])
         self.base.rng.bit_generator.state = copy.deepcopy(sn["rng"])
+        self._slv, self._slv_of, self._next_slv = copy.deepcopy(sn["slv"]), dict(sn["slv_of"]), sn["next_slv"]
 
     def _step_once(self, t, H, force, vfac):
         T = self.env.t0_flight + t
@@ -492,6 +499,16 @@ class FullContactSim:
         for k in np.flatnonzero(forced & ((self.regime == ROLL) | (self.regime == FREE))):
             self._roll_face.pop(int(k), None)
             self.regime[k] = ACTIVE
+        # a load jump (breakpoint) excites the stiff modes that the slaved models hold quasi-static: the full model
+        # takes those grains for the step; and a redo that names a grain of a slaved cluster puts the cluster there
+        jump = self.loads.breakpoint_in(T - 1e-9, T + 1e-9)
+        for cid in list(self._slv):
+            if jump or forced[self._slv[cid]["members"]].any():
+                self._dissolve_slv(cid)
+        if jump:
+            for k in np.flatnonzero(self.regime == ROLL):
+                self._roll_face.pop(int(k), None)
+                self.regime[k] = ACTIVE
         # motion bounds: |v| H + a_max H^2 / 2 (body forces), the rolling envelope for rolling grains, 0 asleep
         s = self._motion_bound(H, T)
         s[self.regime == ASLEEP] = 0.0
@@ -501,25 +518,67 @@ class FullContactSim:
             s[ro_all], s_off[ro_all] = self._roll_bound(ro_all, H, T)
         reg_seen = self.regime.copy()
         x_seen = self.x.copy()
+        # slaved clusters: integrated over the whole step first (exact, stopping where anything static is within the
+        # capture distance or a limit is near); the path they actually take is their envelope for everyone else
+        slv_pre = {}
+        for cid in list(self._slv):
+            pre = slv_pre[cid] = self._slv_prerun(cid, t, H, T)
+            c = self._slv[cid]
+            mem, rows = c["members"], c["rows"]
+            s[mem] = pre["s"]
+            s_off[mem] = pre["s"]
+            # the envelope is measured from the step start: back to the start state for the capture times, speed
+            # bounds and step sizes; the end state is applied after them if nothing stops the cluster earlier
+            pre["end"] = (self.x[mem].copy(), self.v[mem].copy(), self.w[mem].copy(), self._hist[rows].copy(),
+                          c["lam"].copy())
+            self._slv_restore(pre)
         self._vdem_fac = vfac
         self._chk = dict(speed=[], vmax=[], outside=[], dmax=np.zeros(self.N), in_dem=np.zeros(self.N, bool),
-                         roll_bad=set(), x_seen=x_seen)
+                         roll_bad=set(), x_seen=x_seen, slv_of=dict(self._slv_of))
         vm0 = np.linalg.norm(self.v, axis=1)
         a_b = np.maximum((s - s_off - vm0 * H) * 2 / (H * H), 0.0)
         # 3. capture times: the earliest time each free or rolling grain could come within the capture distance of
         # anything (bounded motion of both sides). Up to it, a free grain flies exactly (velocity Verlet with
         # closed-form drag and Coriolis) and a rolling grain rolls on the slaved model; there it joins the DEM.
         joins = {}
+        xjoin = []                                # (time, grains): slaved clusters joining off the dt_d grid
         dt_d = min(self._dt_dem, self._hertz_dt(2 * float(np.linalg.norm(self.v, axis=1).max())))
         self._join_dt = dt_d
-        mob_idx = np.flatnonzero((self.regime == FREE) | (self.regime == ROLL))
+        mob_idx = np.flatnonzero((self.regime == FREE) | (self.regime == ROLL) | (self.regime == SLAV))
+        self._vd_step, self._ag_step = self._speed_bounds(H, a_b, self.regime != ASLEEP)
         if len(mob_idx):
-            t_hit, v_dem, used = self._capture_times(mob_idx, H, T, s, s_off)
-            if used:
-                self._chk["speed"].append((t, v_dem))
+            t_hit, used = self._capture_times(mob_idx, H, T, s, s_off)
+            if used.any():
+                ug = np.flatnonzero(used)
+                self._chk["speed"].append((t, ug, self._vd_step[ug]))
             fr = mob_idx[(self.regime[mob_idx] == FREE)]
             ro = mob_idx[(self.regime[mob_idx] == ROLL)]
             th = dict(zip(mob_idx.tolist(), t_hit.tolist()))
+            # slaved clusters: they join the DEM together at the earliest capture time of any member or where the
+            # pre-run stopped; then they are run again from the step start to exactly that time
+            for cid in list(self._slv):
+                c, pre = self._slv[cid], slv_pre[cid]
+                mem = c["members"]
+                self._chk["outside"].append((mem.copy(), x_seen[mem].copy(), pre["s"].copy()))
+                t_j = min(min(th[int(k)] for k in mem), pre["t_stop"])
+                if t_j >= H:                      # it runs through: the pre-run's end state
+                    xe, ve, we, he, le = pre["end"]
+                    self.x[mem], self.v[mem], self.w[mem] = xe, ve, we
+                    self._hist[c["rows"]] = he
+                    c["lam"] = le.copy()
+                    self._slv_count(pre["n_done"] * len(mem), pre.get("stop"))
+                    continue
+                # run again from the step start on the pre-run's own grid to the last slaved step before t_j: the
+                # same path the envelope was built from; it joins the DEM at exactly that time
+                dts = pre.get("dt", 0.0)
+                msteps = int(math.floor(t_j / dts * (1 + 1e-12))) if dts > 0 else 0
+                self._slv_restore(pre)
+                if msteps > 0:
+                    self._slv_advance(cid, t, msteps * dts, T, pre, dt_fix=dts, nsteps_fix=msteps)
+                self._slv_count(msteps * len(mem), pre.get("stop") if pre["t_stop"] <= t_j else None)
+                self._dissolve_slv(cid)
+                if msteps > 0:
+                    xjoin.append((t + msteps * dts, [int(k) for k in mem]))
             whole_f = np.array([k for k in fr if th[k] >= H], np.int64)
             if len(whole_f):
                 self._outside(whole_f, s[whole_f])
@@ -549,15 +608,19 @@ class FullContactSim:
                 for k in g:
                     self._roll_face.pop(int(k), None)
                     self.regime[k] = ACTIVE
-                joins[kk] = g
+                joins.setdefault(kk, []).extend(g)
         # 4. active grains: full-stiffness DEM over [t, t + H] in chunks; captured grains join at their capture
         # times, sleepers when a DEM grain comes up to them; after each chunk, grains that touch nothing and are clear
         # of everything for the rest of the step go back to free flight, and grains resting on one wall and clear go
         # back to the slaved rolling model
         ai = np.flatnonzero(self.regime == ACTIVE)
         late = {kk: v for kk, v in joins.items() if kk > 0}
+        tj = {kk: t + kk * dt_d for kk in late}
+        for q, (tq, g) in enumerate(xjoin):
+            late[-1 - q] = g
+            tj[-1 - q] = tq
         if len(ai):
-            join_at = sorted((t + q * dt_d, q) for q in late)
+            join_at = sorted((tj[q], q) for q in late)
             in_late = set(k for v in late.values() for k in v)
             cur = np.array([k for k in ai if int(k) not in in_late], np.int64)
             t_cur, t_end = t, t + H
@@ -590,13 +653,19 @@ class FullContactSim:
         chk = self._chk
         bad = set(int(k) for k in chk["roll_bad"])
         vf = None
-        for tc, vb in chk["speed"]:
-            obs = max([vm for (ta, tb, vm) in chk["vmax"] if tb > tc + 1e-15], default=0.0)
-            if obs > vb:
-                vf = max(vf or 0.0, self._vdem_fac * 1.25 * obs / vb)
+        for tc, idx, vb in chk["speed"]:
+            obs = np.zeros(len(idx))
+            for ta, tb, vg in chk["vmax"]:
+                if tb > tc + 1e-15:
+                    obs = np.maximum(obs, vg[idx])
+            over = obs > vb
+            if over.any():
+                vf = max(vf or 0.0, self._vdem_fac * 1.25 * float((obs[over] / np.maximum(vb[over], 1e-30)).max()))
         cand = np.flatnonzero(chk["in_dem"] & (reg_seen != ACTIVE))
         if len(cand) and chk["outside"]:
             K = np.concatenate([r[0] for r in chk["outside"]])
+            cl = chk.get("slv_of", {})            # grains of one slaved cluster: their mutual contacts were resolved
+            KC = np.array([cl.get(int(k), -1) for k in K], np.int64)       # by the slaved model, then the DEM
             X = np.vstack([r[1] for r in chk["outside"]])
             S = np.concatenate([r[2] for r in chk["outside"]])
             xs = chk["x_seen"]
@@ -606,7 +675,7 @@ class FullContactSim:
             for q, g in enumerate(cand):
                 for idx in tree.query_ball_point(xs[g], 2 * rmax + float(S.max()) + Dg[q] + self.d_cap + 1e-12):
                     k = int(K[idx])
-                    if k == int(g):
+                    if k == int(g) or (KC[idx] >= 0 and KC[idx] == cl.get(int(g), -2)):
                         continue
                     gap = float(np.linalg.norm(xs[g] - X[idx])) - self.rad[g] - self.rad[k]
                     if gap - S[idx] - Dg[q] <= self.d_cap:
@@ -641,11 +710,14 @@ class FullContactSim:
         d_cap = self.d_cap
         in_cur = np.zeros(self.N, bool)
         in_cur[cur] = True
-        v_dem = (float(vm[cur].max()) * math.sqrt(float(self.m.max() / self.m.min())) + float(a_k.max()) * rem) \
-            * self._vdem_fac
+        # speed bounds of the grains in the DEM for the rest of the step: local (their own interaction groups now),
+        # and never below the bounds set at the step start, which also cover grains that may still join them
+        vdc, agc = self._speed_bounds(rem, a_k, in_cur)
+        vdc = np.maximum(vdc, self._vd_step)
+        agc = np.maximum(agc, self._ag_step)
         ref = np.where(in_cur[:, None], self.x, x_start)
         sk_of, off_of = {}, {}
-        s_ref = np.where(in_cur, v_dem * rem + 0.5 * float(a_k.max()) * rem * rem, s_full)
+        s_ref = np.where(in_cur, vdc * rem + 0.5 * agc * rem * rem, s_full)
         out = []
         rollers = []
         nw = {}
@@ -723,7 +795,7 @@ class FullContactSim:
             cur = np.setdiff1d(cur, np.array(back, np.int64))
             self.n_events["roll_reentries"] = self.n_events.get("roll_reentries", 0) + len(back)
         if back or out:
-            self._chk["speed"].append((t_now, v_dem))
+            self._chk["speed"].append((t_now, cur.copy(), vdc[cur]))
         if out:
             out = np.array(out, np.int64)
             self.regime[out] = FREE
@@ -763,25 +835,72 @@ class FullContactSim:
         vm = np.linalg.norm(self.v[ri], axis=1)
         return vm * H + 0.5 * (5.0 / 7.0) * excess * H * H + off, off
 
+    def _speed_bounds(self, H, a_b, mask=None):
+        """Speed bound over the next H for each grain whose direction contacts can change (a grain in the DEM): the
+        fastest grain it could meet during H (grains whose reaches can overlap, transitively, iterated until the
+        groups stop growing) times sqrt(m_max / m_min) (the most a collision between two of them can give), plus the
+        group's acceleration bound times H. So a slow cluster far from fast grains keeps a slow bound. Checked after
+        the step against every grain's actual speed (_verify), and scaled up by the redo factor if one was exceeded.
+        Returns the bounds and the group acceleration bounds (zero outside the mask)."""
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        idx = np.arange(self.N) if mask is None else np.flatnonzero(mask)
+        vb_all, ag_all = np.zeros(self.N), np.zeros(self.N)
+        if not len(idx):
+            return vb_all, ag_all
+        u = np.linalg.norm(self.v[idx], axis=1)
+        a = np.asarray(a_b)[idx]
+        fac = math.sqrt(float(self.m.max() / self.m.min()))
+        x, r = self.x[idx], self.rad[idx]
+        n = len(idx)
+        tree = cKDTree(x)
+        vb, amax = u * fac + a * H, a.copy()
+        for _ in range(12):
+            reach = vb * H + 0.5 * amax * H * H
+            pr = tree.query_pairs(2 * float(r.max()) + 2 * float(reach.max()) + self.d_cap + 1e-12,
+                                  output_type="ndarray")
+            if len(pr):
+                d = np.linalg.norm(x[pr[:, 0]] - x[pr[:, 1]], axis=1) - r[pr[:, 0]] - r[pr[:, 1]]
+                pr = pr[d <= reach[pr[:, 0]] + reach[pr[:, 1]] + self.d_cap]
+            if len(pr):
+                g = coo_matrix((np.ones(len(pr)), (pr[:, 0], pr[:, 1])), shape=(n, n))
+                _, lab = connected_components(g, directed=False)
+            else:
+                lab = np.arange(n)
+            um = np.zeros(lab.max() + 1)
+            np.maximum.at(um, lab, u)
+            am = np.zeros(lab.max() + 1)
+            np.maximum.at(am, lab, a)
+            nvb, namax = um[lab] * fac + am[lab] * H, am[lab]
+            if np.array_equal(nvb, vb) and np.array_equal(namax, amax):
+                break
+            vb, amax = nvb, namax
+        else:                                           # not settled: the global bound
+            vb = np.full(n, float(u.max()) * fac + float(a.max()) * H)
+            amax = np.full(n, float(a.max()))
+        vb_all[idx], ag_all[idx] = vb * self._vdem_fac, amax
+        return vb_all, ag_all
+
     def _capture_times(self, free, H, T, s, s_off):
         """For each free or rolling grain, a lower bound on the time at which it could first come within the capture
-        distance d_cap of a wall or another grain during the step. Returns (times, v_dem, whether v_dem was used).
+        distance d_cap of a wall or another grain during the step.
         * walls: the gap along the wall normal is g0 + u tau - a tau^2/2 at the least (u its velocity away from the
           wall, a the grain's acceleration bound);
         * another free grain or a sleeping one: their relative motion is a straight line d0 + dv tau plus a curvature
           of at most (a_i + a_j) tau^2 / 2, so the distance is at least |d0 + dv tau| - (a_i + a_j) H^2 / 2;
         * a rolling grain: its envelope |v| tau + a tau^2 / 2 + offset (rolling bound);
-        * a grain in the DEM: no direction is assumed, only the speed bound v_dem (contacts can turn it).
+        * a grain in the DEM: no direction is assumed, only its local speed bound (contacts can turn it).
         Sleeping grains do not move (their certificate holds for the step; one that joins the DEM is checked
-        afterwards, see _verify), and v_dem is checked against the DEM's actual speeds."""
+        afterwards, see _verify). The speed bound of each grain in the DEM is local (_speed_bounds) and checked
+        against its actual speed afterwards. Returns the times and which DEM grains' bounds were used."""
         d_cap = self.d_cap
         vm = np.linalg.norm(self.v, axis=1)
         a_bound = np.maximum((s - s_off - vm * H) * 2 / (H * H), 0.0)   # per-grain acceleration bound
-        # speed bound for grains whose direction contacts can change (verified afterwards against the DEM's speeds)
-        v_dem = (float(vm.max()) * math.sqrt(float(self.m.max() / self.m.min())) + float(a_bound.max()) * H) \
-            * self._vdem_fac
+        vd, ag = self._vd_step, self._ag_step
         out = np.full(len(free), np.inf)
-        used = False
+        used = np.zeros(self.N, bool)
+        act = self.regime == ACTIVE
+        vd_act = float(vd[act].max()) if act.any() else 0.0
 
         def t_iso(gap, v, a):
             g = gap - d_cap
@@ -805,13 +924,16 @@ class FullContactSim:
                 return np.inf
             return (-b - math.sqrt(disc)) / a2
         tree = cKDTree(self.x)
-        reach = 2 * self.rad.max() + d_cap + 2 * max(float(s.max()), v_dem * H) + 1e-9
+        reach = 2 * self.rad.max() + d_cap + 2 * max(float(s.max()), vd_act * H) + 1e-9
+        slv_k = self.regime == SLAV
+        vm_e = np.where(slv_k, 0.0, vm)
         for q, k in enumerate(free):
             best = np.inf
             k_roll = self.regime[k] == ROLL
+            k_slv = bool(slv_k[k])
             own = self._roll_face.get(int(k), -1) if k_roll else -1
             for f in range(6):
-                if f == own:
+                if f == own or k_slv:
                     continue
                 ax = f // 2
                 g0 = (self.x[k, ax] if f % 2 == 0 else self.L[ax] - self.x[k, ax]) - self.rad[k] - d_cap - s_off[k]
@@ -830,21 +952,23 @@ class FullContactSim:
                     continue
                 rsum = self.rad[jj] + self.rad[k]
                 rj = self.regime[jj]
+                if k_slv and (rj == ASLEEP or self._slv_of.get(int(jj)) == self._slv_of.get(int(k))):
+                    continue                      # checked exactly by the pre-run (static, or the same cluster)
                 if rj == ACTIVE:
                     gap = float(np.linalg.norm(self.x[jj] - self.x[k])) - rsum - s_off[k]
-                    tp = t_iso(gap, vm[k] + v_dem, a_bound[k] + float(a_bound.max()))
-                    used = True
-                elif k_roll or rj == ROLL:
+                    tp = t_iso(gap, vm_e[k] + vd[jj], a_bound[k] + ag[jj])
+                    used[jj] = True
+                elif k_roll or k_slv or rj == ROLL or rj == SLAV:
                     gap = float(np.linalg.norm(self.x[jj] - self.x[k])) - rsum - s_off[k] - s_off[jj]
-                    vj = 0.0 if rj == ASLEEP else vm[jj]
-                    tp = t_iso(gap, vm[k] + vj, a_bound[k] + a_bound[jj])
+                    vj = 0.0 if rj == ASLEEP else vm_e[jj]
+                    tp = t_iso(gap, vm_e[k] + vj, a_bound[k] + a_bound[jj])
                 elif rj == FREE:
                     tp = t_lin(self.x[jj] - self.x[k], self.v[jj] - self.v[k], rsum, a_bound[k] + a_bound[jj])
                 else:
                     tp = t_lin(self.x[jj] - self.x[k], -self.v[k], rsum, a_bound[k])
                 best = min(best, tp)
             out[q] = best
-        return out, v_dem, used
+        return out, used
 
     def _skip_asleep(self, t, t_out=None):
         """Everything is asleep: advance time without stepping while every sleeper's certificate holds, checked at
@@ -956,6 +1080,7 @@ class FullContactSim:
         Omd_all = self.loads.omega_dot(Ts_all)
         chk = self._chk
         vmax2 = np.zeros(1)
+        vchunk = np.zeros(self.N)
         done = 0
         while done < n:
             Tn = T0 + done * dt
@@ -969,6 +1094,7 @@ class FullContactSim:
             Fext = np.ascontiguousarray(self._F_lr[ai])
             xs = np.ascontiguousarray(chk["x_seen"][ai])
             dmax = chk["dmax"][ai].copy()
+            vmaxg = np.zeros(len(ai))
             ci, cj, rows = self._candidates(ai, skin)
             prm = np.ascontiguousarray(self._prm[rows])
             hist = np.ascontiguousarray(self._hist[rows])
@@ -981,17 +1107,37 @@ class FullContactSim:
                                Fext, Tn)
             xb = x.copy()
             kk = dem.run_steps(x, v, w, m, I, self.L, ci, cj, prm, hist, dt, n - done, acc_all[done:], Om_all[done:],
-                               Omd_all[done:], self.off, gdrag, F, Tq, xb, lim, Fn, Fext, Tn, xs, dmax, vmax2)
+                               Omd_all[done:], self.off, gdrag, F, Tq, xb, lim, Fn, Fext, Tn, xs, dmax, vmax2,
+                               vmaxg)
+            vchunk[ai] = np.maximum(vchunk[ai], np.sqrt(vmaxg))
             self._hist[rows] = hist
             self.x[ai], self.v[ai], self.w[ai] = x, v, w
             chk["dmax"][ai] = dmax
             done += kk
             self.n_events["dem_steps"] += kk
             self.n_events["active_grain_steps"] += kk * len(ai)
+            # where the full model's effort goes (counted at the start of each segment): grains touching other
+            # grains, grains touching only walls, grains touching nothing
+            cls = self._dem_classes(ai)
+            for key, cnt in cls.items():
+                self.n_events[key] = self.n_events.get(key, 0) + kk * cnt
             if done < n:
                 self.n_events["rebuilds"] += 1
-        chk["vmax"].append((t, t + H, math.sqrt(float(vmax2[0]))))
+        chk["vmax"].append((t, t + H, vchunk))
         return ai
+
+    def _dem_classes(self, ai):
+        mask = np.zeros(self.N, bool)
+        mask[ai] = True
+        pair = np.zeros(self.N, bool)
+        wall = np.zeros(self.N, bool)
+        for i, j in self._touching(mask):
+            if j >= 0:
+                pair[i] = pair[j] = True
+            else:
+                wall[i] = True
+        return {"dem_gs_in_clusters": int((pair & mask).sum()), "dem_gs_on_walls_only": int((wall & ~pair & mask).sum()),
+                "dem_gs_touching_nothing": int((~wall & ~pair & mask).sum())}
 
     def _watch(self, ai, T, skin):
         """Sleepers within 2 d_cap of a DEM grain join it (repeated: a joined grain may be that close to another).
@@ -1050,10 +1196,29 @@ class FullContactSim:
             return
         T = self.env.t0_flight + t
         Hn = self._outer_dt(t) if t < self.duration else 0.0
-        for k in np.flatnonzero(self.regime == ROLL):
-            f = self._roll_face[int(k)]
-            if self._try_sleep(int(k), f, T, Hn):
-                self._roll_face.pop(int(k), None)
+        ro = np.flatnonzero(self.regime == ROLL)
+        if len(ro) and Hn > 0 and not (self.loads.fast_window(T, T + Hn) or self.loads.breakpoint_in(T - 1e-9, T + Hn)):
+            # the load test of _try_sleep for all rolling grains at once; only those that pass get the full test
+            faces = np.array([self._roll_face[int(k)] for k in ro], np.int64)
+            worst = np.zeros(len(ro))
+            for Ts in (T, T + Hn):
+                F, Tq = self._body_force(ro, Ts)
+                worst = np.maximum(worst, self._margins(ro, faces, F, Tq)[0])
+            for k in ro[worst <= 1 - 5 * self.margin]:
+                f = self._roll_face[int(k)]
+                if self._try_sleep(int(k), f, T, Hn):
+                    self._roll_face.pop(int(k), None)
+        if self._slv:
+            touch_s = self._touching(self.regime == SLAV)
+            for cid in list(self._slv):
+                mem = self._slv[cid]["members"]
+                self.regime[mem] = ACTIVE               # _try_sleep_island works on awake clusters
+                if self._try_sleep_island(np.array(sorted(mem)), touch_s, T, Hn):
+                    for g in mem:
+                        self._slv_of.pop(int(g), None)
+                    self._slv.pop(cid)
+                else:
+                    self.regime[mem] = SLAV
         ai = np.flatnonzero(self.regime == ACTIVE)
         if not len(ai):
             return
@@ -1089,7 +1254,9 @@ class FullContactSim:
         for mem in groups.values():
             if len(mem) > 1 or nwall[mem[0]] > 1:
                 if any(nwall[k] > 0 for k in mem) and len(mem) <= self.max_island:
-                    self._try_sleep_island(np.array(sorted(mem)), touch, T, H)
+                    mm = np.array(sorted(mem))
+                    if not self._try_sleep_island(mm, touch, T, H) and self.use_slaved:
+                        self._try_slaved(mm, touch, T, H)
         for k in ai:
             if self.regime[k] != ACTIVE:
                 continue
@@ -1172,12 +1339,15 @@ class FullContactSim:
         m_slide = p[dem.P_MUT] * Fncrit - float(np.linalg.norm(F[0] - (F[0] @ n) * n))
         if m_pull <= 0 or m_slide <= 0:
             return False
-        a_eq = self._jkr_radius(p, Fne)
-        R, w, E = p[dem.P_REFF], p[dem.P_W], p[dem.P_ESTAR]
-        d_eq = a_eq * a_eq / R - math.sqrt(2 * math.pi * w * a_eq / E)
+        # hysteresis: roll1 hands back at 1 - margin of the pull-off or sliding limit, so enter only at 1 - 5 margin
+        if -Fne / Fc > 1 - 5 * self.margin or \
+                float(np.linalg.norm(F[0] - (F[0] @ n) * n)) > (1 - 5 * self.margin) * p[dem.P_MUT] * Fncrit:
+            return False
+        d_eq, a_eq = slaved.jkr_overlap(p, h, Fne, h[dem.H_A] if h[dem.H_A] > 0 else p[dem.P_A0])
         ax = face // 2
         d_now = (self.rad[k] - self.x[k, ax]) if face % 2 == 0 else (self.x[k, ax] - (self.L[ax] - self.rad[k]))
-        Es = 0.5 * self.m[k] * (vn * vn + float(slip @ slip)) + 0.5 * kn * (d_now - d_eq) ** 2
+        Ft_s = F[0] - float(F[0] @ n) * n                      # static tangential load: sliding spring at Ft / ks
+        Es = 0.5 * self.m[k] * (vn * vn + float(slip @ slip)) + 0.5 * kn * (d_now - d_eq) ** 2             + 0.5 * ks * float(((h[dem.H_XT:dem.H_XT + 3] - Ft_s / ks) ** 2).sum())
         if math.sqrt(2 * max(kn, ks) * Es) > 0.01 * min(m_pull, m_slide):
             return False
         # on the slow manifold: normal overlap at equilibrium, no slip
@@ -1274,7 +1444,10 @@ class FullContactSim:
         masses. The cluster may sleep with it if every mode decays, the residual moves no grain by more than a tenth
         of the capture distance (so no approach can be missed), and every contact keeps 5x the sleep margin even with the largest the residual can add (for all later
         times); the residual is then added back exactly when the cluster wakes. None if not."""
+        def no(why):
+            self.n_events["cluster_awake_" + why] = self.n_events.get("cluster_awake_" + why, 0) + 1
         if len(mem) > LINRES_MAX:
+            no("too_large")
             return None
         n = 6 * len(mem)
         C, Jv = statics.jacobians(x, self.rad[mem], ci, cj, prm, hist, self.L, vel=True)
@@ -1290,16 +1463,209 @@ class FullContactSim:
         v0 = np.hstack([self.v[mem], self.w[mem]]).reshape(-1)
         lam, V, c, err = statics.residual_modes(K, C, Md, G, -du, v0)
         if err > 1e-6 or not (lam.real < 0).all():
+            no("modes")
             return None
         dl, ub = statics.residual_bound(V, c, J, Jv)
         if float(np.linalg.norm(ub.reshape(-1, 6)[:, :3], axis=1).max()) > 0.1 * self.d_cap:
+            no("residual_moves")
             return None
         worst = np.maximum(statics.margins_bounded(lam_eq, dl, prm, out),
                            statics.margins_bounded(lam_end, dl, prm, out))
         if not np.isfinite(worst).all() or (worst > 1 - 5 * self.margin).any():
+            no("residual_loads")
             return None
         self.n_events["linres_sleep"] = self.n_events.get("linres_sleep", 0) + 1
         return dict(lam=lam, V=V, c=c, T=T, dl=dl)
+
+    # ------------------------------------------------------------------ slaved clusters (slaved.py)
+    def _rej(self, why):
+        k = "slaved_rejected_" + why
+        self.n_events[k] = self.n_events.get(k, 0) + 1
+        return False
+
+    def _try_slaved(self, mem, touch, T, H):
+        """Hand a wall-anchored cluster to the slaved model (slaved.py) if (i) it is small and its contact rows are
+        independent and well conditioned (no redundant contacts), (ii) no load jump is in the next step, (iii) at its
+        quasi-static contact forces every contact keeps 5x the margin to pull-off and sliding and none would yield,
+        and (iv) the energy in its stiff modes (normal and sliding deviation from those forces, and the velocity
+        that violates no-slip) could add at most 1% of the smallest margin to any contact force (as _try_roll)."""
+        if len(mem) > slaved.MAX_GRAINS or H <= 0 or self.loads.breakpoint_in(T - 1e-9, T + H):
+            return self._rej("size_or_jump")
+        ci, cj, rows = self._island_system(mem, touch)
+        K, N = len(rows), len(mem)
+        if not K or K > slaved.MAX_CONTACTS or 3 * K > 6 * N or not (cj < 0).any():
+            return self._rej("contacts")
+        x = np.ascontiguousarray(self.x[mem])
+        v, w = np.ascontiguousarray(self.v[mem]), np.ascontiguousarray(self.w[mem])
+        prm = np.ascontiguousarray(self._prm[rows])
+        hist = np.ascontiguousarray(self._hist[rows])
+        m, I, rad = self.m[mem], self.I[mem], self.rad[mem]
+        if slaved.condition(x, m, I, rad, ci, cj, self.L) < 2 * slaved.COND_MIN:
+            return self._rej("conditioning")
+        f_load = self.loads.max_freq(T, T + H) if self.loads.fast_window(T, T + H) else 0.0
+        eta0, etaF, w_soft = slaved.slaving_indicator(x, m, I, rad, ci, cj, prm, hist, self.L, f_load)
+        if not (eta0 <= slaved.ETA0_MAX and etaF <= slaved.ETAF_MAX):
+            return self._rej("slaving_error")
+        Ta = np.array([T])
+        lam, n, dl, Gu = slaved.enter(x, v, w, m, I, rad, ci, cj, prm, hist, self.L, self.off, self.loads.accel(Ta)[0],
+                                      self.loads.omega(Ta)[0], self.loads.omega_dot(Ta)[0], self.gdrag[mem],
+                                      np.ascontiguousarray(self._F_lr[mem]))
+        if lam is None:
+            return self._rej("solver")
+        L3 = lam.reshape(K, 3)
+        Fne = (L3 * n).sum(1)
+        ft = L3 - Fne[:, None] * n
+        Fp = np.where(hist[:, dem.H_YLD] > 0.5, hist[:, dem.H_FCP], prm[:, dem.P_FC])
+        Fncrit = np.abs(Fne + 2 * Fp)
+        r_pull = -Fne / Fp
+        r_slide = np.linalg.norm(ft, axis=1) / (prm[:, dem.P_MUT] * Fncrit)
+        rr = np.maximum(r_pull, r_slide)
+        if not np.isfinite(rr).all() or float(rr.max()) > 1 - 5 * self.margin:
+            return self._rej("near_pulloff_or_sliding")
+        lamD, _, outD = statics.state(x, ci, cj, prm, hist, self.L)
+        L8 = lamD.reshape(K, 8)
+        dFn = L8[:, 0] - Fne
+        dft = L8[:, 1:4] - ft
+        a_c = np.maximum(hist[:, dem.H_A], 1e-12)
+        kn = 1.2 * prm[:, dem.P_ESTAR] * a_c
+        ks = prm[:, dem.P_KT] * prm[:, dem.P_A0]
+        E = float((0.5 * dFn ** 2 / kn + 0.5 * (dft ** 2).sum(1) / ks).sum()
+                  + 0.5 * float(m.max()) * float((Gu ** 2).sum()))
+        mf = float(((1 - rr) * np.minimum(prm[:, dem.P_MUT], prm[:, dem.P_MUR]) * Fncrit).min())
+        if math.sqrt(2 * float(max(kn.max(), ks.max())) * E) > 0.01 * mf:
+            return self._rej("stiff_energy")
+        if (np.array([slaved.jkr_overlap(prm[k], hist[k], Fne[k], a_c[k])[0] for k in range(K)])
+                > prm[:, dem.P_DY]).any():
+            return self._rej("plastic")
+        # onto the slow manifold: overlaps and sliding springs for these forces, no-slip velocities
+        slaved.settle(x, m, rad, ci, cj, prm, hist, self.L, lam)
+        slaved.project_velocity(x, v, w, m, I, rad, ci, cj, self.L)
+        self.x[mem], self.v[mem], self.w[mem] = x, v, w
+        self._hist[rows] = hist
+        cid = self._next_slv
+        self._next_slv += 1
+        self._slv[cid] = dict(members=np.array(mem, np.int64), rows=rows, ci=ci, cj=cj, lam=lam, w_soft=w_soft,
+                              eta=eta0)
+        for g in mem:
+            self._slv_of[int(g)] = cid
+        self.regime[mem] = SLAV
+        self.n_events["slaved_entries"] = self.n_events.get("slaved_entries", 0) + 1
+        return True
+
+    def _dissolve_slv(self, cid):
+        """A slaved cluster goes to the full model (its state is on the slow manifold)."""
+        c = self._slv.pop(cid)
+        for g in c["members"]:
+            self._slv_of.pop(int(g), None)
+        self.regime[c["members"]] = ACTIVE
+
+    def _slv_obstacles(self, mem, reach):
+        """Static grains (asleep) near the cluster: centres and radii, for the pre-run's approach checks."""
+        sl = np.flatnonzero(self.regime == ASLEEP)
+        if not len(sl):
+            return np.zeros((0, 3)), np.zeros(0)
+        d = np.linalg.norm(self.x[sl][:, None, :] - self.x[mem][None, :, :], axis=2).min(1)
+        near = sl[d <= 2 * float(self.rad.max()) + self.d_cap + reach]
+        return np.ascontiguousarray(self.x[near]), np.ascontiguousarray(self.rad[near])
+
+    def _slv_prerun(self, cid, t, H, T):
+        """Run a slaved cluster over [t, t + H] (or until it must stop) and return its envelope: each member's
+        largest distance from its start plus the most it moves within one slaved step; t_stop (H if it ran through).
+        The start state is kept so that the cluster can be run again to an earlier time."""
+        c = self._slv[cid]
+        mem, rows = c["members"], c["rows"]
+        pre = dict(cid=cid, x=self.x[mem].copy(), v=self.v[mem].copy(), w=self.w[mem].copy(),
+                   hist=self._hist[rows].copy(), lam=c["lam"].copy())
+        f_load = self.loads.max_freq(T, T + H) if self.loads.fast_window(T, T + H) else 0.0
+        eta0, etaF, w_soft = slaved.slaving_indicator(self.x[mem], self.m[mem], self.I[mem], self.rad[mem], c["ci"],
+                                                      c["cj"], np.ascontiguousarray(self._prm[rows]),
+                                                      np.ascontiguousarray(self._hist[rows]), self.L, f_load)
+        if not (eta0 <= 1.5 * slaved.ETA0_MAX and etaF <= 1.5 * slaved.ETAF_MAX):
+            pre.update(dict(t_stop=0.0, dmax=np.zeros(len(mem)), vmx=np.linalg.norm(pre["v"], axis=1), dt=0.0,
+                            s=np.linalg.norm(pre["v"], axis=1) * 0.0 + 1e-12, n_done=0, stop=None))
+            self.n_events["slaved_stops_indicator"] = self.n_events.get("slaved_stops_indicator", 0) + 1
+            return pre
+        c["w_soft"] = max(w_soft, 1e-30)
+        a_max = float(np.linalg.norm(np.abs(self.loads.accel(np.array([T, T + H]))).max(0)))
+        reach = float(np.linalg.norm(self.v[mem], axis=1).max()) * H + 0.5 * a_max * H * H
+        for _ in range(3):
+            xo, ro = self._slv_obstacles(mem, reach)
+            self._slv_restore(pre)
+            res = self._slv_advance(cid, t, H, T, pre, xo, ro)
+            if float(res["dmax"].max()) <= reach:
+                break
+            reach = 2 * float(res["dmax"].max())        # it went further than the obstacles listed: list more
+        else:
+            res["t_stop"] = 0.0
+        pre.update(res)
+        pre["s"] = res["dmax"] + res["vmx"] * res["dt"] + 1e-12
+        return pre
+
+    def _slv_restore(self, pre):
+        c = self._slv[pre["cid"]]
+        mem, rows = c["members"], c["rows"]
+        self.x[mem], self.v[mem], self.w[mem] = pre["x"], pre["v"], pre["w"]
+        self._hist[rows] = pre["hist"]
+        c["lam"] = pre["lam"].copy()
+
+    def _slv_advance(self, cid, t, Hs, T, pre, xo=None, ro=None, relaxed=False, dt_fix=None, nsteps_fix=None):
+        """Integrate a slaved cluster over [t, t + Hs] with slaved.run; stops early (state at the start of the slaved
+        step where it had to stop). Returns dmax, vmx, t_stop and the slaved step."""
+        c = self._slv[cid]
+        mem, rows, ci, cj = c["members"], c["rows"], c["ci"], c["cj"]
+        if xo is None:
+            xo, ro = pre.get("xo", np.zeros((0, 3))), pre.get("ro", np.zeros(0))
+        pre["xo"], pre["ro"] = xo, ro
+        m, I, rad = self.m[mem], self.I[mem], self.rad[mem]
+        prm = np.ascontiguousarray(self._prm[rows])
+        hist = np.ascontiguousarray(self._hist[rows])
+        x = np.ascontiguousarray(self.x[mem])
+        v, w = np.ascontiguousarray(self.v[mem]), np.ascontiguousarray(self.w[mem])
+        if dt_fix is not None:                   # a re-run on the pre-run's own grid (bit-identical path)
+            dt, n = dt_fix, int(nsteps_fix)
+        else:
+            dt = min(slaved.soft_period(m, I, rad, ci, cj, prm), 2 * math.pi / c["w_soft"]) / self.n_ppp_slv
+            n = max(1, int(math.ceil(Hs / dt)))
+            dt = Hs / n
+        if n == 0:
+            return dict(dmax=np.zeros(len(mem)), vmx=np.linalg.norm(self.v[mem], axis=1), t_stop=0.0, dt=dt,
+                        n_done=0, stop=None)
+        T0 = self.env.t0_flight + t
+        if dt_fix is not None and "acc" in pre:      # the pre-run's own load samples (bit-identical path)
+            acc, Om, Omd = pre["acc"][:n + 1], pre["Om"][:n + 1], pre["Omd"][:n + 1]
+        else:
+            Ts = T0 + np.arange(n + 1) * dt
+            acc, Om, Omd = self.loads.accel(Ts), self.loads.omega(Ts), self.loads.omega_dot(Ts)
+            pre["acc"], pre["Om"], pre["Omd"] = acc, Om, Omd
+        cface = np.zeros((len(mem), 6), np.bool_)
+        for k in range(len(ci)):
+            if cj[k] < 0:
+                cface[ci[k], -1 - cj[k]] = True
+        flag = np.zeros(2, np.int64)
+        Nm = len(mem)
+        exc = np.full(Nm, -np.inf)
+        dmax = np.zeros(Nm)
+        vmx = np.zeros(Nm)
+        lam = c["lam"]
+        slaved.run(x, v, w, m, I, rad, ci, cj, prm, hist, self.L, self.off, dt, n, acc, Om, Omd, self.gdrag[mem],
+                   np.ascontiguousarray(self._F_lr[mem]), (0.5 if relaxed else 1.0) * self.margin,
+                   (0.5 if relaxed else 1.0) * self.d_cap, lam, flag, np.full(Nm, np.inf),
+                   np.zeros(Nm), np.zeros(Nm), exc, np.ascontiguousarray(xo), np.ascontiguousarray(ro), cface, dmax,
+                   vmx, 2e-4)
+        self.x[mem], self.v[mem], self.w[mem] = x, v, w
+        self._hist[rows] = hist
+        t_stop = Hs if flag[0] == 0 else (int(flag[0]) - 1) * dt
+        stop = None
+        if flag[0]:
+            stop = "slaved_stops_" + {1: "pulloff", 2: "sliding", 3: "conditioning", 4: "approach", 5: "solver",
+                                      6: "plastic", 7: "normal_turn"}.get(int(flag[1]), "other")
+        return dict(dmax=dmax, vmx=np.maximum(vmx, np.linalg.norm(pre["v"], axis=1)), t_stop=t_stop, dt=dt,
+                    n_done=(int(flag[0]) - 1) if flag[0] else n, stop=stop)
+
+    def _slv_count(self, grain_steps, stop):
+        self.n_events["slaved_grain_steps"] = self.n_events.get("slaved_grain_steps", 0) + int(grain_steps)
+        if stop:
+            self.n_events[stop] = self.n_events.get(stop, 0) + 1
 
     def _try_sleep_island(self, mem, touch, T, H):
         """Sleep an anchored cluster if (i) no fast load or breakpoint is in the next step, (ii) at its exact static
@@ -1310,6 +1676,7 @@ class FullContactSim:
             return False
         from scipy.sparse.linalg import splu
         res = None
+        tag = "cluster_awake_"                    # counts of why clusters stay in the full model (diagnostics)
         ci, cj, rows = self._island_system(mem, touch)
         if not len(rows):
             return False
@@ -1329,6 +1696,8 @@ class FullContactSim:
         ratio_end = statics.margins(lam_eq + J @ lu.solve(self._island_load(mem, T + H) - Fext), prm, out)
         rr = np.maximum(ratio, ratio_end)
         if not np.isfinite(rr).all() or float(rr.max()) > 1 - 5 * self.margin:
+            k = tag + ("over_limit" if np.isfinite(rr).all() and float(rr.max()) > 1 else "near_limit")
+            self.n_events[k] = self.n_events.get(k, 0) + 1
             return False
         Ek = 0.5 * float((self.m[mem] * (self.v[mem] ** 2).sum(1)).sum()
                          + (self.I[mem] * (self.w[mem] ** 2).sum(1)).sum())
@@ -1352,7 +1721,7 @@ class FullContactSim:
                 # still moving too much to drop the motion: sleep with it tracked exactly (linear response)
                 res = self._linres(mem, x, ci, cj, prm, hist, K, J, du, lam_eq, lam_end, out, T)
                 if res is None:
-                    return False
+                    return False                  # (_linres counts why)
         dU = du.reshape(-1, 6)
         xn, hn = statics.apply_displacement(x, ci, cj, prm, hist, self.L, dU)
         self.x[mem] = xn
@@ -1565,7 +1934,7 @@ class FullContactSim:
                 self.save_checkpoint()
                 cps.pop(0)
             t_cap = min(next_out, cps[0]) if cps else next_out
-            if not ((self.regime == FREE) | (self.regime == ACTIVE) | (self.regime == ROLL)).any():
+            if not (self.regime != ASLEEP).any():
                 t_new = self._skip_asleep(t, t_cap)
                 if t_new > t + 1e-12:
                     self.n_events["skipped_s"] = self.n_events.get("skipped_s", 0.0) + (t_new - t)
@@ -1583,7 +1952,8 @@ class FullContactSim:
             if progress and time.time() - last > 5.0:
                 last = time.time()
                 print(f"  [{self.name}] T+{self.env.t0_flight + t:8.3f} s  active {int((self.regime == ACTIVE).sum())}"
-                      f" rolling {int((self.regime == ROLL).sum())} free {int((self.regime == FREE).sum())} "
+                      f" rolling {int((self.regime == ROLL).sum())} slaved {int((self.regime == SLAV).sum())} "
+                      f"free {int((self.regime == FREE).sum())} "
                       f"asleep {int((self.regime == ASLEEP).sum())}  "
                       f"impacts {len(self.collisions)}  ({time.time() - t0:.0f} s)", flush=True)
         for rec in self._pending.values():

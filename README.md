@@ -24,7 +24,7 @@ It was written from scratch for DOLL-E and has two engines:
   engine uses the full model wherever something can happen and **exact or verified** treatments elsewhere:
   exact free flight up to the earliest time a grain could come within 0.1 µm of anything; resting grains and
   wall-anchored clusters held static while a certificate shows every contact stays inside its elastic limits;
-  grains rolling on one wall on a slaved model that matches the full one to 2×10⁻⁵; clusters that are still rocking sleep with that residual motion kept as exact linear response and added back when they wake. **Every step is checked
+  grains rolling on one wall, and stuck clusters rolling along a wall, on slaved models (the stiff contact modes held quasi-static, rolling and twisting integrated with the full springs) that match the full model to ≤ 3×10⁻⁵ of the rolled path; clusters that are still rocking sleep with that residual motion kept as exact linear response and added back when they wake. **Every step is checked
   after it is taken** and redone in the full model if any assumption one grain's treatment made about another
   failed. See [All checks and criteria](#all-checks-and-criteria).
 * **The event-driven engine (v0.5; long free-flying cloud runs, `run`, and the browser app).** Grains and rigid
@@ -158,7 +158,7 @@ python -m dolle_sim mission configs/mission_quarter_deck.json --jobs 4       # w
 python -m dolle_sim sizes --d10 80e-6 --d50 95e-6 --d90 114e-6 --weighting volume   # supplier percentiles -> number distribution
 python -m dolle_sim sizes --image micrograph.png --um-per-px 1.25                 # measure grain sizes from a photo
 python -m dolle_sim materials                                           # material database
-python -m dolle_sim verify                                              # 37 checks: 26 model + 11 full-contact engine
+python -m dolle_sim verify                                              # 39 checks: 26 model + 13 full-contact engine
 python -m dolle_sim sources                                             # where every component comes from
 python -m pytest -q                                                     # all tests (includes both verification suites)
 python tools/lammps_contact_check.py                                     # 3-D contact law vs LAMMPS, 7 set-ups (pip install lammps)
@@ -243,7 +243,7 @@ splashdown pulls the dust off the bottom only if the payload hangs nose down, as
 
 Scenarios that share the same flight up to some time continue from a checkpoint of one run instead of repeating it (`--checkpoint-at`, `--resume-from`; `tools/run_campaign.py` sets them up). The branch is verified to be exact: the two scenarios must differ only in the release schedule or flight-profile options and have identical loads up to the checkpoint, and a branched run is bit-for-bit the run from lift-off (tested); otherwise it runs from lift-off.
 
-> **Status (v0.6):** the scenario table below is still from the v0.5 engine (rigid aggregates; wall grains held in place until pulled off, so no rolling or sliding along the walls). The full-contact re-runs of every scenario, launch to splashdown, are in progress and replace it scenario by scenario. The three weakly-bound-dust scenarios (`rough_grains` and its two variants) use 100 grains per tubule instead of 800: that dust rolls from lift-off, every pair of rollers that sticks is a rolling cluster only the full model can integrate, and with 800 grains ~150 grains are in the full model at once (~4 hours of computing per second of flight on a laptop).
+> **Status (v0.6):** the scenario table below is still from the v0.5 engine (rigid aggregates; wall grains held in place until pulled off, so no rolling or sliding along the walls). The full-contact re-runs of every scenario, launch to splashdown, are in progress and replace it scenario by scenario. Four scenarios use 100 grains per tubule instead of 800, because at 800 they would take days to weeks on a laptop: the three weakly-bound-dust scenarios (`rough_grains` and its two variants), where the dust rolls from lift-off and every pair of rollers that sticks is a rolling cluster only the full model can integrate (~150 grains in the full model at once with 800), and `launch_vibration`, where the ground-test level shakes every grain awake for the 17 s of both burns at outer steps of 1/40 of the 2 kHz band.
 
 The full simulations (`--scenario NAME`; combine with `+`, e.g. `kick+lying`; results go to
 `results/mission/<scenario>/`) follow every grain of all four tubules from lift-off to splashdown. Each cell
@@ -518,7 +518,7 @@ cannot drift from the runs:
 | group | how to run | what it covers |
 |---|---|---|
 | Part 1: 26 model checks | `python -m dolle_sim verify` (also in the browser) | analytic solutions, conservation laws, limits and published data for every model component (table below) |
-| Part 2: 11 full-contact engine checks | `python -m dolle_sim verify` | the 3-D contact dynamics against the 1-D model; momentum, angular momentum and energy; rolling on a wall against the rigid-plastic solution; cluster statics; the vibration synthesis against its spectrum; time-step convergence; slaved rolling against the full model; sleeping grains against the full model; free-flight hand-off; sleeping with the residual motion against the full model; **the whole regime machinery against a run with every grain in the full model** |
+| Part 2: 13 full-contact engine checks | `python -m dolle_sim verify` | the 3-D contact dynamics against the 1-D model; momentum, angular momentum and energy; rolling on a wall against the rigid-plastic solution; cluster statics; the vibration synthesis against its spectrum; time-step convergence; slaved rolling (with spin) and slaved clusters (a stuck pair, a grain on another, a single grain) against the full model; sleeping grains against the full model; free-flight hand-off; sleeping with the residual motion against the full model; **the whole regime machinery, and slaved clusters among other moving grains, against runs with every grain in the full model** |
 | LAMMPS, 7 set-ups | `python tools/lammps_contact_check.py` | the same contact law term by term: oblique spinning impacts at 3, 30, 300 mm/s, rolling under a ramp, rocking, twisting, 20 grains dropped on a floor (≤ 1e-5; measured ≤ 2.2e-6) |
 | LAMMPS, 6 comparisons | `python -m dolle_sim lammps-check` | sticking thresholds, restitution, pull-off (table below) |
 | REBOUND, 6 comparisons | `python -m dolle_sim rebound-check ...` | trajectories and collision statistics of a flying cloud (below) |
@@ -529,7 +529,7 @@ had to redo and the grains that joined the contact dynamics on approach.
 
 ## Validation
 
-`python -m dolle_sim verify` runs the 26-check model suite (the same suite runs in the browser app) and the 11
+`python -m dolle_sim verify` runs the 26-check model suite (the same suite runs in the browser app) and the 13
 full-contact engine checks. The model checks:
 
 | test | checks |

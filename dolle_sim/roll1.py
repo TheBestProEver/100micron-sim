@@ -21,7 +21,7 @@ import math
 
 import numpy as np
 
-from . import dem
+from . import dem, slaved
 
 try:
     from numba import njit
@@ -69,14 +69,17 @@ def _accel(g, x, v, w, m, I, rad, n, ax, p, h, Fc, dt_spring, acc_s, O, Od, off,
     fr2 = -kr * xr2 - gr * vl2
     Frcrit = mur * Fncrit
     mfr = math.sqrt(fr0 * fr0 + fr1 * fr1 + fr2 * fr2)
-    if mfr > Frcrit and math.sqrt(xr0 * xr0 + xr1 * xr1 + xr2 * xr2) > 0.0:
-        sc = Frcrit / mfr
-        xr0 = -(sc * fr0 + gr * vl0) / kr
-        xr1 = -(sc * fr1 + gr * vl1) / kr
-        xr2 = -(sc * fr2 + gr * vl2) / kr
-        fr0 *= sc
-        fr1 *= sc
-        fr2 *= sc
+    if mfr > Frcrit:
+        if math.sqrt(xr0 * xr0 + xr1 * xr1 + xr2 * xr2) > 0.0:
+            sc = Frcrit / mfr
+            xr0 = -(sc * fr0 + gr * vl0) / kr
+            xr1 = -(sc * fr1 + gr * vl1) / kr
+            xr2 = -(sc * fr2 + gr * vl2) / kr
+            fr0 *= sc
+            fr1 *= sc
+            fr2 *= sc
+        else:                                    # as dem.contact_force
+            fr0 = fr1 = fr2 = 0.0
     tr0 = r * (n[1] * fr2 - n[2] * fr1)
     tr1 = r * (n[2] * fr0 - n[0] * fr2)
     tr2 = r * (n[0] * fr1 - n[1] * fr0)
@@ -123,7 +126,12 @@ def run(x, v, w, m, I, rad, face, prm, hist, L, dt, nsteps, acc, Om, Omd, off, g
         h = hist[g]
         r = rad[g]
         Fc = h[dem.H_FCP] if h[dem.H_YLD] > 0.5 else p[dem.P_FC]
-        ks = p[dem.P_KT] * (p[dem.P_A0] if int(p[dem.P_TMODE]) == dem.TANG_WADA else max(h[dem.H_A], 1e-30))
+        if h[dem.H_YLD] > 0.5:               # flattened contact: a0 of radius R_p (dem.contact_force)
+            ks = p[dem.P_KT] * (4.5 * math.pi * p[dem.P_W] * h[dem.H_RP] ** 2 / p[dem.P_ESTAR]) ** (1.0 / 3.0)
+        elif int(p[dem.P_TMODE]) == dem.TANG_WADA:
+            ks = p[dem.P_KT] * p[dem.P_A0]
+        else:
+            ks = p[dem.P_KT] * max(h[dem.H_A], 1e-30)
         _accel(g, x, v, w, m, I, rad, n, ax, p, h, Fc, 0.0, acc[0], Om[0], Omd[0], off, gdrag, Fext, out)
         a0, a1, a2 = out[0], out[1], out[2]
         x00, x01, x02 = x[g, 0], x[g, 1], x[g, 2]
@@ -156,6 +164,20 @@ def run(x, v, w, m, I, rad, face, prm, hist, L, dt, nsteps, acc, Om, Omd, off, g
                 w[g, 0], w[g, 1], w[g, 2] = ws0, ws1, ws2
                 flag[g] = s + 1
                 break
+            # the normal overlap on its quasi-static (JKR) value for the current normal load; plastic loading goes
+            # to the full model (dem.contact_force's rule)
+            Fne_now = -out[7] * Fc
+            dq, aq = slaved.jkr_overlap(p, h, Fne_now, h[dem.H_A] if h[dem.H_A] > 0 else p[dem.P_A0])
+            if dq > p[dem.P_DY] and dq >= h[dem.H_DMAX] * (1.0 - 1e-12):
+                x[g, 0], x[g, 1], x[g, 2] = xs0, xs1, xs2
+                v[g, 0], v[g, 1], v[g, 2] = vs0, vs1, vs2
+                w[g, 0], w[g, 1], w[g, 2] = ws0, ws1, ws2
+                flag[g] = s + 1
+                break
+            x[g, ax] = (r - dq) if face[g] % 2 == 0 else (L[ax] - r + dq)
+            h[dem.H_A] = aq
+            if dq > h[dem.H_DMAX]:
+                h[dem.H_DMAX] = dq
             h[dem.H_XR], h[dem.H_XR + 1], h[dem.H_XR + 2], h[dem.H_XTW] = out[3], out[4], out[5], out[6]
             h[dem.H_XT] = -out[9] / ks
             h[dem.H_XT + 1] = -out[10] / ks

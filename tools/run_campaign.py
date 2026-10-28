@@ -28,8 +28,11 @@ ORDER = ["nominal", "launch_vibration", "kick", "no_release", "strong_shaker", "
          "rough_grains+shock_oblique"]
 # Weakly bound dust rolls from lift-off, and every pair of rollers that sticks is a rolling cluster that only the
 # full model can integrate: with 800 grains per tubule ~150 grains are in the full model at once (~4 h of
-# computing per second of flight on a laptop), so these scenarios use 100 grains per tubule.
-GRAINS = {"rough_grains": 100, "rough_grains+hang_nose_up": 100, "rough_grains+shock_oblique": 100}
+# computing per second of flight on a laptop). The ground-test vibration level wakes every grain for the 17 s of
+# both burns, at outer steps of 1/40 of the 2 kHz band (~10^4 s of computing per second of flight with 800).
+# These scenarios use 100 grains per tubule.
+GRAINS = {"rough_grains": 100, "rough_grains+hang_nose_up": 100, "rough_grains+shock_oblique": 100,
+          "launch_vibration": 100}
 CHECKPOINTS = {"nominal": [54.0, 89.9], "rough_grains": [459.0]}
 BRANCH = {"kick": ("nominal", 89.9), "no_release": ("nominal", 89.9), "strong_shaker": ("nominal", 89.9),
           "kick+spin_1hz": ("nominal", 54.0), "rough_grains+hang_nose_up": ("rough_grains", 459.0),

@@ -281,9 +281,14 @@ def check_roll1_vs_full():
         S = dem.DEMSystem([[0.5, 0.5, R - d0]], [[0, 0, 0]], [[0, 0, 0]], R, s.rho, s.E, s.nu, s.gamma, s.e_dry,
                           s.yield_pressure, [1, 1, 1], wall, mu_pw=0.4, h_roll=0.5, q_roll=100, q_twist=100,
                           wall_faces=(4,))
+        OM = np.array([0.0, 0.0, 25.0])             # 25 rad/s of payload spin, the grain 0.7 m off the axis
+        OMD = np.array([0.0, 0.0, 40.0])            # spinning up at 40 rad/s^2 (Euler force)
+        S.off = np.array([0.0, 0.0, 0.0])
+        S.gdrag[:] = 30.0                          # gas drag rate [1/s]
         dtA = 1e-8
         nA = int(round(T / dtA))
-        S.run(dtA, nA, acc=load((np.arange(nA) + 1) * dtA))
+        tA = (np.arange(nA) + 1) * dtA
+        S.run(dtA, nA, acc=load(tA), Om=OM[None, :] + OMD[None, :] * tA[:, None], Omd=OMD)
         Troll = 2 * math.pi * math.sqrt((I + m * R * R) / (p[dem.P_KR] * R * R))
         Ttw = 2 * math.pi * math.sqrt(I / p[dem.P_KTW])
         n = int(math.ceil(T / (min(Troll, Ttw) / 200)))
@@ -297,7 +302,8 @@ def check_roll1_vs_full():
         flag = np.zeros(1, np.int64)
         Ts = np.arange(n + 1) * dt
         roll1.run(x, v, w, np.array([m]), np.array([I]), np.array([R]), np.array([4]), p[None, :].copy(), h,
-                  np.ones(3), dt, n, load(Ts), np.zeros((n + 1, 3)), np.zeros((n + 1, 3)), np.zeros(3), np.zeros(1),
+                  np.ones(3), dt, n, load(Ts), OM[None, :] + OMD[None, :] * Ts[:, None], np.tile(OMD, (n + 1, 1)),
+                  S.off, np.full(1, 30.0),
                   np.zeros((1, 3)), 0.02, flag, np.full(1, np.inf), np.zeros(1), np.zeros(1), np.full(1, -np.inf))
         path = math.hypot(S.x[0, 0] - 0.5, S.x[0, 1] - 0.5)
         err = float(np.linalg.norm(x[0, :2] - S.x[0, :2]) / path)
@@ -305,8 +311,9 @@ def check_roll1_vs_full():
         vals.append(f"{name} r = {R * 1e6:.0f} um: path {path * 1e6:.3f} um, difference {err:.1e}")
     return _res("roll1_vs_full", "Slaved rolling vs full contact dynamics",
                 "A grain on glass rolls past its limit and rocks under loads with 0.7, 2 and 3 kHz content (pressing "
-                "load also oscillating). roll1.py (stiff normal and sliding modes held quasi-static, rolling and "
-                "twisting resolved at 1/200 of their period) vs the full-stiffness DEM at 10 ns.",
+                "load also oscillating), under 25 rad/s of payload spin spinning up at 40 rad/s^2 with the grain "
+                "0.7 m off the axis (centrifugal, Coriolis and Euler forces) and gas drag. roll1.py (stiff normal and sliding modes held quasi-static, "
+                "rolling and twisting resolved at 1/200 of their period) vs the full-stiffness DEM at 10 ns.",
                 "; ".join(vals), "< 3e-5 of the rolled path", worst < 3e-5)
 
 
@@ -534,3 +541,167 @@ def check_linres():
 
 
 CHECKS += [check_linres]
+
+
+def check_slaved_vs_full():
+    """The slaved cluster model (slaved.py) against the full contact model: a stuck pair on a glass floor, a grain
+    stuck on top of another (leaning 20 deg) and a single grain, each driven past its rolling limit by a ramped
+    sideways load with 0.7-3 kHz components, under 25 rad/s of spin, for 2 ms."""
+    from . import slaved
+    s, glass = get_material("silica"), get_material("glass_borosilicate")
+    wall = dict(E=glass.E, nu=glass.nu, gamma=glass.gamma, e_dry=glass.e_dry, p_y=glass.yield_pressure)
+    R, T, OM = 50e-6, 2e-3, np.array([0.0, 0.0, 25.0])
+
+    def make(x0):
+        D = dem.DEMSystem(x0, np.zeros_like(x0), np.zeros_like(x0), R, s.rho, s.E, s.nu, s.gamma, s.e_dry,
+                          s.yield_pressure, [1, 1, 1], wall, mu_pw=0.4, mu_pp=0.6, h_roll=0.5, q_roll=100,
+                          q_twist=100, wall_faces=(4,))
+        D.off = -np.array([0.5, 0.5, 0.0])
+        return D
+    m = sphere_mass(s, R)
+    pw = make(np.array([[0.5, 0.5, R]])).prm[0]
+    pp = make(np.array([[0.5, 0.5, 0.5], [0.5 + 2 * R, 0.5, 0.5]])).prm[0]
+    d0w = pw[dem.P_A0] ** 2 / (3 * pw[dem.P_REFF])
+    d0p = pp[dem.P_A0] ** 2 / (3 * pp[dem.P_REFF])
+    a_lim = pw[dem.P_MUR] * 2 * pw[dem.P_FC] / m
+    th = math.radians(20)
+    Dp = 2 * R - d0p
+    cases = {
+        "pair": (np.array([[0.5, 0.5, R - d0w], [0.5 + Dp, 0.5, R - d0w]]), lambda t: np.column_stack([
+            0.3 * a_lim * np.sin(2 * math.pi * 700 * t),
+            a_lim * (2.0 * np.minimum(t / (0.5 * T), 1.0) + 0.5 * np.sin(2 * math.pi * 2000 * t)),
+            -9.80665 * (1 + 0.5 * np.sin(2 * math.pi * 3000 * t))])),
+        "tower": (np.array([[0.5, 0.5, R - d0w], [0.5 + Dp * math.sin(th), 0.5, R - d0w + Dp * math.cos(th)]]),
+                  lambda t: np.column_stack([
+                      0.6 * a_lim * (np.minimum(t / (0.5 * T), 1.0) + 0.3 * np.sin(2 * math.pi * 2000 * t)),
+                      0.3 * a_lim * np.sin(2 * math.pi * 700 * t),
+                      -9.80665 * (1 + 0.5 * np.sin(2 * math.pi * 3000 * t))])),
+        "single": (np.array([[0.5, 0.5, R - d0w]]), lambda t: np.column_stack([
+            0.3 * a_lim * np.sin(2 * math.pi * 700 * t),
+            a_lim * (2.0 * np.minimum(t / (0.5 * T), 1.0) + 0.5 * np.sin(2 * math.pi * 2000 * t)),
+            -9.80665 * (1 + 0.5 * np.sin(2 * math.pi * 3000 * t))])),
+    }
+    vals, worst, ok_all = [], 0.0, True
+    for name, (x0, load) in cases.items():
+        def full(dt):
+            D = make(x0)
+            n = int(round(T / dt))
+            D.run(dt, n, acc=load((np.arange(n) + 1) * dt), Om=OM)
+            return D
+        A, B = full(1e-8), full(5e-9)
+        D = make(x0)
+        dem.compute_forces(D.x, D.v, D.w, D.m, D.I, D.L, D.ci, D.cj, D.prm, D.hist, 0.0, np.zeros(3), OM, np.zeros(3),
+                           D.off, D.gdrag, D.F, D.T, D.Fn, D.Fext, 0.0)
+        on = D.hist[:, dem.H_TOUCH] > 0.5
+        ci, cj = D.ci[on].copy(), D.cj[on].copy()
+        prm, hist = np.ascontiguousarray(D.prm[on]), np.ascontiguousarray(D.hist[on])
+        eta0 = slaved.slaving_indicator(x0, D.m, D.I, D.rad, ci, cj, prm, hist, D.L, 3000.0)
+        x, v, w = x0.copy(), np.zeros_like(x0), np.zeros_like(x0)
+        lam = slaved.enter(x, v, w, D.m, D.I, D.rad, ci, cj, prm, hist, D.L, D.off, load(np.zeros(1))[0], OM,
+                           np.zeros(3), D.gdrag, D.Fext)[0]
+        slaved.settle(x, D.m, D.rad, ci, cj, prm, hist, D.L, lam)
+        n = int(math.ceil(T / (slaved.soft_period(D.m, D.I, D.rad, ci, cj, prm) / 400)))
+        dt = T / n
+        Ts = np.arange(n + 1) * dt
+        N = len(x0)
+        flag = np.zeros(2, np.int64)
+        cface = np.zeros((N, 6), np.bool_)
+        for k in range(len(ci)):
+            if cj[k] < 0:
+                cface[ci[k], -1 - cj[k]] = True
+        slaved.run(x, v, w, D.m, D.I, D.rad, ci, cj, prm, hist, D.L, D.off, dt, n, load(Ts), np.tile(OM, (n + 1, 1)),
+                   np.zeros((n + 1, 3)), D.gdrag, D.Fext, 0.02, 1e-7, lam, flag, np.full(N, np.inf), np.zeros(N),
+                   np.zeros(N), np.full(N, -np.inf), np.zeros((0, 3)), np.zeros(0), cface, np.zeros(N), np.zeros(N), 1.0)
+        path = float(np.linalg.norm(B.x - x0, axis=1).max())
+        err = float(np.linalg.norm(x - B.x, axis=1).max()) / path
+        e_dt = float(np.linalg.norm(A.x - B.x, axis=1).max()) / path
+        ok_all = ok_all and flag[0] == 0 and err <= 3e-5
+        if flag[0]:
+            vals.append(f"{name}: stopped at step {int(flag[0])} (reason {int(flag[1])})")
+        worst = max(worst, err)
+        vals.append(f"{name}: path {path * 1e6:.2f} um, difference {err:.1e} (full model's own step error {e_dt:.0e}; "
+                    f"slaving indicator {eta0[0]:.1e}, with the 3 kHz load {eta0[1]:.1e}: "
+                    f"{'accepted' if eta0[0] <= slaved.ETA0_MAX and eta0[1] <= slaved.ETAF_MAX else 'refused'} by the "
+                    f"engine)")
+    return _res("slaved_vs_full", "Slaved clusters vs full contact dynamics",
+                "A stuck pair of 50 um silica grains on a glass floor, a grain stuck on top of another (leaning 20 deg) "
+                "and a single grain, each driven past its rolling limit by a ramped sideways load with 0.7-3 kHz "
+                "components under 25 rad/s of spin, integrated 2 ms by the slaved model (stiff modes quasi-static, "
+                "400 steps per softest period) and by the full model at 5 ns steps. Also reported: the slaving "
+                "indicator the engine uses to accept a cluster (the shift of its soft frequencies; accepted at <= "
+                "2e-4, and <= 1e-3 when weighted by the loads' frequencies), which is conservative: the leaning grain "
+                "is refused though its error is small.",
+                "; ".join(vals), "<= 3e-5 of the rolled path, no hand-back", ok_all)
+
+
+CHECKS += [check_slaved_vs_full]
+
+
+def _slaved_scene(all_dem=False, n_ppp=50, dur=6e-3):
+    """A stuck pair of 50 um silica grains on a glass floor rolling sideways under 10 g (1 g pressing), and a single
+    grain rolling after it, 0.4 mm behind and 10 cm/s faster, until it catches up and hits it."""
+    from .engine import FullContactSim, ACTIVE, ASLEEP, ROLL, FREE
+    cfg = {"dt_s": 1e-3, "duration_s": dur, "output_fps": 1000,
+           "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": [10.0, 0.0, -1.0]},
+           "contact": {"contact_charging": False, "all_dem": all_dem, "steps_per_period": n_ppp}, "forces": {}}
+    ch = {"name": "slaved", "size_m": [0.003, 0.001, 0.001], "wall_material": "glass_borosilicate",
+          "particles": [{"material": "silica", "count": 3, "radius_m": 50e-6, "velocity": {"speed_mean_m_s": 0.0},
+                         "initial_state": {"type": "free"}}]}
+    S = FullContactSim(cfg, ch, 0)
+    S.base.F_static[:] = 0.0
+    R = 50e-6
+    T0 = float(S.env.t0_flight)
+    S.v[:], S.w[:] = 0.0, 0.0
+    S.x[0] = [1.0e-3, 0.5e-3, R]
+    S.x[1] = [1.0e-3, 0.5e-3 + 2 * R - 2e-9, R]
+    S.regime[0] = S.regime[1] = ACTIVE
+    S.x[2] = [1.0e-3 - 2 * R - 400e-6, 0.5e-3 + R, R]
+    S._place_at_equilibrium(2, 4, S._row(2, -5), T0)
+    S.v[2] = [0.10, 0.0, 0.0]
+    S.w[2] = np.cross([0.0, 0.0, 1.0], S.v[2]) / R
+    if all_dem:
+        S.regime[2] = ACTIVE
+    else:
+        S._roll_face[2] = 4
+        S.regime[2] = ROLL
+        assert S._try_roll(2, 4, T0, 1e-3)
+    S.base.frozen[:] = S.regime != FREE
+    S.run(progress=False)
+    return S
+
+
+def check_engine_slaved():
+    """A slaved cluster among other moving grains, by the engine and with every grain in the full model."""
+    from collections import Counter
+    A = _slaved_scene()
+    B = _slaved_scene(all_dem=True)
+    C = _slaved_scene(all_dem=True, n_ppp=100)
+    R = 50e-6
+
+    def ev(S):
+        return Counter((c["kind"], c["i"], c["j"], c["outcome"]) for c in S.collisions)
+    x0 = np.array([[1.0e-3, 0.5e-3, R], [1.0e-3, 0.5e-3 + 2 * R, R], [1.0e-3 - 2 * R - 400e-6, 0.5e-3 + R, R]])
+    d_ab = np.linalg.norm(A.x - B.x, axis=1)
+    d_bc = np.linalg.norm(B.x - C.x, axis=1)
+    paths = np.linalg.norm(B.x - x0, axis=1)
+    allow = 3 * d_bc + 3e-5 * paths + 1e-12          # the full model's step error and the slaved models' accuracy
+    same = ev(A) == ev(B)
+    ne = A.n_events
+    slv = ne.get("slaved_grain_steps", 0)
+    ok = same and slv > 0 and bool((d_ab <= allow).all())
+    dx_ab, dx_bc, path = float(d_ab.max() / R), float(d_bc.max() / R), float(paths[:2].max() / R)
+    return _res("engine_slaved", "Slaved clusters in the engine vs all-DEM",
+                "A stuck pair of 50 um silica grains on a glass floor rolls sideways under 10 g (1 g pressing) while a "
+                "single grain rolls after it, 0.4 mm behind and 10 cm/s faster, and hits it. Run 6 ms by the engine "
+                "(the pair on the slaved model, the single grain on the slaved rolling model, both captured into the "
+                "full model before they meet) and with every grain in the full model throughout (at the engine's step "
+                "and half of it). Same contacts and outcomes; each grain within 3x the full model's own step error "
+                "plus 3e-5 of its path (the slaved models' validated accuracy); slaved steps taken.",
+                f"contacts {sum(ev(A).values())} (same as all-DEM: {same}); slaved entries {ne.get('slaved_entries', 0)}, "
+                f"slaved grain-steps {slv}; pair rolled {path:.2f} R; engine vs all-DEM {dx_ab:.1e} R "
+                f"(allowed {float(allow.min() / R):.1e}-{float(allow.max() / R):.1e} R); DEM "
+                f"step error {dx_bc:.1e} R; steps redone {ne.get('redos', 0)}",
+                "same contacts; slaved steps taken; each grain <= 3x step error + 3e-5 of its path", ok)
+
+
+CHECKS += [check_engine_slaved]

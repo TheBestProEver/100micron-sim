@@ -9,7 +9,7 @@
     "criterion": "|e - 1| < 1e-3",
     "passed": true,
     "details": "",
-    "seconds": 0.42
+    "seconds": 0.31
    },
    {
     "id": "damping",
@@ -69,7 +69,7 @@
     "criterion": "< 10 nm",
     "passed": true,
     "details": "",
-    "seconds": 0.1
+    "seconds": 0.11
    },
    {
     "id": "rotating_frame",
@@ -79,7 +79,7 @@
     "criterion": "< 1 nm; ratio > 3.5",
     "passed": true,
     "details": "",
-    "seconds": 2.49
+    "seconds": 3.14
    },
    {
     "id": "rigid_body",
@@ -89,7 +89,7 @@
     "criterion": "max dE < 1e-3, drift < 1e-5, dL < 1e-10",
     "passed": true,
     "details": "",
-    "seconds": 1.33
+    "seconds": 1.59
    },
    {
     "id": "impulse",
@@ -99,7 +99,7 @@
     "criterion": "< 1e-9",
     "passed": true,
     "details": "",
-    "seconds": 0.02
+    "seconds": 0.03
    },
    {
     "id": "conservation",
@@ -119,7 +119,7 @@
     "criterion": "< 1 nm, no corrections",
     "passed": true,
     "details": "",
-    "seconds": 1.43
+    "seconds": 2.44
    },
    {
     "id": "no_overlap",
@@ -129,7 +129,7 @@
     "criterion": "< 1e-3 R",
     "passed": true,
     "details": "",
-    "seconds": 3.69
+    "seconds": 4.22
    },
    {
     "id": "space_charge",
@@ -159,7 +159,7 @@
     "criterion": "< 5%; coverage 40-95%",
     "passed": true,
     "details": "",
-    "seconds": 5.12
+    "seconds": 8.52
    },
    {
     "id": "spin_rotating_frame",
@@ -169,7 +169,7 @@
     "criterion": "< 1e-9",
     "passed": true,
     "details": "",
-    "seconds": 5.55
+    "seconds": 7.74
    },
    {
     "id": "fragmentation_energy",
@@ -179,7 +179,7 @@
     "criterion": "<= 1e-9, none, >= 20 fragmentations",
     "passed": true,
     "details": "",
-    "seconds": 3.07
+    "seconds": 3.7
    },
    {
     "id": "friction_energy",
@@ -189,7 +189,7 @@
     "criterion": "<= 0",
     "passed": true,
     "details": "",
-    "seconds": 0.2
+    "seconds": 0.32
    },
    {
     "id": "drag_limits",
@@ -219,7 +219,7 @@
     "criterion": "within 5%",
     "passed": true,
     "details": "",
-    "seconds": 0.55
+    "seconds": 0.68
    },
    {
     "id": "flight_frame",
@@ -229,7 +229,7 @@
     "criterion": "< 0.2%; ratio > 3.5; < 1e-8",
     "passed": true,
     "details": "",
-    "seconds": 21.94
+    "seconds": 25.65
    },
    {
     "id": "detachment",
@@ -239,7 +239,7 @@
     "criterion": "exact; < 1e-9 m/s",
     "passed": true,
     "details": "",
-    "seconds": 0.95
+    "seconds": 1.53
    },
    {
     "id": "settling",
@@ -249,7 +249,7 @@
     "criterion": "> 95%, > 90% aft, none outside",
     "passed": true,
     "details": "",
-    "seconds": 5.31
+    "seconds": 6.1
    },
    {
     "id": "reentry",
@@ -259,7 +259,7 @@
     "criterion": "< 1e-5; < 5 m; < 1e-5",
     "passed": true,
     "details": "",
-    "seconds": 2.45
+    "seconds": 2.17
    }
   ],
   "part2": [
@@ -272,7 +272,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 13.8
+    "seconds": 14.9
    },
    {
     "id": "dem_conservation",
@@ -316,7 +316,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 6.0
+    "seconds": 6.6
    },
    {
     "id": "time_step",
@@ -332,13 +332,13 @@
    {
     "id": "roll1_vs_full",
     "name": "Slaved rolling vs full contact dynamics",
-    "what": "A grain on glass rolls past its limit and rocks under loads with 0.7, 2 and 3 kHz content (pressing load also oscillating). roll1.py (stiff normal and sliding modes held quasi-static, rolling and twisting resolved at 1/200 of their period) vs the full-stiffness DEM at 10 ns.",
-    "value": "silica r = 50 um: path 8.147 um, difference 1.1e-05; graphite r = 25 um: path 23.427 um, difference 1.7e-05",
+    "what": "A grain on glass rolls past its limit and rocks under loads with 0.7, 2 and 3 kHz content (pressing load also oscillating), under 25 rad/s of payload spin spinning up at 40 rad/s^2 with the grain 0.7 m off the axis (centrifugal, Coriolis and Euler forces) and gas drag. roll1.py (stiff normal and sliding modes held quasi-static, rolling and twisting resolved at 1/200 of their period) vs the full-stiffness DEM at 10 ns.",
+    "value": "silica r = 50 um: path 624.416 um, difference 1.2e-05; graphite r = 25 um: path 165.552 um, difference 3.9e-06",
     "criterion": "< 3e-5 of the rolled path",
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 0.6
+    "seconds": 0.7
    },
    {
     "id": "sleep_exact",
@@ -349,7 +349,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 3.3
+    "seconds": 3.6
    },
    {
     "id": "engine_handoff",
@@ -366,12 +366,12 @@
     "id": "engine_regimes",
     "name": "Engine regimes vs all-DEM",
     "what": "A row of 3 resting 50 um silica grains on a glass floor under 1 g, 6 um apart, struck end-on by a grain at 6 cm/s (the blow passes down the row); a grain rolling at 4 mm/s beside the row; a grain landing on the row from above at 1.5 cm/s; 5 more grains resting apart. Run 2 ms by the engine (sleepers join the DEM when approached, the rolling grain on the slaved model, flight exact, every step verified) and with every grain in the full DEM throughout (at the engine's step and at half of it). The engine may differ from the all-DEM run by no more than 3x the DEM's own step error, with the same contacts and outcomes.",
-    "value": "contacts: 5 (same in all runs: True); engine vs all-DEM: position 9.4e-04 R, velocity 4.1e-04 of 6 cm/s; DEM step error 8.8e-04 R, 6.2e-04; sleepers joined on approach 1, verified steps 2, steps redone 2",
+    "value": "contacts: 5 (same in all runs: True); engine vs all-DEM: position 1.2e-03 R, velocity 4.2e-04 of 6 cm/s; DEM step error 8.8e-04 R, 6.2e-04; sleepers joined on approach 1, verified steps 2, steps redone 2",
     "criterion": "same contacts; each <= 3x the step error",
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 6.6
+    "seconds": 6.0
    },
    {
     "id": "linres",
@@ -382,7 +382,29 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 1.5
+    "seconds": 1.3
+   },
+   {
+    "id": "slaved_vs_full",
+    "name": "Slaved clusters vs full contact dynamics",
+    "what": "A stuck pair of 50 um silica grains on a glass floor, a grain stuck on top of another (leaning 20 deg) and a single grain, each driven past its rolling limit by a ramped sideways load with 0.7-3 kHz components under 25 rad/s of spin, integrated 2 ms by the slaved model (stiff modes quasi-static, 400 steps per softest period) and by the full model at 5 ns steps. Also reported: the slaving indicator the engine uses to accept a cluster (the shift of its soft frequencies; accepted at <= 2e-4, and <= 1e-3 when weighted by the loads' frequencies), which is conservative: the leaning grain is refused though its error is small.",
+    "value": "pair: path 8.06 um, difference 7.4e-06 (full model's own step error 6e-08; slaving indicator 2.1e-05, with the 3 kHz load 2.1e-05: accepted by the engine); tower: path 8.34 um, difference 1.7e-05 (full model's own step error 3e-07; slaving indicator 3.0e-04, with the 3 kHz load 1.9e-03: refused by the engine); single: path 8.15 um, difference 7.7e-06 (full model's own step error 1e-07; slaving indicator 2.1e-05, with the 3 kHz load 2.1e-05: accepted by the engine)",
+    "criterion": "<= 3e-5 of the rolled path, no hand-back",
+    "passed": true,
+    "details": "",
+    "suite": "full-contact engine (desktop, numba)",
+    "seconds": 4.7
+   },
+   {
+    "id": "engine_slaved",
+    "name": "Slaved clusters in the engine vs all-DEM",
+    "what": "A stuck pair of 50 um silica grains on a glass floor rolls sideways under 10 g (1 g pressing) while a single grain rolls after it, 0.4 mm behind and 10 cm/s faster, and hits it. Run 6 ms by the engine (the pair on the slaved model, the single grain on the slaved rolling model, both captured into the full model before they meet) and with every grain in the full model throughout (at the engine's step and half of it). Same contacts and outcomes; each grain within 3x the full model's own step error plus 3e-5 of its path (the slaved models' validated accuracy); slaved steps taken.",
+    "value": "contacts 5 (same as all-DEM: True); slaved entries 3, slaved grain-steps 8480; pair rolled 24.22 R; engine vs all-DEM 5.8e-06 R (allowed 4.8e-03-1.7e-02 R); DEM step error 5.5e-03 R; steps redone 3",
+    "criterion": "same contacts; slaved steps taken; each grain <= 3x step error + 3e-5 of its path",
+    "passed": true,
+    "details": "",
+    "suite": "full-contact engine (desktop, numba)",
+    "seconds": 11.9
    }
   ]
  },
@@ -509,13 +531,13 @@
   ]
  },
  "unit_tests": {
-  "tests": 90,
+  "tests": 92,
   "failures": 0,
   "errors": 0,
   "skipped": 0
  },
  "summary": {
-  "passed": 56,
-  "total": 56
+  "passed": 58,
+  "total": 58
  }
 }

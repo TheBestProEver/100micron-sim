@@ -127,7 +127,12 @@ SECTIONS = [
            "linear response (modes of M u'' + C u' + K u = 0 with the kernel's own stiffness and dashpots and the "
            "rotating-frame terms) if every mode decays, the residual moves no grain by more than a tenth of the "
            "capture distance, and every contact keeps 5x the margin with the most the residual can add; the "
-           "certificate includes that bound, and on waking the residual is added back, evolved to that time. (3) A grain on one wall that rolls or rocks is integrated with its "
+           "certificate includes that bound, and on waking the residual is added back, evolved to that time. "
+           "(3) A wall-anchored cluster that keeps moving (a stuck pair rolling across the floor) is integrated "
+           "with the stiff normal and sliding modes of every contact held on their quasi-static values (Lagrange "
+           "multipliers; slaved.py) and the rolling and twisting springs of the kernel resolved at 1/400 of their "
+           "period; each slaved cluster is first run over the whole step, and the path it takes is its envelope "
+           "for everyone else. (3b) A grain on one wall that rolls or rocks is integrated with its "
            "stiff normal and sliding modes held on their quasi-static values (roll1.py) at 1/200 of the rocking "
            "period, and goes back to the full model near pull-off or the sliding limit, or when it could reach "
            "anything. (4) Every step is verified after it is taken: the speed of every grain in the contact "
@@ -144,8 +149,8 @@ SECTIONS = [
            "static amount the engine applies on waking (0.05 nm of 15 nm) and rolls only after the certificate "
            "fails (sleep_exact). Cluster statics: the kernel's stiffness by central differences matches the "
            "analytic normal and tangential stiffness to 2e-8 and the static response to a 1 g load to 1e-12 "
-           "(cluster_statics). Slaved rolling: matches the full model to 1.7e-5 of the rolled path under 0.7-3 "
-           "kHz loads (roll1_vs_full). Residual motion: a rocking pair slept with it and woken 2 ms later matches "
+           "(cluster_statics). Slaved rolling: matches the full model to 1.1e-5 of the rolled path under 0.7-3 "
+           "kHz loads and 25 rad/s of spin (roll1_vs_full). Residual motion: a rocking pair slept with it and woken 2 ms later matches "
            "the full model to 0.07 pm and 4e-5 rad/s, against 937 pm and 0.19 rad/s with the residual dropped "
            "(linres). Each mission summary reports the number of verified steps, redone steps "
            "and on-approach joins.",
@@ -156,7 +161,33 @@ SECTIONS = [
            refs="numerical method written for DOLL-E; quasi-static bounds: standard single-degree-of-freedom "
                 "dynamics (e.g. Chopra, Dynamics of Structures)",
            checks=["engine_regimes", "engine_handoff", "sleep_exact", "cluster_statics", "roll1_vs_full",
-                   "linres"]),
+                   "linres", "slaved_vs_full"]),
+        _c("Slaved clusters", "slaved.py: run, enter, settle, project_velocity, condition", "derived",
+           "For a wall-anchored cluster of up to 8 grains whose contacts are all inside their pull-off and sliding "
+           "limits: each contact gives three rows g_k = v_i - v_j + n_k x (r_i w_i + r_j w_j) = 0 (no approach, no "
+           "slip; the slip velocity of dem.contact_force), and the contact forces are the multipliers lam of "
+           "G M^-1 W lam = -(G M^-1 f + Gdot u), with f the body forces (uniform acceleration, centrifugal, Coriolis, "
+           "Euler, drag) plus the rolling and twisting springs of the kernel, whose caps depend on lam (a fixed "
+           "point), and W the kernel's force map (torque lever r - delta/2 at grain pairs). Velocity Verlet in the "
+           "order of dem.run_steps; after each drift the normal overlaps are projected onto their quasi-static JKR "
+           "values, after each step the velocities onto G u = 0; sliding springs at -f_t / k_s, so a cluster handed "
+           "back starts on the slow manifold. Only non-redundant clusters (independent, well-conditioned rows); it "
+           "hands back near pull-off or the sliding limit, on plastic loading, when a contact normal turns more than "
+           "2e-4 rad in a step, when anything static comes within the capture distance, and at load breakpoints. The "
+           "single-grain rolling model (roll1.py) now also holds its normal overlap on the quasi-static value for "
+           "the current load and hands back on plastic loading.",
+           "A stuck pair, a grain on top of another and a single grain, each rolled past its limit by a ramped load "
+           "with 0.7-3 kHz components under 25 rad/s of spin, match the full model at 5 ns to 7.4e-6, 1.7e-5 and "
+           "7.7e-6 of the rolled path (slaved_vs_full). In the engine, a slaved pair rolling under 10 g and hit by "
+           "a grain rolling after it gives the same contacts and outcomes as an all-DEM run and agrees to 6e-6 of "
+           "a radius (engine_slaved). A cluster is accepted only if the shift of its soft frequencies from slaving "
+           "(the indicator) is <= 2e-4, <= 1e-3 weighted by the loads' frequencies.",
+           "The error of slaving is of order (soft / stiff frequency)^2 (~1e-5 here); redundant contact sets (a "
+           "grain in an edge or corner, closed loops) and near-mechanisms stay in the full model. Designed with an "
+           "independent design panel (three designs, three judges) whose prototype it reproduces.",
+           refs="numerical method written for DOLL-E; constrained dynamics as in RATTLE (Andersen 1983, J. Comput. "
+                "Phys. 52, 24)",
+           checks=["slaved_vs_full", "engine_slaved", "roll1_vs_full"]),
         _c("Scenario branches from checkpoints", "engine.py: save_checkpoint, branch",
            "derived",
            "Scenarios that share the same flight up to some time (the release options all start at T+90 s; the 1 Hz "

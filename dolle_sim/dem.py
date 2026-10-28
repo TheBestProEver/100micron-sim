@@ -565,13 +565,13 @@ def _event_time(x, v, F, m, L, ci, cj, prm, hist, h):
 
 @njit(cache=True)
 def run_steps(x, v, w, m, I, L, ci, cj, prm, hist, dt, nsteps, acc, Om, Omd, off, gdrag, F, T, x_build, lim,
-              Fn_out, Fext, t0, xs, dmax, vmax2, events=True):
+              Fn_out, Fext, t0, xs, dmax, vmax2, vmaxg, events=True):
     """Velocity-Verlet steps. acc, Om, Omd: (nsteps, 3) arrays sampled at each step's end. F, T must hold the
     forces at the start. A step in which some contact forms or breaks is split at that instant (event location;
     the force jumps there), so the discontinuity is integrated to second order. Stops early (returns the number of
     steps done) when some grain i has moved more than lim[i] since x_build (the caller then rebuilds the contact
     list). Records each grain's largest distance from xs in dmax, and the largest squared speed (the drift velocity
-    and the end-of-step velocity) in vmax2[0]."""
+    and the end-of-step velocity) in vmax2[0] and per grain in vmaxg."""
     N = x.shape[0]
     OUT = np.empty((ci.shape[0], NOUT))
     for s in range(nsteps):
@@ -589,6 +589,8 @@ def run_steps(x, v, w, m, I, L, ci, cj, prm, hist, dt, nsteps, acc, Om, Omd, off
                 sp = v[i, 0] * v[i, 0] + v[i, 1] * v[i, 1] + v[i, 2] * v[i, 2]
                 if sp > vmax2[0]:
                     vmax2[0] = sp
+                if sp > vmaxg[i]:
+                    vmaxg[i] = sp
             rem -= h
             compute_forces(x, v, w, m, I, L, ci, cj, prm, hist, h, acc[s], Om[s], Omd[s], off, gdrag, F, T, Fn_out,
                            Fext, t0 + (s + 1) * dt - rem, OUT)
@@ -603,6 +605,8 @@ def run_steps(x, v, w, m, I, L, ci, cj, prm, hist, dt, nsteps, acc, Om, Omd, off
             sp = v[i, 0] * v[i, 0] + v[i, 1] * v[i, 1] + v[i, 2] * v[i, 2]
             if sp > vmax2[0]:
                 vmax2[0] = sp
+            if sp > vmaxg[i]:
+                vmaxg[i] = sp
             dd = (x[i, 0] - x_build[i, 0]) ** 2 + (x[i, 1] - x_build[i, 1]) ** 2 + (x[i, 2] - x_build[i, 2]) ** 2
             if dd > lim[i] * lim[i]:
                 stop = True
@@ -735,7 +739,8 @@ class DEMSystem:
             k = run_steps(self.x, self.v, self.w, self.m, self.I, self.L, self.ci, self.cj, self.prm, self.hist, dt,
                           nsteps - done, A[done:], O[done:], Od[done:], self.off, self.gdrag, self.F, self.T,
                           self.x_build, np.full(len(self.x), 0.5 * self.skin), self.Fn, self.Fext, self.t,
-                          self.x_build.copy(), np.zeros(len(self.x)), np.zeros(1), self.events)
+                          self.x_build.copy(), np.zeros(len(self.x)), np.zeros(1), np.zeros(len(self.x)),
+                          self.events)
             done += k
             self.t += k * dt
             if done < nsteps:
