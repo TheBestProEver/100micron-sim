@@ -1,0 +1,122 @@
+"""The v0.6 full-contact engine: contact kernel, statics, slaved rolling, loads, vibration, regimes."""
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from dolle_sim import verify_full as V
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("check", V.CHECKS, ids=lambda f: f.__name__)
+def test_full_engine_check(check):
+    r = check()
+    assert r["passed"], f"{r['name']}: {r['value']} (required {r['criterion']})"
+
+
+def test_jkr_closed_form_matches_newton():
+    from dolle_sim import dem
+    from dolle_sim.contact import JKRContact
+    from dolle_sim.materials import get_material, pair_props
+    s = get_material("silica")
+    p = pair_props(s, 50e-6, s, 50e-6)
+    c = JKRContact(p)
+    for d in np.linspace(c.delta_break * 0.999, 5 * p.a0 ** 2 / p.R_star, 200):
+        assert dem.jkr_a(d, p.R_star, p.w, p.E_star) == pytest.approx(c.solve_a(d, p.a0), rel=1e-12)
+
+
+def test_loads_release_waveform_is_whole_cycles_from_rest():
+    """A kick is one full cycle of tubule acceleration: no velocity left over, no jump at the start."""
+    from dolle_sim.engine import FullContactSim
+    m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
+    from dolle_sim.mission import apply_scenario, mission_cfg, tubule_chamber
+    m = apply_scenario(m, "kick")
+    m["simulate_from_s"], m["simulate_to_s"] = 89.0, 89.5
+    t = m["tubules"][0]
+    t["dust"]["count"] = 5
+    S = FullContactSim(mission_cfg(m), tubule_chamber(m, t), 0)
+    r = S.loads.release[0]
+    T = np.linspace(r["start"], r["end"], 20001)
+    a = S.loads.release_accel(T)[:, 2]
+    assert a[0] == pytest.approx(0.0, abs=1e-6 * r["a"])
+    dv = float(np.sum(0.5 * (a[1:] + a[:-1]) * np.diff(T)))
+    assert abs(dv) < 1e-6 * r["a"] / r["f"]
+
+
+def test_full_engine_mission_smoke(tmp_path):
+    """Lift-off of a few grains on the new engine through the first burn and into the coast: every grain stays
+    accounted for, nothing comes off while the 25 g boost presses the dust down (burn 1, T+0-5.2 s), the summary is
+    written. (In the coast a grain rolling outward can knock a resting one off the floor: that is physics.)"""
+    from dolle_sim.mission import run_mission
+    m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
+    m["tubules"] = m["tubules"][:1]
+    m["tubules"][0]["dust"]["count"] = 20
+    m["simulate_to_s"] = 6.0
+    summary, sims = run_mission(m, tmp_path, jobs=1)
+    t = summary["tubules"][0]
+    assert t["n_grains"] == 20
+    assert sum(t["wall_bound_by_face"].values()) + t["free_at_end"] == 20
+    assert t["detachments_by_phase"]["first-stage burn"] == 0
+    assert all(d["t"] >= 5.2 for d in sims[0].detach_log)
+    assert (tmp_path / "mission_summary.json").exists()
+
+
+def test_cluster_sleeps_and_wakes_whole():
+    """Two touching grains on a floor settle in the full model, go to sleep as one cluster (the exact energy-ellipsoid
+    bound), and a forced wake of one member wakes both at the cluster's static equilibrium, at rest."""
+    from dolle_sim.engine import FullContactSim, ACTIVE, ASLEEP
+    cfg = {"dt_s": 1e-3, "duration_s": 0.3, "output_fps": 100,
+           "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": [0.0, 0.0, -1.0]},
+           "contact": {"contact_charging": False}, "forces": {}}
+    ch = {"name": "pair", "size_m": [0.001, 0.001, 0.001], "wall_material": "glass_borosilicate",
+          "particles": [{"material": "silica", "count": 2, "radius_m": 50e-6, "velocity": {"speed_mean_m_s": 0.0},
+                         "initial_state": {"type": "free"}}]}
+    S = FullContactSim(cfg, ch, 0)
+    S.base.F_static[:] = 0.0
+    R = 50e-6
+    S.x[0] = [0.5e-3, 0.5e-3, R]
+    S.x[1] = [0.5e-3 + 2 * R - 2e-9, 0.5e-3, R]
+    S.v[:], S.w[:] = 0.0, 0.0
+    S.regime[:] = ACTIVE
+    S.run(progress=False)
+    assert (S.regime == ASLEEP).all() and 0 in S._island_of and S._island_of[0] == S._island_of[1]
+    x_sleep = S.x.copy()
+    bad, vf = S._step_once(S.t, 1e-4, {0}, 1.0)
+    assert not bad and vf is None
+    assert 0 not in S._island_of and 1 not in S._island_of
+    assert np.abs(S.x - x_sleep).max() < 1e-9
+
+
+def test_branch_from_checkpoint_is_exact(tmp_path):
+    """A run continued from another scenario's checkpoint (identical up to it) is bit-for-bit the run of its own
+    scenario from lift-off; a branch into a scenario that differs earlier is refused."""
+    from dolle_sim.engine import FullContactSim, branch
+    from dolle_sim.mission import apply_scenario, mission_cfg, tubule_chamber
+    base = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
+    kick = [{"type": "kick", "start_s": 4.0, "cycles": 1, "frequency_hz": 5000, "peak_g": 2000.0, "axis": "z"}]
+
+    def sim(release, scenario=None, cps=(3.95,)):
+        m = apply_scenario(base, scenario)
+        m["simulate_to_s"] = 4.1
+        t = m["tubules"][0]
+        t["dust"]["count"] = 60
+        t["release"] = release
+        S = FullContactSim(mission_cfg(m), tubule_chamber(m, t), 0)
+        S.checkpoints, S.checkpoint_dir = list(cps), tmp_path
+        return S
+    A = sim([]).run(progress=False)
+    cp = A.checkpoint_path(3.95)
+    assert cp.exists()
+    B = sim(kick, cps=()).run(progress=False)          # the kick scenario from lift-off
+    C = branch(cp, sim(kick, cps=()))
+    C.run(progress=False)
+    assert C.n_events["branched_at_T"] == 3.95
+    assert np.array_equal(B.x, C.x) and np.array_equal(B.v, C.v) and np.array_equal(B.w, C.w)
+    assert len(B.collisions) == len(C.collisions) and len(B.detach_log) == len(C.detach_log) > 0
+    with pytest.raises(ValueError):
+        branch(cp, sim(kick, "rough_grains", cps=()))
+    late = [dict(kick[0], start_s=3.9)]
+    with pytest.raises(ValueError):
+        branch(cp, sim(late, cps=()))

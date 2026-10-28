@@ -57,7 +57,9 @@ def copy_data():
     ms = {}
     for p in sorted((ROOT / "results" / "mission").glob("*/mission_summary.json")):
         d = json.loads(p.read_text())
+        full = "dem_steps" in (d["tubules"][0].get("events") or {})
         ms[p.parent.name] = {"scenario": d.get("scenario") or "nominal", "gas": d.get("gas"),
+                             "engine": "v0.6 full contact" if full else "v0.5 event-driven",
                              "tubules": d["tubules"], "launch_loads": d["launch_loads"]["tubules"]}
     if ms:
         (DOCS / "data" / "mission_results.json").write_text(json.dumps(ms, indent=1))
@@ -75,10 +77,15 @@ def write_provenance():
     (ROOT / "PROVENANCE.md").write_text(provenance.as_markdown(counts), encoding="utf-8")
     print("wrote PROVENANCE.md and docs/data/provenance.json")
     # keep the number of verification checks quoted on the pages in step with verification.py
-    n = provenance.n_checks()
-    for page in (DOCS / "index.html", DOCS / "app" / "index.html"):
-        html = page.read_text(encoding="utf-8")
-        page.write_text(re.sub(r"\b\d+ tests compare", f"{n} tests compare", html), encoding="utf-8")
+    n, n_model = provenance.n_checks(), provenance.n_checks("model")
+    page = DOCS / "index.html"
+    html = page.read_text(encoding="utf-8")
+    html = re.sub(r"<!--checks-->.*?<!--/checks-->", f"<!--checks-->{n} checks<!--/checks-->", html)
+    html = re.sub(r"<!--nmodel-->.*?<!--/nmodel-->", f"<!--nmodel-->{n_model}<!--/nmodel-->", html)
+    page.write_text(html, encoding="utf-8")
+    page = DOCS / "app" / "index.html"        # the browser runs the model checks only
+    html = page.read_text(encoding="utf-8")
+    page.write_text(re.sub(r"\b\d+ tests compare", f"{n_model} tests compare", html), encoding="utf-8")
 
 
 def _decimate_viewer(src: Path, dst: Path, title: str, max_particles=500, frame_step=2, t_max=60.0):

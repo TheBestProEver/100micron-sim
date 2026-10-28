@@ -91,6 +91,7 @@ def test_mission_end_to_end(tmp_path):
         t["dust"]["count"] = 40
     m["simulate_from_s"] = 89.0
     m["simulate_to_s"] = 91.0
+    m["engine"] = "v05"              # the mission pipeline on the fast v0.5 engine (the full engine: test_full_engine)
     rep = launch_report(m)
     assert len(rep["tubules"]) == 2
     summary, sims = run_mission(m, tmp_path, scenario="kick", jobs=1)

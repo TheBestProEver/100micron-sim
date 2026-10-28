@@ -6,4 +6,4 @@ optional cross-checks; the simulator never uses them. The source of every compon
 dolle_sim/provenance.py (also PROVENANCE.md and `python -m dolle_sim
 sources`).
 """
-__version__ = "0.5.0"
+__version__ = "0.6.0"

@@ -100,6 +100,8 @@ def tubule_chamber(m: dict, t: dict) -> dict:
           "particles": [dust], "release": t.get("release", [])}
     if t.get("wall_vibration"):
         ch["wall_vibration"] = t["wall_vibration"]
+    if m.get("vibration"):
+        ch["vibration"] = m["vibration"]
     if t.get("camera"):
         ch["camera"] = t["camera"]
     else:
@@ -124,7 +126,11 @@ def mission_cfg(m: dict) -> dict:
            "duration_s": min(float(m.get("simulate_to_s", prof.end_s)), prof.end_s) - t0,
            "output_fps": m.get("output_fps", 5), "seed": m.get("seed", 0),
            "environment": env, "forces": m.get("forces", {}), "contact": m.get("contact", {}),
-           "camera": m.get("camera", {}), "materials": m.get("materials", {})}
+           "camera": m.get("camera", {}), "materials": m.get("materials", {}),
+           "engine": m.get("engine", "full"), "progress": m.get("progress", False)}
+    for k in ("checkpoints_s", "resume_from", "resume_at_s"):      # see _run_one and engine.branch
+        if m.get(k) is not None:
+            cfg[k] = m[k]
     return cfg
 
 
@@ -225,9 +231,25 @@ def launch_report(m: dict, n_samples: int = 4000) -> dict:
 # ---------------------------------------------------------------------------- simulation
 def _run_one(args):
     cfg, ch, seed, out_dir = args
-    from .simulation import ChamberSim
-    s = ChamberSim(cfg, ch, seed)
-    s.run(progress=False)
+    if cfg.get("engine", "full") == "full":
+        from .engine import FullContactSim as Sim          # v0.6: every grain a body, full contact mechanics
+    else:
+        from .simulation import ChamberSim as Sim           # v0.5 event-driven engine with rigid aggregates
+    s = Sim(cfg, ch, seed)
+    if cfg.get("checkpoints_s") or cfg.get("resume_from"):
+        from .engine import branch
+        s.checkpoints = list(cfg.get("checkpoints_s") or [])
+        s.checkpoint_dir = Path(out_dir) / "checkpoints"
+        if cfg.get("resume_from"):
+            # continue a run of another scenario saved at resume_at_s (identical up to then; branch() verifies it,
+            # and if it cannot be shown identical the run starts from lift-off instead)
+            try:
+                s = branch(s.checkpoint_path(float(cfg["resume_at_s"]), cfg["resume_from"]), s)
+                print(f"  [{s.name}] continuing from T+{float(cfg['resume_at_s']):g} s of {cfg['resume_from']}",
+                      flush=True)
+            except (ValueError, FileNotFoundError) as e:
+                print(f"  [{s.name}] not branched ({e}); running from lift-off", flush=True)
+    s.run(progress=bool(cfg.get("progress", False)))
     return s
 
 

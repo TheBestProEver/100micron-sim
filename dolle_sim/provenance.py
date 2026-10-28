@@ -36,6 +36,167 @@ def _c(component, code, origin, basis, checked, limits, refs="", checks=(), rebo
 
 
 SECTIONS = [
+    {"title": "Full-contact engine (v0.6; all mission runs)", "items": [
+        _c("Every grain a body, every contact resolved", "dem.py: make_params, contact_force, run_steps", "published",
+           "Each grain is a sphere with 6 degrees of freedom; no rigid aggregates, no frozen wall grains, no "
+           "outcome rules. Every grain-grain and grain-wall contact carries the adhesive contact model used for "
+           "dust aggregates (Wada et al. 2007; Dominik & Tielens 1995, 1997), written in the form of the LAMMPS "
+           "GRANULAR package so that the two can be compared term by term: JKR normal force with hysteresis "
+           "(contact forms at delta = 0, breaks at the end of the stable branch), the Tsuji-type damping of "
+           "contact.py, Thornton-Ning plastic flattening; sliding, rolling and twisting springs with their limits "
+           "(next items). Velocity Verlet at 1/50 of the fastest contact period (the sliding mode, 0.3-1.1 us), "
+           "shorter inside fast impacts (1/50 of the Hertz contact time).",
+           "The same contact law in LAMMPS (pair_style granular jkr ... tangential linear_history ... rolling sds "
+           "... twisting sds, fix wall/gran, nve/sphere), with the same coefficients and step, gives the same "
+           "velocities, spins and positions to <= 2.2e-6 in 7 set-ups: oblique spinning impacts at 3, 30 and 300 "
+           "mm/s, rolling on a wall under a ramped load, rocking under a step load, twisting, 20 grains dropped "
+           "on a floor (tools/lammps_contact_check.py; LAMMPS breaks contacts at maximum tension, so these runs "
+           "use that rule). Head-on sticking speeds agree with the independent 1-D integrator of contact.py to "
+           "1.4e-3. In an undamped oblique impact linear and angular momentum are conserved to 1e-14 and the "
+           "total energy (kinetic + JKR + springs) to 6.6e-7 while the contact holds.",
+           "Spheres with smooth surfaces; material inputs as in the Material properties section. JKR is the "
+           "large-Tabor-parameter limit (see the JKR item below; silica is in the JKR-DMT transition). Halving "
+           "the step changes an oblique impact's outcome by ~1e-3 (the 'engine_handoff' check reports it).",
+           refs="Wada, Tanaka, Suyama, Kimura & Yamamoto (2007) ApJ 661, 320; Dominik & Tielens (1997) ApJ 480, "
+                "647; Thompson et al. (2022) Comput. Phys. Commun. 271, 108171 (LAMMPS); Luding (2008) Granular "
+                "Matter 10, 235",
+           checks=["dem_vs_1d", "dem_conservation", "time_step"]),
+        _c("Sliding", "dem.py: contact_force", "published",
+           "Tangential spring k_s = 8 G* a0 on the relative tangential displacement (Wada et al. 2007 eq. 12; a0 "
+           "rather than the current contact radius keeps the spring energy conservative), history rotated into "
+           "the tangent plane every step (Luding 2008 eq. 17), dashpot equal to the normal one. It slips when "
+           "the force reaches mu (F_ne + 2 F_c) (Thornton & Yin 1991; the LAMMPS form). mu: silica on glass 0.4, "
+           "silica on silica 0.6, graphite 0.5 (measured: Meyer et al. 2014; Liu et al. 2017; Buckley 1971, "
+           "1973). The zero-load sliding force 2 mu F_c = 0.8-1.2 F_c lies inside the 0.24-2.7 F_c measured for "
+           "glass microspheres (Meyer et al. 2014).",
+           "Identical to LAMMPS 'linear_history' with the same k (lammps_contact_check). Energy conserved to "
+           "6.6e-7 while it holds (dem_conservation).",
+           "mu for graphite on glass and the tangential dashpot ratio (1) are assumed. Sliding needs ~500-8000 g "
+           "of load at rest, so it matters only inside impacts.",
+           refs="Thornton & Yin (1991) Powder Technol. 65, 153; Meyer, Fuchs, Staedler & Jiang (2014) Friction 2, "
+                "255; Liu et al. (2017) Nat. Commun. 8, 14029; Buckley (1973) NASA TN D-7529",
+           checks=["dem_conservation"]),
+        _c("Rolling", "dem.py: make_params, contact_force", "published",
+           "Rolling spring k_r = 4 F_c / R on the rolling displacement int R (w_i - w_j) x n dt (Wada et al. "
+           "2007 eq. 22, the Dominik & Tielens 1995 rolling resistance; LAMMPS 'rolling sds'), held at its "
+           "limit beyond the critical rolling displacement xi_crit = h a0 / 12 (Krijt, Dominik & Tielens 2014 "
+           "eq. 16), h the adhesion hysteresis. A grain on a wall starts to roll at a sideways acceleration "
+           "4 F_c xi_crit / (m R): 1.3 g for 100 um silica on clean borosilicate (0.6 g silanised), 6.5 g for "
+           "50 um silica, 3.6 g for 100 um graphite. These are below the spin and ascent loads (up to ~8-14 g "
+           "sideways), so grains roll along the walls during the boost: v0.5 could not show this. Rolling and "
+           "rocking are damped with an assumed quality factor Q = 100.",
+           "A grain under a ramped sideways load starts to roll at the limit and then rolls without slip (slip "
+           "2.3e-8) at the speed of the rigid-plastic solution (m + I/R^2) dv/dt = m (a - a_roll) to 3.2e-3 "
+           "(the rest is elastic pre-roll); identical to LAMMPS (B and C set-ups).",
+           "h is ASSUMED: nominal 0.5 is the fit to silicate data by Krijt et al. (2014), from rolling of ~1 um "
+           "silica (Heim et al. 1999); at DOLL-E sizes the only measurement (70 um glass beads in a wind tunnel, "
+           "Ibrahim et al. 2003) gives 0.05-0.6. The threshold is uncertain by ~50x (0.02-1.3 g for 100 um "
+           "silica across the published models). Q (100) is assumed (polystyrene rocking: Q ~ 30). Humidity "
+           "raises the rolling moment up to ~10x (Ibrahim et al. 2004). No graphite measurement exists.",
+           refs="Krijt, Dominik & Tielens (2014) J. Phys. D 47, 175302; Dominik & Tielens (1995) Phil. Mag. A 72, "
+                "783; Heim, Blum, Preuss & Butt (1999) PRL 83, 3328; Ibrahim, Dunn & Brach (2003) J. Aerosol "
+                "Sci. 34, 765",
+           checks=["rolling_on_wall"]),
+        _c("Twisting", "dem.py: make_params, contact_force", "published",
+           "Twisting spring k_t = (16/3) G a0^3 on int (w_i - w_j).n dt, held at G a0^3 / (3 pi) at zero load "
+           "(Wada et al. 2007 eqs. 26, 37; LAMMPS 'twisting sds', scaled with |F_ne + 2 F_c|). Damped with the "
+           "same assumed Q.",
+           "Identical to LAMMPS (D set-up: a grain spinning on a wall).",
+           "Q assumed. LAMMPS's 'twisting marshall' with Mindlin sliding has a units regression in the current "
+           "source and is not used.",
+           refs="Wada et al. (2007) ApJ 661, 320; Marshall (2009) J. Comput. Phys. 228, 1541",
+           checks=[]),
+        _c("Regimes: free flight, contact dynamics, rest, rolling", "engine.py: FullContactSim",
+           "derived",
+           "The full model at nanosecond steps for 900 s would take ~10^4 core-days. The engine uses it wherever "
+           "something can happen and exact or bounded treatments elsewhere: (1) a grain touching nothing flies on "
+           "the exact free-flight integrator until the earliest time it could come within 0.1 um of anything "
+           "(straight-line relative motion plus bounds on every acceleration), then joins the contact dynamics; "
+           "it leaves again once it touches nothing and is provably clear for the rest of the step. (2) A grain "
+           "resting on a wall, or a resting cluster anchored to a wall, is held static while a certificate shows "
+           "that every contact stays inside all of its elastic limits (pull-off, sliding, rolling, twisting) with "
+           "a 2% margin for the loads over the step: inside the limits nothing plastic can change, so the grain "
+           "cannot move (clusters: linear statics from the contact kernel's own tangent, statics.py). It wakes at "
+           "every load breakpoint, during kHz loads (releases, vibration) or when the certificate fails, and joins "
+           "the contact dynamics the moment a moving grain comes within 0.2 um of it (between contact-list builds "
+           "no grain in the dynamics may move further than its clearance to the nearest sleeper); on waking it is "
+           "placed at the exact static equilibrium of the current load (elastic deflection included). A grain or "
+           "cluster goes to sleep when its residual motion (kinetic plus elastic energy) could change no contact "
+           "load by more than 1% of that contact's margin (for clusters, the exact bound over the energy "
+           "ellipsoid, sqrt(2 E J K^-1 J^T)); a cluster still rocking sleeps with its residual motion kept as exact "
+           "linear response (modes of M u'' + C u' + K u = 0 with the kernel's own stiffness and dashpots and the "
+           "rotating-frame terms) if every mode decays, the residual moves no grain by more than a tenth of the "
+           "capture distance, and every contact keeps 5x the margin with the most the residual can add; the "
+           "certificate includes that bound, and on waking the residual is added back, evolved to that time. (3) A grain on one wall that rolls or rocks is integrated with its "
+           "stiff normal and sliding modes held on their quasi-static values (roll1.py) at 1/200 of the rocking "
+           "period, and goes back to the full model near pull-off or the sliding limit, or when it could reach "
+           "anything. (4) Every step is verified after it is taken: the speed of every grain in the contact "
+           "dynamics against the speed bound other grains' capture times assumed for it, every rolling grain's "
+           "path against its rolling envelope, and every grain that entered the contact dynamics during the step "
+           "against every grain advanced outside it. If any check fails the step is redone from its start with "
+           "those grains in the full model from the start, so no interaction can be missed.",
+           "Regimes against the full model: a struck row of resting grains, a rolling grain beside it and a grain "
+           "landing on it, run by the engine and with every grain in the contact dynamics throughout, give the "
+           "same contacts and outcomes and agree within the contact dynamics' own step error (engine_regimes; the "
+           "run uses on-approach joins and step redos). Hand-off: two grains flown, captured, collided and "
+           "released by the engine match a DEM run from the start within the DEM's own step error "
+           "(engine_handoff). Rest: a grain under a slowly rising load in the full model deflects exactly by the "
+           "static amount the engine applies on waking (0.05 nm of 15 nm) and rolls only after the certificate "
+           "fails (sleep_exact). Cluster statics: the kernel's stiffness by central differences matches the "
+           "analytic normal and tangential stiffness to 2e-8 and the static response to a 1 g load to 1e-12 "
+           "(cluster_statics). Slaved rolling: matches the full model to 1.7e-5 of the rolled path under 0.7-3 "
+           "kHz loads (roll1_vs_full). Residual motion: a rocking pair slept with it and woken 2 ms later matches "
+           "the full model to 0.07 pm and 4e-5 rad/s, against 937 pm and 0.19 rad/s with the residual dropped "
+           "(linres). Each mission summary reports the number of verified steps, redone steps "
+           "and on-approach joins.",
+           "Clusters that touch no wall (aggregates in flight) are always integrated in the full model. The "
+           "slaved-rolling error is ~(rocking / stiff frequency)^2, ~1e-5 for these grains. The certificate "
+           "assumes the loads are smooth between the listed breakpoints (true for the flight profile). When a "
+           "grain is put to sleep its residual motion (below 1% of every contact's margin) is dropped.",
+           refs="numerical method written for DOLL-E; quasi-static bounds: standard single-degree-of-freedom "
+                "dynamics (e.g. Chopra, Dynamics of Structures)",
+           checks=["engine_regimes", "engine_handoff", "sleep_exact", "cluster_statics", "roll1_vs_full",
+                   "linres"]),
+        _c("Scenario branches from checkpoints", "engine.py: save_checkpoint, branch",
+           "derived",
+           "Scenarios that share the same flight up to some time (the release options all start at T+90 s; the 1 Hz "
+           "residual spin starts with the de-spin; the hanging and shock options start at the parachute) continue "
+           "from a checkpoint of one run instead of repeating it (tools/run_campaign.py sets this up). The branch is allowed only if a fresh run of the "
+           "target scenario differs from a fresh run of the saved one in nothing but the release schedule and the "
+           "flight-profile options (every attribute of both is hashed and compared), and every load (apparent "
+           "acceleration, spin and its rate, releases, vibration, breakpoints, fast windows) is identical up to the "
+           "checkpoint, sampled every millisecond; otherwise the scenario runs from lift-off.",
+           "A run continued from another scenario's checkpoint is bit-for-bit (positions, velocities, spins, impacts, "
+           "releases) the same as that scenario run from lift-off, and branches into scenarios that differ earlier "
+           "are refused (tests/test_full_engine.py::test_branch_from_checkpoint_is_exact).",
+           "None for the physics; it saves repeating identical computation. Each branched run records where it "
+           "started from in its summary (events: branched_from, branched_at_T).",
+           checks=[]),
+        _c("Loads in the tubule frame", "loads.py: Loads", "standard",
+           "The tubule is rigid, so its walls are fixed in its own frame and every load on the grains is a "
+           "uniform acceleration (minus the tubule's) plus the rotating-frame terms: the flight profile "
+           "(thrust, drag, parachute, splash, attitude), the spin and its rate (exact, piecewise), release "
+           "mechanisms and vibration. A shaker or kick is defined by the tubule's acceleration -a sin(2 pi f "
+           "tau) over whole cycles, so it starts and ends at rest (v0.5 began the motion with a jump to "
+           "A omega). Breakpoints (load jumps and kinks) are listed so that no step straddles one.",
+           "Tested: a kick integrates to zero velocity and starts at zero acceleration (tests/test_full_engine.py).",
+           "The tubule's own structural modes (deck, holder, glass panels) are not modelled: walls move rigidly.",
+           checks=[]),
+        _c("Random vibration", "vibration.py: synthesize_random, VibrationHistory", "published",
+           "The RockSat User Guide 2026 test spectra (thrust 0.051 g^2/Hz, lateral 0.029 g^2/Hz, flat 20-2000 Hz, "
+           "20 s per axis; the handbook's Level 2 as a sensitivity case) synthesised as stationary Gaussian "
+           "processes (Shinozuka & Jan 1972; Smallwood & Paez 1993) and applied as deck accelerations through a "
+           "cubic spline at 65,536 Hz with exact velocity and displacement.",
+           "Welch PSD within 0.73 dB of the spec, Grms within 0.2%, kurtosis 2.993, skewness 0.005, spline vs "
+           "exact band-limited signal 2.4e-6 sigma (random_vibration).",
+           "No measured flight PSD of this vehicle is public: the guide's level is a ground acceptance test, "
+           "~11-12 dB above the one public flight measurement on a related rocket. The flight runs therefore do "
+           "not include burn vibration; the vibration scenario applies the test level as an upper bound.",
+           refs="RockSat User Guide 2026 (NASA WFF, Rev-A DRAFT) App. B; NASA Sounding Rockets User Handbook "
+                "(2023) Table 6.3.4-1; Shinozuka & Jan (1972) J. Sound Vib. 25, 111; Smallwood & Paez (1993) "
+                "Shock Vib. 1, 45; Kaufman & Worth, NTRS 20000114846",
+           checks=["random_vibration"]),
+    ]},
     {"title": "Contact physics (decides stick or bounce)", "items": [
         _c("JKR adhesive contact", "contact.py: JKRContact, _resolve_core", "published",
            "Elastic-adhesive contact force F(a) = 4E*a^3/(3R) - sqrt(8 pi w E* a^3) and overlap "
@@ -777,11 +938,17 @@ def line_counts(root: Path | None = None) -> dict:
             "lammps_check": n.get("lammps_check.py", 0), "files": len(files)}
 
 
-def n_checks() -> int:
-    """Number of automated verification checks (named in verification.py)."""
+def n_checks(suite: str | None = None) -> int:
+    """Number of automated verification checks: 'model' (verification.py, also in the browser), 'engine'
+    (verify_full.py, desktop) or both."""
     import re
-    src = (Path(__file__).resolve().parent / "verification.py").read_text(encoding="utf-8")
-    return len(set(re.findall(r'_res\("(\w+)"', src)))
+    here = Path(__file__).resolve().parent
+    ids = set()
+    names = {"model": ("verification.py",), "engine": ("verify_full.py",)}.get(suite, ("verification.py",
+                                                                                     "verify_full.py"))
+    for name in names:
+        ids |= set(re.findall(r'_res\("(\w+)"', (here / name).read_text(encoding="utf-8")))
+    return len(ids)
 
 
 def summary(counts: dict | None = None) -> list[str]:
@@ -808,8 +975,10 @@ def summary(counts: dict | None = None) -> list[str]:
         f"electrostatics, and some derivations and choices of our own. Of the {len(items)} components "
         f"listed: {org['published']} published, {org['standard']} standard, {org['derived']} derived "
         f"or adapted here, {org['assumed']} assumed. Each lists how it is checked: {n_checks()} automated verification "
-        "checks (python -m dolle_sim verify, also part of the test suite), which you can also run in your "
-        "browser on the Verify tab. Some components have no automated check, and say so.",
+        f"checks (python -m dolle_sim verify, also part of the test suite); the {n_checks('model')} model checks "
+        "also run in your browser on the Verify tab, the full-contact engine checks need the desktop. CHECKS.md "
+        "lists every check and comparison with its pass criterion and measured value. Some components have no "
+        "automated check, and say so.",
         "<b>What is not certain is the material data, and it matters a lot.</b> With the commonly used "
         "values, carbon (graphite) is predicted to stick below 38 mm/s and silica below 6.2 mm/s. Of that "
         "6.2x ratio, 2.5x comes from the published surface energies, 1.7x from the published elastic "

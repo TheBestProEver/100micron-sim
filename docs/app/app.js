@@ -677,7 +677,8 @@ function renderMissionResults(d) {
   let h = '<div style="overflow-x:auto"><table class="small"><tr><th>Design option</th>' +
     names.map((n) => `<th>${esc(n.replace(/_/g, ' '))}</th>`).join('') + '</tr>';
   for (const k of order) {
-    h += `<tr><td><b>${esc(k.replace(/_/g, ' '))}</b><br><span class="muted">${esc(SCENARIOS[k] || '')}</span></td>`;
+    h += `<tr><td><b>${esc(k.replace(/_/g, ' '))}</b><br><span class="muted">${esc(SCENARIOS[k] || '')}</span>` +
+      `${d[k].engine ? `<br><span class="muted small">engine: ${esc(d[k].engine)}</span>` : ''}</td>`;
     for (const t of d[k].tubules) {
       const med = t.ug_median_impact_speed_m_s;
       h += `<td class="num">${t.grains_released} of ${t.n_grains} grains released (${t.detachment_events} release events), ` +

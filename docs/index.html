@@ -60,8 +60,11 @@
     <p style="margin-top:0"><b>Where the physics comes from.</b> Published contact-mechanics and aerosol-physics papers,
       textbook mechanics and electrostatics, and a few modelling choices of our own. The <a href="app/#sources">Sources</a>
       page lists every part with its paper, where it is in the code, how it is checked, and what it assumes.</p>
-    <p><b>How it is checked.</b> 26 tests compare the code with exact solutions, independent calculations and conservation
-      laws. You can run them yourself on the <a href="app/#verify">Verify</a> page.</p>
+    <p><b>How it is checked.</b> <!--checks-->37 checks<!--/checks--> compare the code with exact solutions, the full
+      contact model, independent calculations and conservation laws. The <!--nmodel-->26<!--/nmodel--> model checks run in
+      your browser on the <a href="app/#verify">Verify</a> page; the full-contact engine checks need the desktop. Every
+      check and comparison, with its pass criterion and measured value, is listed in
+      <a href="https://github.com/TheBestProEver/100micron-sim/blob/main/CHECKS.md">CHECKS.md</a>.</p>
     <p><b>REBOUND and LAMMPS.</b> None of the simulator comes from either. They are widely used open-source codes, used
       only as outside checks. REBOUND reproduces our collision-free grain trajectories to under a nanometre and our
       collision statistics in a simplified chamber. LAMMPS, with its own implementation of the same adhesive contact

@@ -6,6 +6,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -1116,6 +1117,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -2225,6 +2227,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -3331,6 +3334,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -4443,6 +4447,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -5547,6 +5552,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -6639,6 +6645,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -7731,6 +7738,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -8823,6 +8831,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -9935,6 +9944,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -11047,6 +11057,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",
@@ -12159,6 +12170,7 @@
    "gas": "air",
    "temperature_k": 293.0
   },
+  "engine": "v0.5 event-driven",
   "tubules": [
    {
     "tubule": "T1_silica_90-106um_bare",

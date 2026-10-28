@@ -1,0 +1,1690 @@
+"""DOLL-E v0.6 flight engine: every grain is its own body and every contact has the full contact mechanics.
+
+Each grain is in one of three regimes, switched by exact or bounded tests:
+
+* FREE: touching nothing and unable to touch anything during the next outer step H (its gap to every other grain and
+  wall exceeds the most both can move in H). It flies on the exact free-flight integrator of simulation.py (velocity
+  Verlet with drag and Coriolis integrated in closed form), so no contact can be missed or found late.
+* ACTIVE: everything that touches something, or could touch something within H, is integrated by the full-stiffness
+  soft-sphere DEM of dem.py (JKR + plastic yield + damping, Mindlin sliding, rolling and twisting springs with their
+  limits; checked against LAMMPS to <= 2e-6), at a step of the fastest contact period / steps_per_period.
+* ASLEEP: a grain resting on a wall whose contact is proven to stay inside its elastic limits: for the loads over the
+  next step, the normal load stays above -F_c (pull-off), the tangential load below the sliding limit, and the rolling
+  and twisting loads below theirs, each with a 2% margin. Inside these limits the contact mechanics is elastic, so no
+  plastic variable (contact point, rolled distance, twist) can change and the grain cannot move (except by elastic
+  deflections of < 1e-10 m). The test runs every outer step; the grain wakes (becomes ACTIVE) the moment it fails, at
+  every load breakpoint (thrust on/off, de-spin, shocks), during release waveforms and vibration (kHz loads), and when
+  another body could reach it. On waking, its springs are set to the exact static solution for the current load, so
+  waking adds no transient. A woken grain goes back to sleep once its residual motion is too small to reach a limit.
+Grains touching other grains (aggregates, piles) stay ACTIVE (v0.6: no sleep for multi-contact clusters yet).
+
+Impacts are recorded when a contact forms (approach speed, tangential speed, normal, relative velocity), and their
+outcome when it breaks (bounce, exit speed) or when it has held for 2 ms (stick).
+
+Provenance: written for DOLL-E. Contact law: dem.py. Free flight, forces, setup: simulation.py. Loads: loads.py.
+"""
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import math
+import pickle
+import time
+from pathlib import Path
+
+import numpy as np
+from scipy.spatial import cKDTree
+
+from . import dem, roll1, statics
+from .environment import G0
+from .loads import Loads
+
+FREE, ACTIVE, ASLEEP, ROLL = 0, 1, 2, 3
+# a run saved at a checkpoint may continue under another scenario only if a fresh run of that scenario differs from a
+# fresh run of the saved one in these attributes alone (release schedule, flight-profile options) and its loads are
+# identical up to the checkpoint (branch())
+BRANCH_ALLOWED = ("cfg", "chamber", "base.cfg", "base.chamber", "base.release", "base.env.cfg", "base.env.profile.",
+                  "loads.")
+STICK_HOLD_S = 2e-3          # a contact that has held this long after forming is a stick
+LINRES_MAX = 64              # clusters up to this size may sleep with their residual motion tracked exactly
+FACE_NAMES = ["-x", "+x", "-y", "+y", "-z", "+z"]
+
+# friction coefficients (rolling_params.md): silica on glass 0.4 (Meyer et al. 2014; Buckley 1973 in vacuum 0.5),
+# silica-silica 0.6 (Liu et al. 2017), graphite dry/vacuum 0.5 (Buckley 1971). Other pairs: 0.4 (ASSUMED).
+MU_DEFAULT = {("silica", "wall"): 0.4, ("silica", "silica"): 0.6, ("graphite", "wall"): 0.5,
+              ("graphite", "graphite"): 0.5, ("graphite", "silica"): 0.5}
+
+
+class FullContactSim:
+    def __init__(self, cfg: dict, chamber: dict, seed: int = 0):
+        from .simulation import ChamberSim
+        b = self.base = ChamberSim(cfg, chamber, seed)
+        self.cfg, self.chamber = cfg, chamber
+        self.env, self.name, self.N = b.env, b.name, b.N
+        self.rad, self.mat, self.mats, self.wall_mat = b.rad, b.mat, b.mats, b.wall_mat
+        self.duration, self.size = b.duration, b.size
+        self.dt = b.dt
+        N = self.N
+        cc = cfg.get("contact", {})
+        self.n_ppp = int(cc.get("steps_per_period", 50))
+        self.h_roll = float(cc.get("rolling_hysteresis", 0.5))
+        self.q_roll = float(cc.get("rolling_q", 100.0))
+        self.q_twist = float(cc.get("twisting_q", 100.0))
+        self.x_gt = float(cc.get("tangential_damping_ratio", 1.0))
+        self.margin = float(cc.get("sleep_margin", 0.02))
+        self.n_ppp_roll = int(cc.get("roll_steps_per_period", 200))
+        # a free or rolling grain joins the DEM before its gap to anything can fall below this (any positive value is
+        # exact: the DEM resolves the approach from there); smaller means less DEM time
+        self.d_cap = float(cc.get("capture_distance_m", 1e-7))
+        self.use_roll = bool(cc.get("slaved_rolling", True))
+        self.all_dem = bool(cc.get("all_dem", False))        # reference mode: every grain in the DEM throughout
+        self.mu_tab = dict(MU_DEFAULT)
+        for k, val in (cc.get("friction", {}) or {}).items():
+            a, _, c = k.partition("-")
+            self.mu_tab[(a, c)] = float(val)
+        M = [b.mats[k] for k in b.mat]
+        self.E = np.array([m.E for m in M])
+        self.nu = np.array([m.nu for m in M])
+        self.gam = np.array([m.gamma for m in M])
+        self.edry = np.array([m.e_dry for m in M])
+        self.py = np.array([m.yield_pressure for m in M])
+        self.m = b.mass.copy()
+        self.I = b.I0.copy()
+        self.adh = b.adh.copy()
+        self.gdrag = (b.dragc / b.mass) if b.env.P > 0 else np.zeros(N)
+        self.x = b.pos.copy()
+        self.v = b.V.copy()
+        self.w = b.L / b.I0[:, None]
+        self.loads = Loads(b.env, b.release, self._vibration(chamber.get("vibration"), seed))
+        self.off = b.axis_offset.copy()
+        self.L = self.size.copy()
+        self.regime = np.full(N, FREE, np.int8)
+        # contact store
+        self._key = {}
+        self._prm = np.zeros((0, dem.NP))
+        self._hist = np.zeros((0, dem.NH))
+        self._seen_form = np.zeros(0)
+        self._seen_break = np.zeros(0)
+        self._ckeys = []
+        self._kij = np.zeros((0, 2), np.int64)   # the same keys as an array
+        self.collisions, self.detach_log, self.timeseries = [], [], []
+        self.frames, self.frame_t, self.frame_bodies, self.frame_frozen, self.frame_spin = [], [], [], [], []
+        self.n_events = {"stick": 0, "bounce": 0, "wall_stick": 0, "wall_bounce": 0, "detach": 0, "wake": 0,
+                         "sleep": 0, "active_grain_steps": 0, "dem_steps": 0, "rebuilds": 0}
+        self._pending = {}          # contact row -> collision record awaiting its outcome
+        self._ever_freed = set()
+        self.t = 0.0
+        self._dt_dem = self._contact_dt()
+        # dust resting on a face at lift-off: in adhesive equilibrium with the wall at zero load, asleep
+        self._sleep_face = {}
+        self._roll_face = {}        # grain -> face it rolls on (regime ROLL)
+        self._last_face = -1
+        self._islands = {}          # id -> sleeping cluster (members, contacts, factorised stiffness, reference)
+        self._island_of = {}        # grain -> island id
+        self._next_island = 0
+        self.max_island = int(cc.get("max_sleeping_cluster", 800))
+        self._F_lr = np.zeros((N, 3))
+        for k, ax, side in b._settled:
+            face = 2 * ax + (1 if side > 0 else 0)
+            row = self._row(k, -1 - face)
+            self._place_at_equilibrium(k, face, row, float(self.env.t0_flight))
+            self.regime[k] = ASLEEP
+            self._sleep_face[int(k)] = face
+            self.v[k] = 0.0
+            self.w[k] = 0.0
+        b.frozen[:] = self.regime != FREE
+        self.checkpoints = []       # flight times [s] at which run() saves the whole state (save_checkpoint)
+        self.checkpoint_dir = None
+        self._next_out = None
+        self._init_sig = state_signature(self)
+
+    @staticmethod
+    def _vibration(spec, seed):
+        """Deck vibration histories from a scenario spec: {"windows_s": [[t0, t1], ...], "level": "guide" |
+        "level_two", "seed": n}. 'guide': the RockSat User Guide 2026 test spectra on all three axes at once
+        (thrust along z, lateral along x and y), an upper bound for flight (vibration.py)."""
+        if not spec:
+            return None
+        from . import vibration as V
+        rng = np.random.default_rng(int(spec.get("seed", 1000 + seed)))
+        if spec.get("level", "guide") == "level_two":
+            bp = {"x": V.LEVEL_TWO["breakpoints"], "y": V.LEVEL_TWO["breakpoints"], "z": V.LEVEL_TWO["breakpoints"]}
+        else:
+            bp = {"x": V.GUIDE_RANDOM["lateral"]["breakpoints"], "y": V.GUIDE_RANDOM["lateral"]["breakpoints"],
+                  "z": V.GUIDE_RANDOM["thrust"]["breakpoints"]}
+        fs = float(spec.get("sample_rate_hz", 65536))
+        return [V.guide_random_history(float(a), bp, float(b2) - float(a), fs, rng) for a, b2 in spec["windows_s"]]
+
+    # ------------------------------------------------------------------ contact store
+    def _mu(self, i, j):
+        a = self.mats[self.mat[i]].name
+        c = "wall" if j < 0 else self.mats[self.mat[j]].name
+        return self.mu_tab.get((a, c), self.mu_tab.get((c, a), 0.4))
+
+    def _params(self, i, j):
+        if j >= 0:
+            wk = 2.0 * math.sqrt(self.gam[i] * self.gam[j]) * math.sqrt(self.adh[i] * self.adh[j])
+            return dem.make_params(self.rad[i], self.rad[j], self.m[i], self.m[j], self.E[i], self.nu[i], self.E[j],
+                                   self.nu[j], wk, math.sqrt(self.edry[i] * self.edry[j]),
+                                   min(self.py[i], self.py[j]), self._mu(i, j), self.h_roll, self.q_roll,
+                                   self.q_twist, dem.DAMP_TSUJI_JKR, dem.BREAK_DISPLACEMENT, self.x_gt, 0.0)
+        W = self.wall_mat
+        wk = 2.0 * math.sqrt(self.gam[i] * W.gamma) * self.adh[i] * self.base.wall_adh
+        return dem.make_params(self.rad[i], 0.0, self.m[i], math.inf, self.E[i], self.nu[i], W.E, W.nu, wk,
+                               math.sqrt(self.edry[i] * W.e_dry), min(self.py[i], W.yield_pressure), self._mu(i, -1),
+                               self.h_roll, self.q_roll, self.q_twist, dem.DAMP_TSUJI_JKR, dem.BREAK_DISPLACEMENT,
+                               self.x_gt, 0.0)
+
+    def _row(self, i, j):
+        key = (int(i), int(j))
+        r = self._key.get(key)
+        if r is None:
+            r = len(self._ckeys)
+            self._key[key] = r
+            self._ckeys.append(key)
+            if r >= len(self._prm):
+                n = max(64, 2 * len(self._prm))
+                self._prm = np.vstack([self._prm, np.zeros((n - len(self._prm), dem.NP))])
+                self._hist = np.vstack([self._hist, np.zeros((n - len(self._hist), dem.NH))])
+                self._seen_form = np.concatenate([self._seen_form, np.zeros(n - len(self._seen_form))])
+                self._seen_break = np.concatenate([self._seen_break, np.zeros(n - len(self._seen_break))])
+                self._kij = np.vstack([self._kij, np.zeros((n - len(self._kij), 2), np.int64)])
+            self._prm[r] = self._params(i, j)
+            self._kij[r] = (int(i), int(j))
+        return r
+
+    def _contact_dt(self):
+        """DEM step: the fastest contact period (normal, k_n = 1.2 E* a0; sliding, 8 G* a0 with the rotational
+        coupling) over every grain-wall and grain-grain pairing of the smallest grains, / steps_per_period."""
+        Tmin = math.inf
+        order = np.argsort(self.rad)
+        cand = list(order[:3]) + [int(np.argmin(self.rad))]
+        for i in cand:
+            for j in [-1] + list(order[:2]):
+                if j == i:
+                    continue
+                p = self._params(i, j) if j < 0 else self._params(i, int(j))
+                meff = p[dem.P_MEFF]
+                kn = 1.2 * p[dem.P_ESTAR] * p[dem.P_A0]
+                ks = p[dem.P_KT] * p[dem.P_A0]
+                Tn = 2 * math.pi * math.sqrt(meff / kn)
+                coup = 3.5 / self.m[i] if j < 0 else 7.0 / self.m[i]
+                Ts = 2 * math.pi / math.sqrt(ks * coup)
+                Tmin = min(Tmin, Tn, Ts)
+        return Tmin / self.n_ppp
+
+    def _hertz_dt(self, vrel):
+        """Inside fast impacts the Hertz contact time 2.87 (m*^2 / (R* E*^2 v))^(1/5) is shorter than the JKR periods."""
+        if vrel <= 0:
+            return math.inf
+        i = int(np.argmin(self.rad))
+        p = self._params(i, i if self.N == 1 else int(np.argsort(self.rad)[1]))
+        th = 2.87 * (p[dem.P_MEFF] ** 2 / (p[dem.P_REFF] * p[dem.P_ESTAR] ** 2 * vrel)) ** 0.2
+        return th / self.n_ppp
+
+    # ------------------------------------------------------------------ statics of a grain on a wall
+    @staticmethod
+    def _wall_normal(face):
+        n = np.zeros(3)
+        ax = face // 2
+        n[ax] = 1.0 if face % 2 == 0 else -1.0       # from the wall into the tubule
+        return n
+
+    def _body_force(self, idx, T):
+        """Quasi-static force [N] and torque on resting grains idx at flight time T (v = 0, omega = 0)."""
+        a = self.loads.accel(np.array([T]))[0]
+        Om = self.loads.omega(T)[0]
+        Omd = self.loads.omega_dot(T)[0]
+        r = self.x[idx] + self.off[None, :]
+        cen = -np.cross(Om[None, :], np.cross(Om[None, :], r))
+        eul = -np.cross(Omd[None, :], r)
+        F = self.m[idx, None] * (a[None, :] + cen + eul) + self._F_lr[idx]
+        T_in = -self.I[idx, None] * Omd[None, :]            # spin held relative to the tubule
+        return F, T_in
+
+    def _margins(self, idx, faces, F, Tq):
+        """For grains idx resting on faces (one wall contact each): the ratios of the static normal, sliding,
+        rolling and twisting loads to their limits. > 1 - margin means the grain must be woken."""
+        rows = np.array([self._key[(int(i), -1 - int(f))] for i, f in zip(idx, faces)])
+        p = self._prm[rows]
+        h = self._hist[rows]
+        n = np.zeros((len(idx), 3))
+        n[np.arange(len(idx)), faces // 2] = np.where(faces % 2 == 0, 1.0, -1.0)
+        Fn = -(F * n).sum(1)                                 # pressing load (> 0 pushes the grain onto the wall)
+        Ft = F + Fn[:, None] * n
+        Fc = np.where(h[:, dem.H_YLD] > 0.5, h[:, dem.H_FCP], p[:, dem.P_FC])
+        Fncrit = np.abs(Fn + 2 * Fc)
+        ft = np.linalg.norm(Ft, axis=1)
+        tw = np.abs((Tq * n).sum(1))
+        tt = np.linalg.norm(Tq - (Tq * n).sum(1)[:, None] * n, axis=1)
+        R = p[:, dem.P_REFF]
+        r_pull = np.where(Fn < 0, -Fn / Fc, 0.0)
+        r_slide = ft / (p[:, dem.P_MUT] * Fncrit)
+        r_roll = (ft + tt / R) / (p[:, dem.P_MUR] * Fncrit)
+        r_twist = tw / np.maximum(p[:, dem.P_MUTW] * Fncrit, 1e-300)
+        return np.maximum.reduce([r_pull, r_slide, r_roll, r_twist]), rows, Fn, Ft, Tq, n
+
+    def _place_at_equilibrium(self, k, face, row, T, F=None, Tq=None):
+        """Put grain k at the exact static equilibrium of its one wall contact under the load at T: normal overlap
+        from the JKR curve, sliding, rolling and twisting springs from the static force and torque."""
+        if F is None:
+            F, Tq = self._body_force(np.array([k]), T)
+        F, Tq = F[0], Tq[0]
+        n = self._wall_normal(face)
+        p, h = self._prm[row], self._hist[row]
+        R, w, E = p[dem.P_REFF], p[dem.P_W], p[dem.P_ESTAR]
+        Fn = -float(F @ n)
+        # JKR: F_el(a) = Fn on the stable branch (a > a0/4^(1/3)); solve by bisection in a
+        a0 = p[dem.P_A0]
+        lo, hi = a0 / 4 ** (1 / 3), a0
+        while dem.jkr_force(hi, R, w, E) < Fn:
+            hi *= 1.5
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            if dem.jkr_force(mid, R, w, E) < Fn:
+                lo = mid
+            else:
+                hi = mid
+        a = 0.5 * (lo + hi)
+        delta = a * a / R - math.sqrt(2 * math.pi * w * a / E)
+        ax = face // 2
+        self.x[k, ax] = (self.rad[k] - delta) if face % 2 == 0 else (self.L[ax] - self.rad[k] + delta)
+        Ft = F + Fn * n
+        tw = float(Tq @ n)
+        Tt = Tq - tw * n
+        nf, tf, vin, vt, nb, tb, vo, am = (h[dem.H_NFORM], h[dem.H_TFORM], h[dem.H_VIN], h[dem.H_VTIN],
+                                           h[dem.H_NBREAK], h[dem.H_TBREAK], h[dem.H_VOUT], h[dem.H_AMAX])
+        # elastic tangential deflection held by the sliding and rolling springs before (centre moves with them:
+        # v_t = d(xi_t)/dt + d(xi_r)/dt for a sphere on a wall)
+        defl_old = (h[dem.H_XT:dem.H_XT + 3] + h[dem.H_XR:dem.H_XR + 3]).copy() if h[dem.H_TOUCH] > 0.5             else np.zeros(3)
+        h[:dem.NHP] = 0.0
+        h[dem.H_TOUCH] = 1.0
+        h[dem.H_A] = a
+        h[dem.H_DMAX] = delta
+        # contact force on the grain balances the load: tangential force fs = -Ft (fs = -k_t a xi_t), the rolling
+        # pseudo-force fr balances the torque about the centre: R n x (fr - fs) = -T_tangential
+        ks = p[dem.P_KT] * a
+        h[dem.H_XT:dem.H_XT + 3] = Ft / ks
+        fr = -Ft + np.cross(n, Tt) / R
+        h[dem.H_XR:dem.H_XR + 3] = -fr / p[dem.P_KR]
+        h[dem.H_XTW] = tw / p[dem.P_KTW]
+        d = h[dem.H_XT:dem.H_XT + 3] + h[dem.H_XR:dem.H_XR + 3] - defl_old
+        d -= (d @ n) * n
+        self.x[k] += d
+        h[dem.H_NFORM], h[dem.H_TFORM], h[dem.H_VIN], h[dem.H_VTIN] = nf, tf, vin, vt
+        h[dem.H_NBREAK], h[dem.H_TBREAK], h[dem.H_VOUT], h[dem.H_AMAX] = nb, tb, vo, max(am, a)
+
+    # ------------------------------------------------------------------ long-range and static forces
+    def _update_long_range(self, t):
+        b = self.base
+        b.pos = self.x.copy()
+        b.X = self.x.copy()
+        b.V = self.v.copy()
+        b.t = t
+        b.env.update(t)
+        if b._needs_rebuild(self.v):
+            b._build_neighbors(self.v)
+        b._pair_stale = b._charge_stale = b._sc_dirty = True
+        F = b._forces_pos(self.v)
+        if b._F_cf is not None:
+            F = F - b._F_cf
+        self._F_lr = F
+
+    # ------------------------------------------------------------------ one outer step
+    def _outer_dt(self, t):
+        """Outer step: dt_s (4 ms by default); with free grains under launch loads, dt_launch_s scaled to the load
+        (as in v0.5, so their free flight stays accurate); never more than 0.02 rad of roll; a capture shell of at
+        >= 40 steps per cycle of any release
+        waveform or vibration; and every step ends exactly at the next load breakpoint."""
+        T = self.env.t0_flight + t
+        prof = self.env.profile
+        dt = self.base.dt_base
+        free = self.regime == FREE
+        if prof is not None and free.any() and (T < prof.ug_start_s or T >= prof.ug_end_s):
+            a_g = max(float(np.linalg.norm(prof.apparent_accel(T))), 1e-6) / G0
+            dt = min(dt, self.base.dt_launch * 2.0 ** math.floor(math.log2(math.sqrt(25.0 / a_g))))
+        W = float(np.abs(self.loads.omega(np.array([T, T + dt]))).max())
+        if W > 0:
+            dt = min(dt, 0.02 / W)
+        if self.loads.fast_window(T, T + dt):
+            dt = min(dt, 1.0 / (40.0 * self.loads.max_freq(T, T + dt)))
+        nb = self.loads.next_breakpoint(T)
+        if T + dt > nb - 1e-12:
+            dt = max(nb - T, 1e-9)
+        return min(dt, self.duration - t)
+
+    def _motion_bound(self, H, T):
+        """Most each grain can move in H: |v| H + (1/2) a_max H^2, a_max bounding every body force per unit mass."""
+        a = np.abs(self.loads.accel(np.array([T, T + H]))).max(0)
+        Om = float(np.abs(self.loads.omega(np.array([T, T + H]))).max())
+        Omd = float(np.abs(self.loads.omega_dot(np.array([T]))).max())
+        rmax = float(np.linalg.norm(np.abs(self.off) + self.L))
+        vm = np.linalg.norm(self.v, axis=1)
+        amax = np.linalg.norm(a) + Om * Om * rmax + Omd * rmax + 2 * Om * vm + self.gdrag * vm \
+            + np.linalg.norm(self._F_lr, axis=1) / self.m
+        return vm * H + 0.5 * amax * H * H + 1e-9
+
+    def _motion_bound_rest(self, H, T):
+        v = self.v
+        self.v = np.zeros_like(v)
+        try:
+            return self._motion_bound(H, T)
+        finally:
+            self.v = v
+
+    def step(self, t, H):
+        """One outer step, taken with the motion bounds below and then verified: every assumption one grain's
+        treatment made about another is checked against what actually happened. The speed of every grain in the DEM
+        against the speed bound the others used for it; the path of every rolling grain against the rolling envelope
+        the others used for it; every grain that entered the DEM during the step (a sleeper a DEM grain came up to, a
+        flying or rolling grain that was captured) against every grain advanced outside the DEM. If a check fails the
+        step is redone from its start, with those grains in the DEM from the start (or a larger speed bound), so no
+        interaction is ever missed."""
+        snap = self._snapshot()
+        force, vfac = (set(range(self.N)) if self.all_dem else set()), 1.0
+        for _ in range(64):
+            bad, vf = self._step_once(t, H, force, vfac)
+            if not bad and vf is None:
+                break
+            self._restore(snap)
+            self.n_events["redos"] = self.n_events.get("redos", 0) + 1
+            force |= bad
+            if vf is not None:
+                vfac = vf
+        else:
+            raise RuntimeError(f"{self.name}: the step at t = {t} s could not be verified")
+        self.t = t + H
+        self._log_events(t + H)
+        self._classify(t + H)
+
+    def checkpoint_path(self, T, directory=None):
+        return Path(directory or self.checkpoint_dir) / f"{self.name}_T{T:08.3f}.pkl"
+
+    def save_checkpoint(self):
+        """Save the whole state (pickle) at the current time, for branch()."""
+        T = self.env.t0_flight + self.t
+        path = self.checkpoint_path(T)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(path)
+        self.n_events.setdefault("checkpoints_saved", []).append(round(T, 3))
+
+    def _snapshot(self):
+        nr = len(self._ckeys)
+        return dict(x=self.x.copy(), v=self.v.copy(), w=self.w.copy(), regime=self.regime.copy(),
+                    hist=self._hist[:nr].copy(), nr=nr, F_lr=self._F_lr.copy(), sleep_face=dict(self._sleep_face),
+                    roll_face=dict(self._roll_face), islands=dict(self._islands), island_of=dict(self._island_of),
+                    next_island=self._next_island, last_face=getattr(self, "_last_face", -1),
+                    n_events=dict(self.n_events), rng=copy.deepcopy(self.base.rng.bit_generator.state))
+
+    def _restore(self, sn):
+        self.x[:], self.v[:], self.w[:], self.regime[:] = sn["x"], sn["v"], sn["w"], sn["regime"]
+        nr = sn["nr"]
+        self._hist[:nr] = sn["hist"]
+        self._hist[nr:] = 0.0                       # rows first made during the failed attempt
+        self._F_lr = sn["F_lr"].copy()
+        self._sleep_face, self._roll_face = dict(sn["sleep_face"]), dict(sn["roll_face"])
+        self._islands, self._island_of = dict(sn["islands"]), dict(sn["island_of"])
+        self._next_island, self._last_face, self.n_events = sn["next_island"], sn["last_face"], dict(sn["n_events"])
+        self.base.rng.bit_generator.state = copy.deepcopy(sn["rng"])
+
+    def _step_once(self, t, H, force, vfac):
+        T = self.env.t0_flight + t
+        self._update_long_range(t)
+        v_start = self.v.copy()
+        fast = self.loads.fast_window(T, T + H) or self.loads.breakpoint_in(T - 1e-9, T + 1e-9)
+        # 1. asleep grains: certificate for the loads over the step (start, middle, end)
+        asl = np.array([k for k in np.flatnonzero(self.regime == ASLEEP) if int(k) in self._sleep_face], np.int64)
+        wake = np.zeros(self.N, bool)
+        if len(asl):
+            if fast:
+                wake[asl] = True
+            else:
+                faces = np.array([self._sleep_face[k] for k in asl])
+                worst = np.zeros(len(asl))
+                for Ts in (T, T + 0.5 * H, T + H):
+                    F, Tq = self._body_force(asl, Ts)
+                    ratio = self._margins(asl, faces, F, Tq)[0]
+                    worst = np.maximum(worst, ratio)
+                wake[asl[worst > 1 - self.margin]] = True
+        for iid in list(self._islands):
+            isl = self._islands[iid]
+            if fast:
+                wake[isl["members"]] = True
+                continue
+            worst = 0.0
+            for Ts in (T, T + 0.5 * H, T + H):
+                worst = max(worst, float(self._island_ratio(isl, Ts).max()))
+            if worst > 1 - self.margin:
+                wake[isl["members"]] = True
+        # 2. wake: a cluster wakes whole (into the DEM); a single grain goes to the slaved rolling model. Grains a
+        # redo names go into the DEM from the start. Sleepers whose certificate holds stay asleep (static): one joins
+        # the DEM when a DEM grain comes within 2 d_cap of it (see _dem), or a rolling or flying grain is captured near
+        # it, and the verification below checks that nothing outside the DEM relied on it staying put.
+        forced = np.zeros(self.N, bool)
+        if force:
+            forced[np.array(sorted(force), np.int64)] = True
+        act = wake | forced
+        for k in np.flatnonzero(act & (self.regime == ASLEEP)):
+            if int(k) in self._island_of:
+                act[self._islands[self._island_of[int(k)]]["members"]] = True
+        newly = act & (self.regime == ASLEEP)
+        woken = set()
+        for k in np.flatnonzero(newly):
+            k = int(k)
+            if self.regime[k] != ASLEEP:          # already woken with its cluster
+                continue
+            if k in self._island_of:
+                iid = self._island_of[k]
+                if iid not in woken:
+                    woken.add(iid)
+                    self._wake_island(iid, T)
+            else:
+                self._wake(k, T)
+                if self.use_roll and not forced[k]:
+                    self._roll_face[k] = self._last_face
+                    self.regime[k] = ROLL
+                else:
+                    self.regime[k] = ACTIVE
+        for k in np.flatnonzero(forced & ((self.regime == ROLL) | (self.regime == FREE))):
+            self._roll_face.pop(int(k), None)
+            self.regime[k] = ACTIVE
+        # motion bounds: |v| H + a_max H^2 / 2 (body forces), the rolling envelope for rolling grains, 0 asleep
+        s = self._motion_bound(H, T)
+        s[self.regime == ASLEEP] = 0.0
+        s_off = np.zeros(self.N)
+        ro_all = np.flatnonzero(self.regime == ROLL)
+        if len(ro_all):
+            s[ro_all], s_off[ro_all] = self._roll_bound(ro_all, H, T)
+        reg_seen = self.regime.copy()
+        x_seen = self.x.copy()
+        self._vdem_fac = vfac
+        self._chk = dict(speed=[], vmax=[], outside=[], dmax=np.zeros(self.N), in_dem=np.zeros(self.N, bool),
+                         roll_bad=set(), x_seen=x_seen)
+        vm0 = np.linalg.norm(self.v, axis=1)
+        a_b = np.maximum((s - s_off - vm0 * H) * 2 / (H * H), 0.0)
+        # 3. capture times: the earliest time each free or rolling grain could come within the capture distance of
+        # anything (bounded motion of both sides). Up to it, a free grain flies exactly (velocity Verlet with
+        # closed-form drag and Coriolis) and a rolling grain rolls on the slaved model; there it joins the DEM.
+        joins = {}
+        dt_d = min(self._dt_dem, self._hertz_dt(2 * float(np.linalg.norm(self.v, axis=1).max())))
+        self._join_dt = dt_d
+        mob_idx = np.flatnonzero((self.regime == FREE) | (self.regime == ROLL))
+        if len(mob_idx):
+            t_hit, v_dem, used = self._capture_times(mob_idx, H, T, s, s_off)
+            if used:
+                self._chk["speed"].append((t, v_dem))
+            fr = mob_idx[(self.regime[mob_idx] == FREE)]
+            ro = mob_idx[(self.regime[mob_idx] == ROLL)]
+            th = dict(zip(mob_idx.tolist(), t_hit.tolist()))
+            whole_f = np.array([k for k in fr if th[k] >= H], np.int64)
+            if len(whole_f):
+                self._outside(whole_f, s[whole_f])
+                self._free_flight(whole_f, t, H)
+            whole_r = np.array([k for k in ro if th[k] >= H], np.int64)
+            if len(whole_r):
+                self._outside(whole_r, s[whole_r])
+                failed = self._roll_step(whole_r, t, H, vm0[whole_r], a_b[whole_r], s_off[whole_r])
+                self.regime[failed] = ACTIVE
+            groups = {}
+            for k in list(fr) + list(ro):
+                if th[k] < H:
+                    groups.setdefault(int(math.floor(th[k] / dt_d)), []).append(int(k))
+            for kk in sorted(groups):
+                g = groups[kk]
+                flyers = np.array([k for k in g if self.regime[k] == FREE], np.int64)
+                rollers = np.array([k for k in g if self.regime[k] == ROLL], np.int64)
+                if kk > 0 and len(flyers):
+                    self._outside(flyers, s[flyers])
+                    self._free_flight(flyers, t, kk * dt_d)
+                if kk > 0 and len(rollers):
+                    self._outside(rollers, s[rollers])
+                    failed = self._roll_step(rollers, t, kk * dt_d, vm0[rollers], a_b[rollers], s_off[rollers])
+                    for k in failed:              # back at the step start: in the DEM for the whole step
+                        self.regime[k] = ACTIVE
+                    g = [k for k in g if k not in set(failed.tolist())]
+                for k in g:
+                    self._roll_face.pop(int(k), None)
+                    self.regime[k] = ACTIVE
+                joins[kk] = g
+        # 4. active grains: full-stiffness DEM over [t, t + H] in chunks; captured grains join at their capture
+        # times, sleepers when a DEM grain comes up to them; after each chunk, grains that touch nothing and are clear
+        # of everything for the rest of the step go back to free flight, and grains resting on one wall and clear go
+        # back to the slaved rolling model
+        ai = np.flatnonzero(self.regime == ACTIVE)
+        late = {kk: v for kk, v in joins.items() if kk > 0}
+        if len(ai):
+            join_at = sorted((t + q * dt_d, q) for q in late)
+            in_late = set(k for v in late.values() for k in v)
+            cur = np.array([k for k in ai if int(k) not in in_late], np.int64)
+            t_cur, t_end = t, t + H
+            chunk = 20000 * self._dt_dem
+            s_full = s.copy()
+            s_full[self.regime == ASLEEP] = 0.0
+            jq = 0
+            while t_cur < t_end - 1e-15:
+                t_next = join_at[jq][0] if jq < len(join_at) else t_end
+                seg_end = min(t_next, t_cur + chunk, t_end)
+                if seg_end > t_cur + 1e-15 and len(cur):
+                    cur = self._dem(cur, t_cur, seg_end - t_cur)
+                t_cur = seg_end
+                while jq < len(join_at) and join_at[jq][0] <= t_cur + 1e-15:
+                    cur = np.union1d(cur, np.array(late[join_at[jq][1]], np.int64))
+                    jq += 1
+                if t_cur < t_end - 1e-15 and len(cur):
+                    cur = self._early_exit(cur, t_cur, t_end, x_seen, s_full, v_start, t, H)
+        return self._verify(s, reg_seen)
+
+    def _outside(self, ks, S):
+        """Record grains about to be advanced outside the DEM: position now and the bound on their displacement."""
+        ks = np.asarray(ks, np.int64)
+        if len(ks):
+            self._chk["outside"].append((ks.copy(), self.x[ks].copy(), np.asarray(S, float).copy()))
+
+    def _verify(self, s, reg_seen):
+        """The step's checks (see step). Returns (grains to put in the DEM from the start, new speed factor or
+        None)."""
+        chk = self._chk
+        bad = set(int(k) for k in chk["roll_bad"])
+        vf = None
+        for tc, vb in chk["speed"]:
+            obs = max([vm for (ta, tb, vm) in chk["vmax"] if tb > tc + 1e-15], default=0.0)
+            if obs > vb:
+                vf = max(vf or 0.0, self._vdem_fac * 1.25 * obs / vb)
+        cand = np.flatnonzero(chk["in_dem"] & (reg_seen != ACTIVE))
+        if len(cand) and chk["outside"]:
+            K = np.concatenate([r[0] for r in chk["outside"]])
+            X = np.vstack([r[1] for r in chk["outside"]])
+            S = np.concatenate([r[2] for r in chk["outside"]])
+            xs = chk["x_seen"]
+            Dg = np.maximum(chk["dmax"][cand], np.where(reg_seen[cand] == ASLEEP, 0.0, s[cand]))
+            tree = cKDTree(X)
+            rmax = float(self.rad.max())
+            for q, g in enumerate(cand):
+                for idx in tree.query_ball_point(xs[g], 2 * rmax + float(S.max()) + Dg[q] + self.d_cap + 1e-12):
+                    k = int(K[idx])
+                    if k == int(g):
+                        continue
+                    gap = float(np.linalg.norm(xs[g] - X[idx])) - self.rad[g] - self.rad[k]
+                    if gap - S[idx] - Dg[q] <= self.d_cap:
+                        bad.add(int(g))
+                        break
+        self.n_events["checked_steps"] = self.n_events.get("checked_steps", 0) + 1
+        return bad, vf
+
+    def _early_exit(self, cur, t_now, t_end, x_start, s_full, v_start=None, t_step=None, H=None):
+        """Grains in the DEM that touch nothing and provably cannot come within the capture distance of anything
+        before t_end leave it and fly freely to t_end. The bounds: walls along their normals with the grain's own
+        velocity; grains outside the DEM by their step-start positions and whole-step motion bounds; grains still in
+        the DEM by their current positions and a speed bound for the rest of the step; sleeping grains do not move."""
+        if self.all_dem:
+            return cur
+        in_c = np.zeros(self.N, bool)
+        in_c[cur] = True
+        touch = self._touching(in_c)
+        busy = set()
+        for i, j in touch:
+            busy.add(i)
+            if j >= 0:
+                busy.add(j)
+        rem = t_end - t_now
+        T = self.env.t0_flight + t_now
+        vm = np.linalg.norm(self.v, axis=1)
+        s_rem = self._motion_bound(rem, T)
+
+        def own_face(k):
+            return nw[k][0]
+        a_k = np.maximum((s_rem - vm * rem) * 2 / (rem * rem), 0.0)
+        d_cap = self.d_cap
+        in_cur = np.zeros(self.N, bool)
+        in_cur[cur] = True
+        v_dem = (float(vm[cur].max()) * math.sqrt(float(self.m.max() / self.m.min())) + float(a_k.max()) * rem) \
+            * self._vdem_fac
+        ref = np.where(in_cur[:, None], self.x, x_start)
+        sk_of, off_of = {}, {}
+        s_ref = np.where(in_cur, v_dem * rem + 0.5 * float(a_k.max()) * rem * rem, s_full)
+        out = []
+        rollers = []
+        nw = {}
+        npr = set()
+        for i, j in touch:
+            if j < 0:
+                nw.setdefault(i, []).append(-1 - j)
+            else:
+                npr.add(i)
+                npr.add(j)
+        tree = None
+        for k in cur:
+            k = int(k)
+            own = -1
+            if k in busy:
+                if not self.use_roll or k in npr or len(nw.get(k, [])) != 1:
+                    continue
+                own = nw[k][0]
+            ok = True
+            for f in range(6):
+                if f == own:
+                    continue
+                ax = f // 2
+                g0 = (self.x[k, ax] if f % 2 == 0 else self.L[ax] - self.x[k, ax]) - self.rad[k] - d_cap
+                u = self.v[k, ax] if f % 2 == 0 else -self.v[k, ax]
+                if g0 + min(u, 0.0) * rem - 0.5 * a_k[k] * rem * rem <= 0:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            if tree is None:
+                tree = cKDTree(ref)
+            off_k = self._roll_off(np.array([k]), np.array([own]))[0] if own >= 0 else 0.0
+            s_k = vm[k] * rem + 0.5 * a_k[k] * rem * rem + off_k
+            sk_of[k], off_of[k] = s_k, off_k
+            for j in tree.query_ball_point(self.x[k], 2 * self.rad.max() + d_cap + s_k + float(s_ref.max())):
+                if j == k:
+                    continue
+                rsum = self.rad[j] + self.rad[k]
+                if v_start is not None and not in_cur[j] and self.regime[j] in (FREE, ASLEEP):
+                    # straight-line relative motion over the rest of the step + curvature bounds
+                    if self.regime[j] == FREE:
+                        a_j = max((s_full[j] - float(np.linalg.norm(v_start[j])) * H) * 2 / (H * H), 0.0)
+                        d0 = x_start[j] + v_start[j] * (t_now - t_step) - self.x[k]
+                        dv = v_start[j] - self.v[k]
+                        curv = 0.5 * a_j * H * H + 0.5 * a_k[k] * rem * rem + off_k
+                    else:
+                        d0 = self.x[j] - self.x[k]
+                        dv = -self.v[k]
+                        curv = 0.5 * a_k[k] * rem * rem + off_k
+                    a2 = float(dv @ dv)
+                    tau = 0.0 if a2 == 0 else min(max(-float(d0 @ dv) / a2, 0.0), rem)
+                    dmin = float(np.linalg.norm(d0 + dv * tau))
+                    if dmin - rsum - curv <= d_cap:
+                        ok = False
+                        break
+                    continue
+                gap = float(np.linalg.norm(ref[j] - self.x[k])) - rsum
+                if gap - s_ref[j] - s_k <= d_cap:
+                    ok = False
+                    break
+            if ok:
+                (rollers if own >= 0 else out).append(k)
+        back = []
+        for k in rollers:
+            if self._try_roll(k, own_face(k), T, rem):
+                kk = np.array([k], np.int64)
+                self._outside(kk, [sk_of[k]])
+                failed = self._roll_step(kk, t_now, rem, vm[kk], a_k[kk], np.array([off_of[k]]))
+                if len(failed):
+                    self.regime[k] = ACTIVE
+                else:
+                    back.append(k)
+        if back:
+            cur = np.setdiff1d(cur, np.array(back, np.int64))
+            self.n_events["roll_reentries"] = self.n_events.get("roll_reentries", 0) + len(back)
+        if back or out:
+            self._chk["speed"].append((t_now, v_dem))
+        if out:
+            out = np.array(out, np.int64)
+            self.regime[out] = FREE
+            self._outside(out, [sk_of[k] for k in out])
+            self._free_flight(out, t_now, rem)
+            self.n_events["early_exits"] = self.n_events.get("early_exits", 0) + len(out)
+            cur = np.setdiff1d(cur, out)
+        return cur
+
+    def _roll_off(self, ri, faces):
+        """Constant part of the rolling envelope: the elastic rocking deflection (below xi_crit each way) and 1 nm."""
+        rows = np.array([self._key[(int(k), -1 - int(f))] for k, f in zip(ri, faces)], np.int64)
+        p = self._prm[rows]
+        return p[:, dem.P_MUR] * p[:, dem.P_REFF] + 1e-9             # 2 xi_crit = mu_r R
+
+    def _roll_bound(self, ri, H, T):
+        """Most a grain rolling on its wall can move in H (returns the bound and its constant part): it stays on the
+        wall (the slaved model holds its normal coordinate), and along it moves at most v t + (5/7) max(a_t - a_roll,
+        0) t^2 / 2 (rigid rolling, a_t the largest load along the wall over the step with the certificate margin, a_roll
+        its rolling limit), plus the elastic rocking deflection. Checked against the actual path every rolling step
+        (roll1 exc)."""
+        faces = np.array([self._roll_face[int(k)] for k in ri], np.int64)
+        worst_at = np.zeros(len(ri))
+        rows = np.array([self._key[(int(k), -1 - int(f))] for k, f in zip(ri, faces)], np.int64)
+        p = self._prm[rows]
+        n = np.zeros((len(ri), 3))
+        n[np.arange(len(ri)), faces // 2] = np.where(faces % 2 == 0, 1.0, -1.0)
+        a_roll = np.full(len(ri), np.inf)
+        for Ts in (T, T + 0.5 * H, T + H):
+            F, Tq = self._body_force(ri, Ts)
+            Fn = -(F * n).sum(1)
+            Ft = F + Fn[:, None] * n
+            worst_at = np.maximum(worst_at, np.linalg.norm(Ft, axis=1) / self.m[ri])
+            a_roll = np.minimum(a_roll, p[:, dem.P_MUR] * np.abs(Fn + 2 * p[:, dem.P_FC]) / self.m[ri])
+        excess = np.maximum(worst_at * (1 + self.margin) - a_roll * (1 - self.margin), 0.0)
+        off = self._roll_off(ri, faces)
+        vm = np.linalg.norm(self.v[ri], axis=1)
+        return vm * H + 0.5 * (5.0 / 7.0) * excess * H * H + off, off
+
+    def _capture_times(self, free, H, T, s, s_off):
+        """For each free or rolling grain, a lower bound on the time at which it could first come within the capture
+        distance d_cap of a wall or another grain during the step. Returns (times, v_dem, whether v_dem was used).
+        * walls: the gap along the wall normal is g0 + u tau - a tau^2/2 at the least (u its velocity away from the
+          wall, a the grain's acceleration bound);
+        * another free grain or a sleeping one: their relative motion is a straight line d0 + dv tau plus a curvature
+          of at most (a_i + a_j) tau^2 / 2, so the distance is at least |d0 + dv tau| - (a_i + a_j) H^2 / 2;
+        * a rolling grain: its envelope |v| tau + a tau^2 / 2 + offset (rolling bound);
+        * a grain in the DEM: no direction is assumed, only the speed bound v_dem (contacts can turn it).
+        Sleeping grains do not move (their certificate holds for the step; one that joins the DEM is checked
+        afterwards, see _verify), and v_dem is checked against the DEM's actual speeds."""
+        d_cap = self.d_cap
+        vm = np.linalg.norm(self.v, axis=1)
+        a_bound = np.maximum((s - s_off - vm * H) * 2 / (H * H), 0.0)   # per-grain acceleration bound
+        # speed bound for grains whose direction contacts can change (verified afterwards against the DEM's speeds)
+        v_dem = (float(vm.max()) * math.sqrt(float(self.m.max() / self.m.min())) + float(a_bound.max()) * H) \
+            * self._vdem_fac
+        out = np.full(len(free), np.inf)
+        used = False
+
+        def t_iso(gap, v, a):
+            g = gap - d_cap
+            if g <= 0:
+                return 0.0
+            if a <= 0:
+                return g / v if v > 0 else np.inf
+            return (-v + math.sqrt(v * v + 2 * a * g)) / a
+
+        def t_lin(d0, dv, rsum, A):
+            c = rsum + d_cap + 0.5 * A * H * H
+            q0 = float(d0 @ d0)
+            if q0 <= c * c:
+                return 0.0
+            b = float(d0 @ dv)
+            a2 = float(dv @ dv)
+            if a2 == 0.0 or b >= 0.0:
+                return np.inf                                   # not approaching (the curvature is in c)
+            disc = b * b - a2 * (q0 - c * c)
+            if disc < 0:
+                return np.inf
+            return (-b - math.sqrt(disc)) / a2
+        tree = cKDTree(self.x)
+        reach = 2 * self.rad.max() + d_cap + 2 * max(float(s.max()), v_dem * H) + 1e-9
+        for q, k in enumerate(free):
+            best = np.inf
+            k_roll = self.regime[k] == ROLL
+            own = self._roll_face.get(int(k), -1) if k_roll else -1
+            for f in range(6):
+                if f == own:
+                    continue
+                ax = f // 2
+                g0 = (self.x[k, ax] if f % 2 == 0 else self.L[ax] - self.x[k, ax]) - self.rad[k] - d_cap - s_off[k]
+                u = self.v[k, ax] if f % 2 == 0 else -self.v[k, ax]
+                if g0 <= 0:
+                    best = 0.0
+                    break
+                a = a_bound[k]
+                if a > 0:
+                    tw = (u + math.sqrt(u * u + 2 * a * g0)) / a
+                else:
+                    tw = g0 / -u if u < 0 else np.inf
+                best = min(best, tw)
+            for jj in tree.query_ball_point(self.x[k], reach):
+                if jj == k or best == 0.0:
+                    continue
+                rsum = self.rad[jj] + self.rad[k]
+                rj = self.regime[jj]
+                if rj == ACTIVE:
+                    gap = float(np.linalg.norm(self.x[jj] - self.x[k])) - rsum - s_off[k]
+                    tp = t_iso(gap, vm[k] + v_dem, a_bound[k] + float(a_bound.max()))
+                    used = True
+                elif k_roll or rj == ROLL:
+                    gap = float(np.linalg.norm(self.x[jj] - self.x[k])) - rsum - s_off[k] - s_off[jj]
+                    vj = 0.0 if rj == ASLEEP else vm[jj]
+                    tp = t_iso(gap, vm[k] + vj, a_bound[k] + a_bound[jj])
+                elif rj == FREE:
+                    tp = t_lin(self.x[jj] - self.x[k], self.v[jj] - self.v[k], rsum, a_bound[k] + a_bound[jj])
+                else:
+                    tp = t_lin(self.x[jj] - self.x[k], -self.v[k], rsum, a_bound[k])
+                best = min(best, tp)
+            out[q] = best
+        return out, v_dem, used
+
+    def _skip_asleep(self, t, t_out=None):
+        """Everything is asleep: advance time without stepping while every sleeper's certificate holds, checked at
+        the same sample points the stepping would use (every dt_s), up to the next load breakpoint or fast load.
+        Returns the new time (t if nothing can be skipped)."""
+        T = self.env.t0_flight + t
+        dts = self.base.dt_base
+        t_lim = min(self.duration, self.loads.next_breakpoint(T) - self.env.t0_flight, t + 2.0,
+                    t_out if t_out is not None and t_out > t else self.duration)
+        if self.loads.fast_window(T, T + dts) or t_lim <= t + 2 * dts:
+            return t
+        n = int((t_lim - t) / dts)
+        Ts = T + dts * np.arange(1, n + 1)
+        asl = np.array([k for k in np.flatnonzero(self.regime == ASLEEP) if int(k) in self._sleep_face], np.int64)
+        ok_until = n
+        if len(asl):
+            faces = np.array([self._sleep_face[k] for k in asl])
+            for q, Tq in enumerate(Ts):
+                F, Tqq = self._body_force(asl, Tq)
+                if float(self._margins(asl, faces, F, Tqq)[0].max()) > 1 - self.margin:
+                    ok_until = q
+                    break
+        for iid, isl in self._islands.items():
+            for q in range(min(ok_until, n)):
+                if float(self._island_ratio(isl, Ts[q]).max()) > 1 - self.margin:
+                    ok_until = q
+                    break
+        if ok_until < 1:
+            return t
+        return t + ok_until * dts
+
+    def _wake(self, k, T):
+        face = self._sleep_face.pop(k)
+        self._last_face = face
+        row = self._key[(int(k), -1 - face)]
+        self._place_at_equilibrium(k, face, row, T)
+        self.v[k] = 0.0
+        self.w[k] = 0.0
+        self.n_events["wake"] += 1
+
+    def _free_flight(self, free, t, H):
+        b = self.base
+        b.frozen[:] = True
+        b.frozen[free] = False
+        b.X[:], b.V[:] = self.x, self.v
+        b.X[free], b.V[free] = self.x[free], self.v[free]
+        b.L[free] = self.w[free] * self.I[free, None]
+        b.pos = b.X[b.body] + b.off
+        b.env.update(t)
+        a_app = b.env.apparent_accel(t, H) + self.loads.release_accel(np.array([b.env.t0_flight + t]))[0] \
+            + self.loads.vibration_accel(np.array([b.env.t0_flight + t]))[0]
+        b._a_app_now = a_app
+        if b.env.profile is not None:
+            b._W_drift = 2 * math.pi * b.env.profile.spin_hz(b.env.t0_flight + t + 0.5 * H)
+        F0 = b._forces_pos(b._mono_vel())
+        act = b._kick(F0, a_app, 0.5 * H)
+        b._drift(H, act)
+        b.env.update(t + H)
+        F1 = b._forces_pos(b._mono_vel())
+        a1 = b.env.apparent_accel(t + H, H) + self.loads.release_accel(np.array([b.env.t0_flight + t + H]))[0] \
+            + self.loads.vibration_accel(np.array([b.env.t0_flight + t + H]))[0]
+        b._kick(F1, a1, 0.5 * H, brownian=True)
+        self.x[free], self.v[free] = b.pos[free], b.V[free]
+        self.w[free] = b.L[free] / self.I[free, None]
+
+    # ------------------------------------------------------------------ DEM of the active grains
+    def _candidates(self, ai, skin):
+        loc = {int(g): k for k, g in enumerate(ai)}
+        ci, cj, rows = [], [], []
+        x = self.x[ai]
+        if len(ai) > 1:
+            pr = cKDTree(x).query_pairs(2 * self.rad[ai].max() + skin, output_type="ndarray")
+            if len(pr):
+                d = np.linalg.norm(x[pr[:, 0]] - x[pr[:, 1]], axis=1)
+                ok = d < self.rad[ai][pr[:, 0]] + self.rad[ai][pr[:, 1]] + skin
+                for a, c in pr[ok]:
+                    gi, gj = int(ai[a]), int(ai[c])
+                    if gi > gj:
+                        gi, gj, a, c = gj, gi, c, a
+                    rows.append(self._row(gi, gj))
+                    ci.append(loc[gi])
+                    cj.append(loc[gj])
+        for f in range(6):
+            axf = f // 2
+            gap = x[:, axf] if f % 2 == 0 else self.L[axf] - x[:, axf]
+            for k in np.flatnonzero(gap < self.rad[ai] + skin):
+                rows.append(self._row(int(ai[k]), -1 - f))
+                ci.append(int(k))
+                cj.append(-1 - f)
+        return np.array(ci, np.int64), np.array(cj, np.int64), np.array(rows, np.int64)
+
+    def _dem(self, ai, t, H):
+        """Full-stiffness DEM of the grains ai over [t, t + H]; returns the grains in it at the end. Sleeping grains are
+        static obstacles: one joins (woken at its exact equilibrium, at rest; a cluster whole) as soon as a DEM grain
+        comes within 2 d_cap of it, before any contact can form. Between contact-list builds each DEM grain may move at
+        most min(half the skin, its clearance to the nearest sleeper - 2 d_cap), so none is missed. Records each
+        chunk's largest speed and each grain's largest distance from where it was when the step's regimes were set
+        (for the step's verification)."""
+        T0 = self.env.t0_flight + t
+        ai = np.asarray(ai, np.int64)
+        vrel = 2 * float(np.linalg.norm(self.v[ai], axis=1).max()) if len(ai) else 0.0
+        dt = min(self._dt_dem, self._hertz_dt(vrel))
+        n = max(1, int(math.ceil(H / dt)))
+        dt = H / n
+        skin = 0.5 * float(self.rad.min())
+        Ts_all = T0 + np.arange(1, n + 1) * dt
+        acc_all = self.loads.accel(Ts_all)
+        Om_all = self.loads.omega(Ts_all)
+        Omd_all = self.loads.omega_dot(Ts_all)
+        chk = self._chk
+        vmax2 = np.zeros(1)
+        done = 0
+        while done < n:
+            Tn = T0 + done * dt
+            ai, lim = self._watch(ai, Tn, skin)
+            chk["in_dem"][ai] = True
+            x = np.ascontiguousarray(self.x[ai])
+            v = np.ascontiguousarray(self.v[ai])
+            w = np.ascontiguousarray(self.w[ai])
+            m, I = self.m[ai], self.I[ai]
+            gdrag = self.gdrag[ai]
+            Fext = np.ascontiguousarray(self._F_lr[ai])
+            xs = np.ascontiguousarray(chk["x_seen"][ai])
+            dmax = chk["dmax"][ai].copy()
+            ci, cj, rows = self._candidates(ai, skin)
+            prm = np.ascontiguousarray(self._prm[rows])
+            hist = np.ascontiguousarray(self._hist[rows])
+            F = np.zeros_like(x)
+            Tq = np.zeros_like(x)
+            Fn = np.zeros(len(rows))
+            Tn1 = np.array([Tn])
+            dem.compute_forces(x, v, w, m, I, self.L, ci, cj, prm, hist, 0.0, self.loads.accel(Tn1)[0],
+                               self.loads.omega(Tn1)[0], self.loads.omega_dot(Tn1)[0], self.off, gdrag, F, Tq, Fn,
+                               Fext, Tn)
+            xb = x.copy()
+            kk = dem.run_steps(x, v, w, m, I, self.L, ci, cj, prm, hist, dt, n - done, acc_all[done:], Om_all[done:],
+                               Omd_all[done:], self.off, gdrag, F, Tq, xb, lim, Fn, Fext, Tn, xs, dmax, vmax2)
+            self._hist[rows] = hist
+            self.x[ai], self.v[ai], self.w[ai] = x, v, w
+            chk["dmax"][ai] = dmax
+            done += kk
+            self.n_events["dem_steps"] += kk
+            self.n_events["active_grain_steps"] += kk * len(ai)
+            if done < n:
+                self.n_events["rebuilds"] += 1
+        chk["vmax"].append((t, t + H, math.sqrt(float(vmax2[0]))))
+        return ai
+
+    def _watch(self, ai, T, skin):
+        """Sleepers within 2 d_cap of a DEM grain join it (repeated: a joined grain may be that close to another).
+        Returns the DEM set and each DEM grain's movement allowance until the next list build."""
+        d2 = 2 * self.d_cap
+        rmax = float(self.rad.max())
+        while True:
+            lim = np.full(len(ai), 0.5 * skin)
+            sl = np.flatnonzero(self.regime == ASLEEP)
+            if not len(sl):
+                return ai, lim
+            xs = self.x[sl]
+            c = getattr(self, "_sl_tree", None)        # sleepers do not move: reuse the tree while the set is the same
+            if c is None or not (np.array_equal(c[0], sl) and np.array_equal(c[1], xs)):
+                c = self._sl_tree = (sl, xs.copy(), cKDTree(xs))
+            tree = c[2]
+            join = set()
+            for q, lst in enumerate(tree.query_ball_point(self.x[ai], 2 * rmax + skin)):
+                if not lst:
+                    continue
+                jj = sl[np.array(lst, np.int64)]
+                gap = np.linalg.norm(self.x[jj] - self.x[ai[q]], axis=1) - self.rad[jj] - self.rad[ai[q]]
+                lim[q] = min(lim[q], float(gap.min()) - d2)
+                join.update(int(j) for j in jj[gap <= d2])
+            if not join:
+                return ai, np.maximum(lim, 0.0)
+            new = []
+            for j in sorted(join):
+                if self.regime[j] != ASLEEP:
+                    continue
+                if j in self._island_of:
+                    mem = [int(g) for g in self._islands[self._island_of[j]]["members"]]
+                    self._wake_island(self._island_of[j], T)
+                    new += mem
+                else:
+                    if j in self._sleep_face:
+                        self._wake(j, T)
+                    self.v[j] = 0.0
+                    self.w[j] = 0.0
+                    self.regime[j] = ACTIVE
+                    new.append(j)
+            self.n_events["dem_joins"] = self.n_events.get("dem_joins", 0) + len(new)
+            ai = np.union1d(ai, np.array(new, np.int64))
+
+    # ------------------------------------------------------------------ regime changes after a step
+    def _touching(self, mask=None):
+        """Contacts that touch, as (i, j) keys; with a grain mask, only those involving a masked grain."""
+        nr = len(self._ckeys)
+        kij = self._kij[:nr][self._hist[:nr, dem.H_TOUCH] > 0.5]
+        if mask is not None:
+            kij = kij[mask[kij[:, 0]] | ((kij[:, 1] >= 0) & mask[np.maximum(kij[:, 1], 0)])]
+        return [(int(a), int(b)) for a, b in kij.tolist()]
+
+    def _classify(self, t):
+        if self.all_dem:
+            return
+        T = self.env.t0_flight + t
+        Hn = self._outer_dt(t) if t < self.duration else 0.0
+        for k in np.flatnonzero(self.regime == ROLL):
+            f = self._roll_face[int(k)]
+            if self._try_sleep(int(k), f, T, Hn):
+                self._roll_face.pop(int(k), None)
+        ai = np.flatnonzero(self.regime == ACTIVE)
+        if not len(ai):
+            return
+        touch = self._touching(self.regime == ACTIVE)
+        nwall = np.zeros(self.N, int)
+        npair = np.zeros(self.N, int)
+        face_of = {}
+        for i, j in touch:
+            if j < 0:
+                nwall[i] += 1
+                face_of[i] = -1 - j
+            else:
+                npair[i] += 1
+                npair[j] += 1
+        H = self._outer_dt(t) if t < self.duration else 0.0
+        s = self._motion_bound(max(H, 1e-6), T)
+        gw = np.minimum(self.x - self.rad[:, None], self.L[None, :] - self.x - self.rad[:, None]).min(1)
+        tree = cKDTree(self.x)
+        # clusters of active grains joined by contacts: try to put each anchored one to sleep
+        parent = {int(k): int(k) for k in ai}
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+        for i, j in touch:
+            if j >= 0 and i in parent and j in parent:
+                parent[find(i)] = find(j)
+        groups = {}
+        for k in ai:
+            groups.setdefault(find(int(k)), []).append(int(k))
+        for mem in groups.values():
+            if len(mem) > 1 or nwall[mem[0]] > 1:
+                if any(nwall[k] > 0 for k in mem) and len(mem) <= self.max_island:
+                    self._try_sleep_island(np.array(sorted(mem)), touch, T, H)
+        for k in ai:
+            if self.regime[k] != ACTIVE:
+                continue
+            if nwall[k] == 0 and npair[k] == 0:
+                # free once clear of everything by the capture distance (the next step's capture time takes over)
+                d_cap = self.d_cap
+                if gw[k] <= d_cap:
+                    continue
+                nb = tree.query_ball_point(self.x[k], 2 * self.rad.max() + d_cap)
+                if all(j == k or np.linalg.norm(self.x[j] - self.x[k]) - self.rad[j] - self.rad[k] > d_cap
+                       for j in nb):
+                    self.regime[k] = FREE
+            elif nwall[k] == 1 and npair[k] == 0:
+                if not self._try_sleep(k, face_of[k], T, H) and self.use_roll:
+                    self._try_roll(k, face_of[k], T, H)
+
+    def _try_sleep(self, k, face, T, H):
+        """Sleep a grain on one wall if its residual motion cannot carry any contact load past its limit: with
+        E = kinetic energy + the energy of its deviation from static equilibrium, the largest extra spring force
+        sqrt(2 k_max E) must be below 1% of the smallest remaining margin."""
+        if H <= 0 or self.loads.fast_window(T, T + H) or self.loads.breakpoint_in(T - 1e-9, T + H):
+            return False
+        row = self._key[(int(k), -1 - face)]
+        p, h = self._prm[row], self._hist[row]
+        idx = np.array([k])
+        worst = 0.0
+        for Ts in (T, T + H):
+            F, Tq = self._body_force(idx, Ts)
+            ratio, _, Fn, _, _, _ = self._margins(idx, np.array([face]), F, Tq)
+            worst = max(worst, float(ratio[0]))
+        if worst > 1 - 5 * self.margin:
+            return False
+        Fc = p[dem.P_FC]
+        Fncrit = abs(float(Fn[0]) + 2 * Fc)
+        margin_force = (1 - worst) * min(p[dem.P_MUR], p[dem.P_MUT]) * Fncrit
+        # deviation from equilibrium: kinetic energy and the energy of the unbalanced static load
+        a = max(h[dem.H_A], 1e-12)
+        kn = 1.2 * p[dem.P_ESTAR] * a
+        kmax = max(kn, p[dem.P_KT] * a, p[dem.P_KR])
+        Ek = 0.5 * self.m[k] * float(self.v[k] @ self.v[k]) + 0.5 * self.I[k] * float(self.w[k] @ self.w[k])
+        F, Tq = self._body_force(idx, T)
+        # rest position at the current load vs actual: normal and tangential residuals via the springs
+        saved = (self.x[k].copy(), h.copy())
+        self._place_at_equilibrium(k, face, row, T, F, Tq)
+        x_eq, h_eq = self.x[k].copy(), h.copy()
+        self.x[k], h[:] = saved
+        dxn = float(np.abs(x_eq - self.x[k]).max())
+        dxt = float(np.abs(h_eq[dem.H_XT:dem.H_XT + 3] - h[dem.H_XT:dem.H_XT + 3]).max())
+        dxr = float(np.abs(h_eq[dem.H_XR:dem.H_XR + 3] - h[dem.H_XR:dem.H_XR + 3]).max())
+        Ep = 0.5 * kn * dxn ** 2 + 0.5 * p[dem.P_KT] * a * dxt ** 2 + 0.5 * p[dem.P_KR] * dxr ** 2
+        if math.sqrt(2 * kmax * (Ek + Ep)) > 0.01 * margin_force:
+            return False
+        # asleep: exact static equilibrium for the current load
+        self.x[k], h[:] = x_eq, h_eq
+        self.v[k] = 0.0
+        self.w[k] = 0.0
+        self.regime[k] = ASLEEP
+        self._sleep_face[k] = face
+        self.n_events["sleep"] += 1
+        return True
+
+    def _try_roll(self, k, face, T, H):
+        """Hand a grain on one wall to the slaved-rolling model if the energy in its stiff modes (normal motion,
+        slip at the contact, and the deviation of the normal and sliding springs from their quasi-static values) could
+        add at most 1% of the remaining pull-off or sliding margin to the contact force."""
+        row = self._key[(int(k), -1 - face)]
+        p, h = self._prm[row], self._hist[row]
+        n = self._wall_normal(face)
+        r = self.rad[k]
+        vn = float(self.v[k] @ n)
+        slip = self.v[k] - vn * n - r * np.cross(self.w[k], n)
+        a = max(h[dem.H_A], 1e-12)
+        kn = 1.2 * p[dem.P_ESTAR] * a
+        ks = p[dem.P_KT] * p[dem.P_A0]
+        F, Tq = self._body_force(np.array([k]), T)
+        Fne = -float(F[0] @ n)
+        Fc = h[dem.H_FCP] if h[dem.H_YLD] > 0.5 else p[dem.P_FC]
+        Fncrit = abs(Fne + 2 * Fc)
+        m_pull = Fne + Fc
+        m_slide = p[dem.P_MUT] * Fncrit - float(np.linalg.norm(F[0] - (F[0] @ n) * n))
+        if m_pull <= 0 or m_slide <= 0:
+            return False
+        a_eq = self._jkr_radius(p, Fne)
+        R, w, E = p[dem.P_REFF], p[dem.P_W], p[dem.P_ESTAR]
+        d_eq = a_eq * a_eq / R - math.sqrt(2 * math.pi * w * a_eq / E)
+        ax = face // 2
+        d_now = (self.rad[k] - self.x[k, ax]) if face % 2 == 0 else (self.x[k, ax] - (self.L[ax] - self.rad[k]))
+        Es = 0.5 * self.m[k] * (vn * vn + float(slip @ slip)) + 0.5 * kn * (d_now - d_eq) ** 2
+        if math.sqrt(2 * max(kn, ks) * Es) > 0.01 * min(m_pull, m_slide):
+            return False
+        # on the slow manifold: normal overlap at equilibrium, no slip
+        self.x[k, ax] = (self.rad[k] - d_eq) if face % 2 == 0 else (self.L[ax] - self.rad[k] + d_eq)
+        self.v[k] = r * np.cross(self.w[k], n)
+        h[dem.H_A] = a_eq
+        self._roll_face[k] = face
+        self.regime[k] = ROLL
+        self.n_events["roll_entries"] = self.n_events.get("roll_entries", 0) + 1
+        return True
+
+    def _jkr_radius(self, p, Fn):
+        R, w, E = p[dem.P_REFF], p[dem.P_W], p[dem.P_ESTAR]
+        a0 = p[dem.P_A0]
+        lo, hi = a0 / 4 ** (1 / 3), a0
+        while dem.jkr_force(hi, R, w, E) < Fn:
+            hi *= 1.5
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            if dem.jkr_force(mid, R, w, E) < Fn:
+                lo = mid
+            else:
+                hi = mid
+        return 0.5 * (lo + hi)
+
+    def _roll_dt(self, ri):
+        T = math.inf
+        for k in ri:
+            row = self._key[(int(k), -1 - self._roll_face[int(k)])]
+            p = self._prm[row]
+            r = self.rad[k]
+            Ic = self.I[k] + self.m[k] * r * r
+            T = min(T, 2 * math.pi * math.sqrt(Ic / (p[dem.P_KR] * r * r)), 2 * math.pi * math.sqrt(self.I[k] / p[dem.P_KTW]))
+        return T / self.n_ppp_roll
+
+    def _roll_step(self, ri, t, H, bv, ba, boff):
+        """Advance rolling grains over [t, t+H]; returns those that must be redone in the full model. bv, ba, boff:
+        the envelope other grains' capture times assumed for each (a grain whose path leaves it is reported to the
+        step's verification)."""
+        T0 = self.env.t0_flight + t
+        dt = self._roll_dt(ri)
+        n = max(1, int(math.ceil(H / dt)))
+        dt = H / n
+        Ts = T0 + np.arange(n + 1) * dt
+        acc, Om, Omd = self.loads.accel(Ts), self.loads.omega(Ts), self.loads.omega_dot(Ts)
+        faces = np.array([self._roll_face[int(k)] for k in ri], np.int64)
+        rows = np.array([self._key[(int(k), -1 - int(f))] for k, f in zip(ri, faces)], np.int64)
+        x0, v0, w0, h0 = self.x[ri].copy(), self.v[ri].copy(), self.w[ri].copy(), self._hist[rows].copy()
+        x, v, w = x0.copy(), v0.copy(), w0.copy()
+        hist = h0.copy()
+        flag = np.zeros(len(ri), np.int64)
+        exc = np.full(len(ri), -np.inf)
+        roll1.run(x, v, w, self.m[ri], self.I[ri], self.rad[ri], faces, np.ascontiguousarray(self._prm[rows]), hist,
+                  self.L, dt, n, acc, Om, Omd, self.off, self.gdrag[ri], np.ascontiguousarray(self._F_lr[ri]),
+                  self.margin, flag, np.ascontiguousarray(bv, dtype=float), np.ascontiguousarray(ba, dtype=float),
+                  np.ascontiguousarray(boff, dtype=float), exc)
+        ok = flag == 0
+        self.x[ri[ok]], self.v[ri[ok]], self.w[ri[ok]] = x[ok], v[ok], w[ok]
+        self._hist[rows[ok]] = hist[ok]
+        self.n_events["roll_grain_steps"] = self.n_events.get("roll_grain_steps", 0) + n * len(ri)
+        if hasattr(self, "_chk"):
+            self._chk["roll_bad"].update(int(k) for k in ri[exc > 0])
+        bad = ri[~ok]
+        for k in bad:
+            self._roll_face.pop(int(k), None)
+        return bad
+
+    # ------------------------------------------------------------------ sleeping clusters
+    def _island_system(self, mem, touch):
+        loc = {int(g): k for k, g in enumerate(mem)}
+        ci, cj, rows = [], [], []
+        for (i, j) in touch:
+            if i in loc and (j < 0 or j in loc):
+                ci.append(loc[i])
+                cj.append(j if j < 0 else loc[j])
+                rows.append(self._key[(i, j)])
+        return np.array(ci, np.int64), np.array(cj, np.int64), np.array(rows, np.int64)
+
+    def _island_load(self, mem, T):
+        F, Tq = self._body_force(mem, T)
+        return np.hstack([F, Tq]).reshape(-1)
+
+    def _island_ratio(self, isl, T):
+        dF = self._island_load(isl["members"], T) - isl["F_ref"]
+        du = isl["lu"].solve(dF)
+        lam = isl["lam"] + isl["J"] @ du
+        if "dl" in isl:                       # sleeping with a tracked residual motion: its largest effect included
+            return statics.margins_bounded(lam, isl["dl"], isl["prm"], isl["out"])
+        return statics.margins(lam, isl["prm"], isl["out"])
+
+    def _linres(self, mem, x, ci, cj, prm, hist, K, J, du, lam_eq, lam_end, out, T):
+        """The residual motion of a resting cluster about its equilibrium, as exact linear response (statics.
+        residual_modes): stiffness and dashpots from the kernel's own tangent, the rotating-frame and drag terms, the
+        masses. The cluster may sleep with it if every mode decays, the residual moves no grain by more than a tenth
+        of the capture distance (so no approach can be missed), and every contact keeps 5x the sleep margin even with the largest the residual can add (for all later
+        times); the residual is then added back exactly when the cluster wakes. None if not."""
+        if len(mem) > LINRES_MAX:
+            return None
+        n = 6 * len(mem)
+        C, Jv = statics.jacobians(x, self.rad[mem], ci, cj, prm, hist, self.L, vel=True)
+        Om = self.loads.omega(np.array([T]))[0]
+        W = np.array([[0.0, -Om[2], Om[1]], [Om[2], 0.0, -Om[0]], [-Om[1], Om[0], 0.0]])      # W v = Om x v
+        Md = np.empty(n)
+        G = np.zeros((n, n))
+        for q, g in enumerate(mem):
+            Md[6 * q:6 * q + 3] = self.m[g]
+            Md[6 * q + 3:6 * q + 6] = self.I[g]
+            G[6 * q:6 * q + 3, 6 * q:6 * q + 3] = 2 * self.m[g] * W + self.m[g] * self.gdrag[g] * np.eye(3)
+            G[6 * q + 3:6 * q + 6, 6 * q + 3:6 * q + 6] = self.I[g] * W
+        v0 = np.hstack([self.v[mem], self.w[mem]]).reshape(-1)
+        lam, V, c, err = statics.residual_modes(K, C, Md, G, -du, v0)
+        if err > 1e-6 or not (lam.real < 0).all():
+            return None
+        dl, ub = statics.residual_bound(V, c, J, Jv)
+        if float(np.linalg.norm(ub.reshape(-1, 6)[:, :3], axis=1).max()) > 0.1 * self.d_cap:
+            return None
+        worst = np.maximum(statics.margins_bounded(lam_eq, dl, prm, out),
+                           statics.margins_bounded(lam_end, dl, prm, out))
+        if not np.isfinite(worst).all() or (worst > 1 - 5 * self.margin).any():
+            return None
+        self.n_events["linres_sleep"] = self.n_events.get("linres_sleep", 0) + 1
+        return dict(lam=lam, V=V, c=c, T=T, dl=dl)
+
+    def _try_sleep_island(self, mem, touch, T, H):
+        """Sleep an anchored cluster if (i) no fast load or breakpoint is in the next step, (ii) at its exact static
+        equilibrium every contact keeps 5x the sleep margin to its limits for the loads over the next step, and
+        (iii) its residual motion (kinetic energy + elastic energy of its deviation from equilibrium) could add at
+        most 1% of the smallest margin to any contact force."""
+        if H <= 0 or self.loads.fast_window(T, T + H) or self.loads.breakpoint_in(T - 1e-9, T + H):
+            return False
+        from scipy.sparse.linalg import splu
+        res = None
+        ci, cj, rows = self._island_system(mem, touch)
+        if not len(rows):
+            return False
+        x = np.ascontiguousarray(self.x[mem])
+        prm = np.ascontiguousarray(self._prm[rows])
+        hist = np.ascontiguousarray(self._hist[rows])
+        K, J = statics.jacobians(x, self.rad[mem], ci, cj, prm, hist, self.L)
+        try:
+            lu = splu(K)
+        except RuntimeError:
+            return False
+        lam, Fnet, out = statics.state(x, ci, cj, prm, hist, self.L)
+        Fext = self._island_load(mem, T)
+        du = lu.solve(Fext + Fnet)
+        lam_eq = lam + J @ du
+        ratio = statics.margins(lam_eq, prm, out)
+        ratio_end = statics.margins(lam_eq + J @ lu.solve(self._island_load(mem, T + H) - Fext), prm, out)
+        rr = np.maximum(ratio, ratio_end)
+        if not np.isfinite(rr).all() or float(rr.max()) > 1 - 5 * self.margin:
+            return False
+        Ek = 0.5 * float((self.m[mem] * (self.v[mem] ** 2).sum(1)).sum()
+                         + (self.I[mem] * (self.w[mem] ** 2).sum(1)).sum())
+        Ep = 0.5 * float(du @ (K @ du))
+        kmax = float(np.abs(K.diagonal()[0::6]).max())
+        L8 = lam_eq.reshape(-1, 8)
+        Fncrit = np.abs(L8[:, 0] + 2 * out[:, 19])
+        mf = float(((1 - rr) * np.minimum(prm[:, dem.P_MUT], prm[:, dem.P_MUR]) * Fncrit).min())
+        if math.sqrt(2 * kmax * max(Ek + Ep, 0.0)) > 0.01 * mf:
+            # the quick bound (stiffest spring times all the energy) fails: use the exact one, the most each contact
+            # quantity can deviate inside the residual motion's energy ellipsoid; every contact's worst-case load
+            # ratio must stay within 1% of its margin of the equilibrium value
+            dl = statics.energy_bounds(K, J, max(Ek + Ep, 0.0))
+            lam_end = lam_eq + J @ lu.solve(self._island_load(mem, T + H) - Fext)
+            ok = dl is not None
+            if ok:
+                worst = np.maximum(statics.margins_bounded(lam_eq, dl, prm, out),
+                                   statics.margins_bounded(lam_end, dl, prm, out))
+                ok = np.isfinite(worst).all() and not ((worst - rr) > 0.01 * (1 - rr)).any()
+            if not ok:
+                # still moving too much to drop the motion: sleep with it tracked exactly (linear response)
+                res = self._linres(mem, x, ci, cj, prm, hist, K, J, du, lam_eq, lam_end, out, T)
+                if res is None:
+                    return False
+        dU = du.reshape(-1, 6)
+        xn, hn = statics.apply_displacement(x, ci, cj, prm, hist, self.L, dU)
+        self.x[mem] = xn
+        self._hist[rows] = hn
+        self.v[mem] = 0.0
+        self.w[mem] = 0.0
+        # reference state for the certificate: the equilibrium just reached
+        K, J = statics.jacobians(xn, self.rad[mem], ci, cj, prm, hn, self.L)
+        lam, Fnet, out = statics.state(xn, ci, cj, prm, hn, self.L)
+        iid = self._next_island
+        self._next_island += 1
+        self._islands[iid] = dict(members=mem, ci=ci, cj=cj, rows=rows, prm=prm, out=out, lam=lam, J=J,
+                                  lu=splu(K), F_ref=self._island_load(mem, T), T_ref=T)
+        if res is not None:
+            self._islands[iid]["res"] = res
+            self._islands[iid]["dl"] = res["dl"]
+        for k in mem:
+            self._island_of[int(k)] = iid
+        self.regime[mem] = ASLEEP
+        self.n_events["sleep"] += len(mem)
+        self.n_events["cluster_sleep"] = self.n_events.get("cluster_sleep", 0) + 1
+        return True
+
+    def _wake_island(self, iid, T):
+        """Wake a sleeping cluster: move it to the exact static equilibrium of the current load (linear response
+        from the reference state; positions and spring histories), at rest."""
+        isl = self._islands.pop(iid)
+        mem = isl["members"]
+        du = isl["lu"].solve(self._island_load(mem, T) - isl["F_ref"]).reshape(-1, 6)
+        vr = np.zeros((len(mem), 6))
+        if "res" in isl:                      # the residual motion, evolved exactly since the cluster fell asleep
+            r = isl["res"]
+            ur, vrf = statics.residual_state(r["lam"], r["V"], r["c"], T - r["T"])
+            du = du + ur.reshape(-1, 6)
+            vr = vrf.reshape(-1, 6)
+        x = np.ascontiguousarray(self.x[mem])
+        hist = np.ascontiguousarray(self._hist[isl["rows"]])
+        xn, hn = statics.apply_displacement(x, isl["ci"], isl["cj"], isl["prm"], hist, self.L, du)
+        self.x[mem] = xn
+        self._hist[isl["rows"]] = hn
+        self.v[mem] = vr[:, :3]
+        self.w[mem] = vr[:, 3:]
+        for k in mem:
+            self._island_of.pop(int(k), None)
+        self.regime[mem] = ACTIVE
+        self.n_events["wake"] += len(mem)
+
+    # ------------------------------------------------------------------ impact and detachment records
+    def _log_events(self, t):
+        nrow = len(self._ckeys)
+        h = self._hist[:nrow]
+        T0 = self.env.t0_flight
+        newf = np.flatnonzero(h[:, dem.H_NFORM] > self._seen_form[:nrow])
+        for r in newf:
+            i, j = self._ckeys[r]
+            hr = h[r]
+            rec = dict(t=float(hr[dem.H_TFORM]) - T0, kind="wall" if j < 0 else "pp", i=i, j=j,
+                       mat_i=self.mats[self.mat[i]].name,
+                       mat_j=self.wall_mat.name if j < 0 else self.mats[self.mat[j]].name,
+                       n_i=1, n_j=0 if j < 0 else 1, frozen_i=False, frozen_j=j < 0, post_fragment=False,
+                       v_n=float(hr[dem.H_VIN]), v_t=float(hr[dem.H_VTIN]),
+                       v_rel=float(math.hypot(hr[dem.H_VIN], hr[dem.H_VTIN])), outcome="pending", e_n=0.0,
+                       r_sum=float(self.rad[i] + (self.rad[j] if j >= 0 else 0.0)),
+                       x=float(self.x[i, 0]), y=float(self.x[i, 1]), z=float(self.x[i, 2]),
+                       n_x=0.0, n_y=0.0, n_z=0.0, vrel_x=0.0, vrel_y=0.0, vrel_z=0.0,
+                       vcm_x=0.0, vcm_y=0.0, vcm_z=0.0, multiple=int(hr[dem.H_NFORM] - self._seen_form[r]) > 1)
+            n_i, wall_i = self._cluster_before(i, j)
+            rec["n_i"], rec["frozen_i"] = n_i, wall_i
+            if j >= 0:
+                d = self.x[i] - self.x[j]
+                nv = d / np.linalg.norm(d)
+                rec.update(n_x=float(nv[0]), n_y=float(nv[1]), n_z=float(nv[2]))
+                rec["n_j"], rec["frozen_j"] = self._cluster_before(j, i)
+            self.collisions.append(rec)
+            self._pending[r] = rec
+            self._seen_form[r] = hr[dem.H_NFORM]
+            if self.base.charging:
+                self.base.q = self.base.q
+                self.base._charge(i, None if j < 0 else j, float(hr[dem.H_AMAX]))
+        newb = np.flatnonzero(h[:, dem.H_NBREAK] > self._seen_break[:nrow])
+        for r in newb:
+            i, j = self._ckeys[r]
+            rec = self._pending.pop(r, None)
+            if rec is not None and rec["outcome"] == "pending":
+                rec["outcome"] = "bounce"
+                rec["e_n"] = float(abs(h[r, dem.H_VOUT]) / max(rec["v_n"], 1e-12))
+                self.n_events["wall_bounce" if j < 0 else "bounce"] += 1
+            elif j < 0:
+                # a wall contact that had held: the grain was pulled or knocked off the wall
+                self._ever_freed.add(int(i))
+                self.n_events["detach"] += 1
+                self.detach_log.append(dict(t=float(h[r, dem.H_TBREAK]), grain=int(i), n=1, how="contact",
+                                            v=float(np.linalg.norm(self.v[i]))))
+            self._seen_break[r] = h[r, dem.H_NBREAK]
+        for r, rec in list(self._pending.items()):
+            if t - rec["t"] >= STICK_HOLD_S and h[r, dem.H_TOUCH] > 0.5:
+                rec["outcome"] = "stick"
+                self.n_events["wall_stick" if rec["kind"] == "wall" else "stick"] += 1
+                del self._pending[r]
+
+    def _cluster_before(self, i, j):
+        """Size of grain i's cluster and whether it touches a wall, not counting the new contact with j."""
+        adj = {}
+        wall = set()
+        for a, c in self._touching():
+            if c < 0:
+                if (a, c) != (i, j):
+                    wall.add(a)
+            elif {a, c} != {i, j}:
+                adj.setdefault(a, []).append(c)
+                adj.setdefault(c, []).append(a)
+        seen, todo = {i}, [i]
+        while todo:
+            k = todo.pop()
+            for q in adj.get(k, ()):
+                if q not in seen:
+                    seen.add(q)
+                    todo.append(q)
+        return len(seen), bool(seen & wall)
+
+    # ------------------------------------------------------------------ outputs compatible with simulation.py
+    @property
+    def body(self):
+        return np.arange(self.N)
+
+    @property
+    def out_dt(self):
+        return self.base.out_dt
+
+    @property
+    def nmono(self):
+        """Grains per cluster, indexed by cluster id (a cluster's id is one of its grains), as in simulation.py."""
+        return np.bincount(self.clusters(), minlength=self.N)
+
+    @property
+    def alive(self):
+        return self.nmono > 0
+
+    def _wall_contacts(self):
+        face = np.full(self.N, -1)
+        for i, j in self._touching():
+            if j < 0:
+                face[i] = -1 - j
+        return face
+
+    @property
+    def frozen(self):
+        return self._wall_contacts() >= 0
+
+    @property
+    def fw_ax(self):
+        f = self._wall_contacts()
+        return np.where(f >= 0, f // 2, -1)
+
+    @property
+    def fw_side(self):
+        f = self._wall_contacts()
+        return np.where(f >= 0, np.where(f % 2 == 0, -1.0, 1.0), 0.0)
+
+    def clusters(self):
+        parent = list(range(self.N))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+        for i, j in self._touching():
+            if j >= 0:
+                parent[find(i)] = find(j)
+        return np.array([find(k) for k in range(self.N)])
+
+    def _record(self, t):
+        cl = self.clusters()
+        wall = self.frozen
+        self.frame_t.append(t)
+        self.frames.append(self.x.astype(np.float32).copy())
+        self.frame_bodies.append(cl.astype(np.int32))
+        self.frame_frozen.append(wall.copy())
+        self.frame_spin.append((np.linalg.norm(self.w, axis=1) / (2 * math.pi)).astype(np.float32))
+        free = ~wall
+        sizes = np.bincount(cl)
+        sizes = sizes[sizes > 0]
+        sp = np.linalg.norm(self.v[free], axis=1)
+        self.timeseries.append(dict(
+            t=t, free_bodies=int(len(set(cl[free]))), free_monomers=int(free.sum()), wall_monomers=int(wall.sum()),
+            mean_aggregate_size=float(sizes.mean()), max_aggregate_size=int(sizes.max()),
+            mean_speed=float(sp.mean()) if len(sp) else 0.0,
+            mean_spin_hz=float(self.frame_spin[-1][free].mean()) if free.any() else 0.0,
+            max_spin_hz=float(self.frame_spin[-1][free].max()) if free.any() else 0.0,
+            kinetic_energy=float(0.5 * (self.m[free] * sp ** 2).sum()),
+            asleep=int((self.regime == ASLEEP).sum()), active=int((self.regime == ACTIVE).sum()),
+            free_flight=int((self.regime == FREE).sum()), **{k: v for k, v in self.n_events.items()},
+            mean_abs_charge_e=float(np.abs(self.base.q).mean() / 1.602176634e-19),
+            net_charge_e=float(self.base.q.sum() / 1.602176634e-19)))
+
+    def run(self, progress=True, callback=None, callback_interval_s=0.5):
+        self.base._build_neighbors()
+        t = self.t
+        next_out = 0.0 if self._next_out is None else self._next_out
+        out_dt = self.base.out_dt
+        cps = sorted(c - self.env.t0_flight for c in self.checkpoints if c - self.env.t0_flight > t + 1e-9)
+        t0 = last = last_cb = time.time()
+        while t < self.duration - 1e-12:
+            if t >= next_out - 1e-12:
+                self._record(t)
+                next_out += out_dt
+            while cps and t >= cps[0] - 1e-9:
+                self._next_out = next_out
+                self.save_checkpoint()
+                cps.pop(0)
+            t_cap = min(next_out, cps[0]) if cps else next_out
+            if not ((self.regime == FREE) | (self.regime == ACTIVE) | (self.regime == ROLL)).any():
+                t_new = self._skip_asleep(t, t_cap)
+                if t_new > t + 1e-12:
+                    self.n_events["skipped_s"] = self.n_events.get("skipped_s", 0.0) + (t_new - t)
+                    t = t_new
+                    self.t = t
+                    continue
+            H = self._outer_dt(t)
+            if cps and t + H > cps[0]:
+                H = cps[0] - t
+            self.step(t, H)
+            t += H
+            if callback is not None and time.time() - last_cb > callback_interval_s:
+                last_cb = time.time()
+                callback(t, self.duration, dict(self.n_events))
+            if progress and time.time() - last > 5.0:
+                last = time.time()
+                print(f"  [{self.name}] T+{self.env.t0_flight + t:8.3f} s  active {int((self.regime == ACTIVE).sum())}"
+                      f" rolling {int((self.regime == ROLL).sum())} free {int((self.regime == FREE).sum())} "
+                      f"asleep {int((self.regime == ASLEEP).sum())}  "
+                      f"impacts {len(self.collisions)}  ({time.time() - t0:.0f} s)", flush=True)
+        for rec in self._pending.values():
+            if rec["outcome"] == "pending":
+                rec["outcome"] = "stick" if self.t - rec["t"] >= 0 else "pending"
+        self._record(t)
+        self.wall_time = time.time() - t0
+        return self
+
+
+# ---------------------------------------------------------------------------- checkpoints and branches
+def state_signature(obj, pre="", out=None, depth=0, seen=None):
+    """A hash of every attribute of a simulation (recursively into its sub-objects): two runs built from the same
+    inputs have the same signature, so the attributes in which two scenarios differ can be listed exactly."""
+    out = {} if out is None else out
+    seen = set() if seen is None else seen
+    if id(obj) in seen or depth > 4:
+        return out
+    seen.add(id(obj))
+    for k, v in sorted(vars(obj).items()):
+        if k == "_init_sig":
+            continue
+        key = pre + k
+        if isinstance(v, np.ndarray):
+            out[key] = hashlib.md5(v.tobytes() + str(v.shape).encode() + str(v.dtype).encode()).hexdigest()
+        elif isinstance(v, (int, float, str, bool, type(None), tuple)):
+            out[key] = repr(v)
+        elif isinstance(v, (dict, list, set)):
+            out[key] = hashlib.md5(repr(_stable(v)).encode()).hexdigest()
+        elif isinstance(v, np.random.Generator):
+            out[key] = repr(v.bit_generator.state)
+        elif hasattr(v, "__dict__") and not callable(v):
+            state_signature(v, key + ".", out, depth + 1, seen)
+        else:
+            out[key] = type(v).__name__
+    return out
+
+
+def _stable(v, depth=0):
+    """A representation of v that is the same for two equal objects built separately (no memory addresses)."""
+    if depth > 6:
+        return type(v).__name__
+    if isinstance(v, np.ndarray):
+        return hashlib.md5(v.tobytes() + str(v.shape).encode() + str(v.dtype).encode()).hexdigest()
+    if isinstance(v, dict):
+        return sorted(((repr(k), _stable(x, depth + 1)) for k, x in v.items()), key=lambda kv: kv[0])
+    if isinstance(v, set):
+        return sorted(repr(_stable(x, depth + 1)) for x in v)
+    if isinstance(v, (list, tuple)):
+        return [_stable(x, depth + 1) for x in v]
+    if isinstance(v, (int, float, str, bool, type(None), np.generic)):
+        return repr(v)
+    if hasattr(v, "__dict__") and not callable(v):
+        return (type(v).__name__, _stable(vars(v), depth + 1))
+    return type(v).__name__
+
+
+def _allowed(key):
+    return any(key == a or key.startswith(a + ".") or (a.endswith(".") and key.startswith(a)) for a in BRANCH_ALLOWED)
+
+
+def branch(path, target: "FullContactSim") -> "FullContactSim":
+    """Continue the run saved at `path` under the scenario of `target` (a freshly built simulation of the same tubule).
+    Exact, and refused otherwise: (1) a fresh run of the target scenario may differ from a fresh run of the saved one
+    only in BRANCH_ALLOWED (release schedule, flight-profile options, the configs that carry them); (2) every load
+    (apparent acceleration, spin and its rate, releases, vibration) is identical up to the checkpoint, sampled every
+    millisecond and at every breakpoint of either run, and so are the breakpoints and fast windows. The saved run then
+    takes the target's release schedule and flight profile and continues."""
+    with open(path, "rb") as f:
+        C = pickle.load(f)
+    diff = sorted(k for k in set(C._init_sig) | set(target._init_sig) if C._init_sig.get(k) != target._init_sig.get(k))
+    bad = [k for k in diff if not _allowed(k)]
+    if bad or C.name != target.name:
+        raise ValueError(f"cannot branch {path.name}: the scenarios differ in {bad or ['tubule']}")
+    T0 = float(C.env.t0_flight)
+    Tc = T0 + C.t
+    bps = [b for b in np.concatenate([C.loads.breakpoints, target.loads.breakpoints]) if T0 <= b <= Tc]
+    Ts = np.unique(np.concatenate([np.arange(T0, Tc, 1e-3), bps, [Tc]]))
+    for f in ("accel", "omega", "omega_dot", "release_accel", "vibration_accel"):
+        a, b = getattr(C.loads, f)(Ts), getattr(target.loads, f)(Ts)
+        if a.shape != b.shape or not np.array_equal(a, b):
+            raise ValueError(f"cannot branch {path.name}: '{f}' differs before T+{Tc:g} s "
+                             f"(largest difference {np.abs(a - b).max():.3g})")
+    if not np.array_equal(C.loads.breakpoints[C.loads.breakpoints <= Tc],
+                          target.loads.breakpoints[target.loads.breakpoints <= Tc]):
+        raise ValueError(f"cannot branch {path.name}: load breakpoints differ before T+{Tc:g} s")
+    if C.loads.fast_window(T0, Tc) != target.loads.fast_window(T0, Tc):
+        raise ValueError(f"cannot branch {path.name}: fast loads differ before T+{Tc:g} s")
+    for t in Ts[::20]:
+        if not np.array_equal(C.env.profile.apparent_accel(t), target.env.profile.apparent_accel(t)):
+            raise ValueError(f"cannot branch {path.name}: the flight profile differs before T+{Tc:g} s")
+    # take over the target's scenario-dependent parts (the saved environment keeps its own state and random stream)
+    C.cfg, C.chamber = target.cfg, target.chamber
+    C.base.cfg, C.base.chamber, C.base.release = target.base.cfg, target.base.chamber, target.base.release
+    C.env.cfg, C.env.profile = target.env.cfg, target.env.profile
+    C.loads = target.loads
+    C.loads.env, C.loads.prof = C.env, C.env.profile
+    C._init_sig = target._init_sig
+    C.checkpoints, C.checkpoint_dir = list(target.checkpoints), target.checkpoint_dir
+    C.n_events["branched_at_T"] = round(Tc, 3)
+    C.n_events["branched_from"] = str(path.name)
+    C.n_events["branch_differences"] = diff
+    return C
+

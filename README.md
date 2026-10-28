@@ -12,25 +12,28 @@ on one deck, from lift-off through both motor burns, spin, de-spin, the
 microgravity window, re-entry and the parachute to splashdown, on one clock (see
 [Mission runs](#mission-runs-the-whole-flight-in-one-sweep)).
 
-It was written from scratch for DOLL-E. It combines an event-driven granular
-N-body engine with a time-resolved solver for adhesive micro-contacts:
+It was written from scratch for DOLL-E and has two engines:
 
-* **Flight scale (minutes):** every grain and aggregate is a rigid body moving
-  under the external forces. The integrator is velocity Verlet: gas drag and
-  Coriolis force are integrated exactly as a damped rotation of the velocity,
-  and the other forces are re-evaluated at the end of every step (the
-  long-range space-charge mesh is re-solved every 25 steps). Aggregates rotate
-  with the symplectic Dullweber–Leimkuhler–McLachlan splitting, which conserves
-  angular momentum and keeps the energy error bounded (~1e-4, no drift).
-* **Impact scale (~1 µs):** contacts are found by continuous collision
-  detection. Impacts are processed in time order, and the bodies an impact
-  changes are re-predicted before the next one, so follow-on collisions are
-  not skipped. Each contact is resolved by integrating the JKR + damping +
-  plasticity contact law with nanosecond steps; stick, bounce, restitution and
-  contact charging come out of that integration, not from a lookup table.
-  Aggregates fragment according to the Dominik & Tielens (1997) energy
-  thresholds. The bounce impulse uses the full 3×3 collision matrix of the two
-  rigid bodies, inside a Coulomb friction cone.
+* **The full-contact engine (v0.6; every mission run).** Every grain is a sphere with six degrees of freedom and
+  every grain–grain and grain–wall contact is resolved with the full adhesive contact law at full stiffness:
+  JKR normal force with hysteresis, damping and plastic flattening, plus sliding, rolling and twisting springs
+  with their limits (Wada et al. 2007; Dominik & Tielens 1995, 1997), written in the form of the LAMMPS GRANULAR
+  package and identical to it term by term (differences ≤ 2.2×10⁻⁶ in 7 set-ups). There are no rigid
+  aggregates, no fragmentation rules and no frozen wall grains: stuck grains are ordinary contacts that can
+  roll, slide, twist and break. A full-stiffness run of the whole flight would take ~10⁴ core-days, so the
+  engine uses the full model wherever something can happen and **exact or verified** treatments elsewhere:
+  exact free flight up to the earliest time a grain could come within 0.1 µm of anything; resting grains and
+  wall-anchored clusters held static while a certificate shows every contact stays inside its elastic limits;
+  grains rolling on one wall on a slaved model that matches the full one to 2×10⁻⁵; clusters that are still rocking sleep with that residual motion kept as exact linear response and added back when they wake. **Every step is checked
+  after it is taken** and redone in the full model if any assumption one grain's treatment made about another
+  failed. See [All checks and criteria](#all-checks-and-criteria).
+* **The event-driven engine (v0.5; long free-flying cloud runs, `run`, and the browser app).** Grains and rigid
+  aggregates fly under the external forces in millisecond steps (velocity Verlet with exact drag and Coriolis;
+  Dullweber–Leimkuhler–McLachlan rotation). Impacts are found by continuous collision detection, processed in
+  time order, and each is resolved by integrating the same JKR + damping + plasticity law in nanosecond steps;
+  stuck grains form rigid aggregates, which fragment by the Dominik & Tielens (1997) energy thresholds. This
+  is what makes 15-minute runs of thousands of free-flying grains cheap; its two approximations (rigid
+  aggregates, fragmentation rules) are the ones the full-contact engine removes.
 
 ## Where everything comes from
 
@@ -47,9 +50,11 @@ N-body engine with a time-resolved solver for adhesive micro-contacts:
   REBOUND also uses (second-order leapfrog / velocity Verlet, direct-sum
   gravity), and our collision detection is related to its "line" mode, all
   written independently.
-* LAMMPS, a widely used open-source particle code, is used in one optional
-  file, `dolle_sim/lammps_check.py`, to compare our JKR contact with LAMMPS's
-  own implementation (see [Validation](#validation)).
+* LAMMPS, a widely used open-source particle code, is used in two optional
+  files: `dolle_sim/lammps_check.py` compares our 1-D JKR contact with LAMMPS's
+  own implementation, and `tools/lammps_contact_check.py` runs the full-contact
+  engine's 3-D contact law (normal, sliding, rolling, twisting, walls) side by
+  side with LAMMPS (see [All checks and criteria](#all-checks-and-criteria)).
 * The physics comes from published contact-mechanics and aerosol papers,
   textbook mechanics and electrostatics, and some derivations and choices of
   our own. **[PROVENANCE.md](PROVENANCE.md)** lists every component with its
@@ -99,11 +104,12 @@ lasts about a microsecond and must be followed in ~10 ns steps, but the flight l
   Free-molecular drag can be scripted with its variables but would need validating. A plugin could replace the
   integrator, but every existing granular pair style and fix assumes the one global step.
 
-So DOLL-E is event-driven: grains fly freely in millisecond steps, and each impact is integrated on its own at
-nanosecond resolution. The price is two approximations that a soft-sphere code avoids: stuck grains form
-rigid aggregates, and fragmentation uses the Dominik & Tielens (1997) thresholds. LAMMPS is the right
-independent referee for the contact model, which is how we use it (`lammps-check`). It could also referee the
-few seconds after a release at full stiffness, which costs about 1–4 hours per tubule-second.
+So DOLL-E does not move every grain with one global step. The full-contact engine (v0.6) runs LAMMPS's own
+contact law at full stiffness, but only on the grains that can interact at that moment; everything else is
+either flying exactly, resting under a certificate, or rolling on a slaved model, and each step is verified
+afterwards. The event-driven engine (v0.5) is cheaper still for free-flying clouds, at the price of rigid
+aggregates and fragmentation rules. LAMMPS is the independent referee of the contact law
+(`tools/lammps_contact_check.py`, `lammps-check`).
 
 ## Use it online
 
@@ -152,9 +158,12 @@ python -m dolle_sim mission configs/mission_quarter_deck.json --jobs 4       # w
 python -m dolle_sim sizes --d10 80e-6 --d50 95e-6 --d90 114e-6 --weighting volume   # supplier percentiles -> number distribution
 python -m dolle_sim sizes --image micrograph.png --um-per-px 1.25                 # measure grain sizes from a photo
 python -m dolle_sim materials                                           # material database
-python -m dolle_sim verify                                              # 26-check physics verification suite
+python -m dolle_sim verify                                              # 37 checks: 26 model + 11 full-contact engine
 python -m dolle_sim sources                                             # where every component comes from
-python -m pytest -q                                                     # all tests (includes the verification suite)
+python -m pytest -q                                                     # all tests (includes both verification suites)
+python tools/lammps_contact_check.py                                     # 3-D contact law vs LAMMPS, 7 set-ups (pip install lammps)
+python tools/checks_table.py                                             # CHECKS.md: every check, criterion and measured value
+python tools/run_campaign.py                                             # every mission scenario, launch to splashdown
 ```
 
 `run` writes to `results/<name>/`:
@@ -226,9 +235,15 @@ splashdown pulls the dust off the bottom only if the payload hangs nose down, as
 4. **Bare glass walls recapture the grains within seconds** (wall sticking speed ~8 mm/s for silica on clean
    glass), which limits the observing time after each release. This is why the earlier example configs
    assume an anti-stick coating and vibrating walls.
-5. **Not modelled: rolling.** Grains are held in place on the wall, but the sideways spin load (~7–10 g for the
-   example layout, up to ~14 g at the deck edge) may roll them across the bottom toward the outer wall. Rolling resistance of 100 µm grains is not well known; an
-   estimate from Heim et al. (1999) puts the onset at ~0.1–1 g. Treat the dust layout at release as uncertain.
+5. **Rolling (modelled from v0.6).** The sideways spin load (~7–10 g for the example layout, up to ~14 g at the
+   deck edge) is above the rolling threshold of most grains (~1.3 g for 100 µm silica on clean glass with the
+   nominal rolling hysteresis; uncertain by ~50×, see PROVENANCE.md), so the full-contact engine rolls them across
+   the bottom toward the outer wall, where they collide and pile up. Treat the dust layout at release as uncertain
+   until the rolling resistance of the real powder is measured.
+
+Scenarios that share the same flight up to some time continue from a checkpoint of one run instead of repeating it (`--checkpoint-at`, `--resume-from`; `tools/run_campaign.py` sets them up). The branch is verified to be exact: the two scenarios must differ only in the release schedule or flight-profile options and have identical loads up to the checkpoint, and a branched run is bit-for-bit the run from lift-off (tested); otherwise it runs from lift-off.
+
+> **Status (v0.6):** the scenario table below is still from the v0.5 engine (rigid aggregates; wall grains held in place until pulled off, so no rolling or sliding along the walls). The full-contact re-runs of every scenario, launch to splashdown, are in progress and replace it scenario by scenario. The three weakly-bound-dust scenarios (`rough_grains` and its two variants) use 100 grains per tubule instead of 800: that dust rolls from lift-off, every pair of rollers that sticks is a rolling cluster only the full model can integrate, and with 800 grains ~150 grains are in the full model at once (~4 hours of computing per second of flight on a laptop).
 
 The full simulations (`--scenario NAME`; combine with `+`, e.g. `kick+lying`; results go to
 `results/mission/<scenario>/`) follow every grain of all four tubules from lift-off to splashdown. Each cell
@@ -276,7 +291,10 @@ Reading the table (800 grains per tubule, example materials; run times 3 min to 
   release has to be gentler (higher frequency, or a peak just above the thresholds), or the grains slowed
   after release.
 
-**Random vibration** is not in the time-resolved run. The launch-load report estimates it for the flight
+**Random vibration** is in the time-resolved run only in the `launch_vibration` scenario (v0.6): the guide's
+test spectra (thrust 0.051 g²/Hz, lateral 0.029 g²/Hz, 20–2000 Hz) synthesised as Gaussian deck accelerations on
+all three axes through both burns, an upper bound because no measured flight spectrum is public. The
+launch-load report also estimates it for the flight
 (lift-off to burnout) and for the ground vibration test (20 s at 10 Grms on the thrust axis, 20–2000 Hz, the
 guide's level; Rice's up-crossing rate for a Gaussian, with the thrust not counted as holding the dust down).
 For the clean and silanised glass of the examples it is 0.0% (90% of the thresholds are above ~500 g). For weakly bound dust (`rough_grains`) the **ground
@@ -323,6 +341,22 @@ Every row is detailed, with sources and limits, in [PROVENANCE.md](PROVENANCE.md
 | Contact (tribo-)charging | condenser model driven by work-function difference, **saturating** at grain potential ≈ Δφ. The effective work functions of insulators are assumed; same-material charging is not modelled |
 
 ### Contacts and collisions
+
+**Full-contact engine (mission runs, v0.6).** Every contact, grain–grain and grain–wall, is integrated at full
+stiffness with velocity Verlet at 1/50 of the fastest contact period (shorter inside fast impacts); contact
+making and breaking are located inside the step.
+
+| effect | model |
+|---|---|
+| Normal | JKR with hysteresis (forms at δ = 0, breaks at the end of the stable branch), Tsuji-type damping with the JKR radius, Thornton–Ning plastic flattening (as below) |
+| Sliding | spring k_s = 8G*a0 on the tangential displacement (Wada et al. 2007), slips at μ(F_ne + 2F_c); μ measured for silica on glass (0.4), silica on silica (0.6) and graphite on graphite (0.5); graphite on glass assumed (0.5) |
+| Rolling | spring k_r = 4F_c/R, limit ξ_crit = h·a0/12 (Dominik & Tielens 1995; Krijt et al. 2014; h = 0.5 assumed, uncertain ~50×); a 100 µm silica grain on clean glass starts to roll at ~1.3 g sideways |
+| Twisting | spring (16/3)G·a0³, limit G·a0³/(3π) at zero load (Wada et al. 2007) |
+| Aggregates | none as such: stuck grains are ordinary contacts that roll, slide, twist and break under the same law |
+| Walls | the same law with the wall material; the tubule is rigid, so wall motion (releases, vibration) is a uniform acceleration of the tubule frame |
+
+**Event-driven engine (`run`, browser, v0.5).**
+
 | effect | model |
 |---|---|
 | Adhesion | JKR with snap-on / pull-off hysteresis (Johnson-Kendall-Roberts 1971; Chokshi, Tielens & Hollenbach 1993). JKR holds for graphite (Tabor parameter ~7–14); for 100 µm silica (~1–2) it is an approximation in the JKR–DMT transition that probably overstates the sticking speed |
@@ -475,9 +509,28 @@ isotropic run. Its bias depends on the geometry and cannot be calibrated away.
 
 ---
 
+## All checks and criteria
+
+**[CHECKS.md](CHECKS.md)** lists every check and comparison with what it compares, its pass criterion and the
+measured value. It is generated by `tools/checks_table.py` from the result files the checks write, so it
+cannot drift from the runs:
+
+| group | how to run | what it covers |
+|---|---|---|
+| Part 1: 26 model checks | `python -m dolle_sim verify` (also in the browser) | analytic solutions, conservation laws, limits and published data for every model component (table below) |
+| Part 2: 11 full-contact engine checks | `python -m dolle_sim verify` | the 3-D contact dynamics against the 1-D model; momentum, angular momentum and energy; rolling on a wall against the rigid-plastic solution; cluster statics; the vibration synthesis against its spectrum; time-step convergence; slaved rolling against the full model; sleeping grains against the full model; free-flight hand-off; sleeping with the residual motion against the full model; **the whole regime machinery against a run with every grain in the full model** |
+| LAMMPS, 7 set-ups | `python tools/lammps_contact_check.py` | the same contact law term by term: oblique spinning impacts at 3, 30, 300 mm/s, rolling under a ramp, rocking, twisting, 20 grains dropped on a floor (≤ 1e-5; measured ≤ 2.2e-6) |
+| LAMMPS, 6 comparisons | `python -m dolle_sim lammps-check` | sticking thresholds, restitution, pull-off (table below) |
+| REBOUND, 6 comparisons | `python -m dolle_sim rebound-check ...` | trajectories and collision statistics of a flying cloud (below) |
+| unit and regression tests | `python -m pytest -q` | every module, the flight timeline, mission runs on both engines, provenance |
+
+In every mission run the engine also counts, in `mission_summary.json`, the steps it verified, the steps it
+had to redo and the grains that joined the contact dynamics on approach.
+
 ## Validation
 
-`python -m dolle_sim verify` runs the 26-check verification suite (the same suite runs in the browser app). `python -m pytest -q` runs it plus 41 unit tests and 7 provenance tests:
+`python -m dolle_sim verify` runs the 26-check model suite (the same suite runs in the browser app) and the 11
+full-contact engine checks. The model checks:
 
 | test | checks |
 |---|---|
@@ -739,19 +792,25 @@ The intended workflow:
 3. After flight, fit the measured sticking curve. Compare carbon vs silicate γ_eff
    and their trend with work function / electron affinity.
 
-Remaining approximations: grains are smooth spheres. Aggregates are rigid
-between impacts (no rolling restructuring), and during an impact the contact
-sees the whole aggregate's effective mass. Only the normal impact speed decides
-stick or bounce. JKR is an approximation for silica at this size (Tabor
-parameter ~1–2). The fragmentation thresholds are extrapolated from sub-µm
-grains. Thermo- and photophoresis use free-molecular formulas (valid at
+Remaining approximations: grains are smooth spheres, and JKR is an approximation
+for silica at this size (Tabor parameter ~1–2). The rolling hysteresis h and the
+rolling and twisting damping (Q = 100) are assumed (PROVENANCE.md). The
+full-contact engine (mission runs) has no further contact approximations: every
+contact rolls, slides, twists and breaks under the full law, and its rest,
+rolling and free-flight treatments are verified every step. The event-driven
+engine (`run` and the browser) keeps two: aggregates are rigid between impacts
+(no rolling restructuring; during an impact the contact sees the whole
+aggregate's effective mass, and only the normal impact speed decides stick or
+bounce), and fragmentation uses thresholds extrapolated from sub-µm grains. Thermo- and photophoresis use free-molecular formulas (valid at
 Kn ≫ 1; pre-flight warns below Kn = 10), and photophoresis ignores shadowing
 (the cloud is optically thin). Gas flow is not simulated (free-molecular
 regime, Kn ≈ 100). For the long-range field the chamber walls are grounded
 conductors. The flight environment presets are representative, not vehicle
 data; the mission timeline uses the launch provider's envelope values, not a
-measured flight history. Wall-bound grains come off only by pull-off normal
-to the wall: rolling and sliding along a wall are not modelled. Every such assumption is listed in [PROVENANCE.md](PROVENANCE.md).
+measured flight history. The tubule is rigid (its structural modes are not
+modelled), and burn vibration is applied only in the `launch_vibration`
+scenario, at the ground-test level, as an upper bound (no measured flight
+spectrum is public). Every such assumption is listed in [PROVENANCE.md](PROVENANCE.md).
 
 ## Key references
 

@@ -212,7 +212,8 @@ def cmd_rebound_check(a):
 
 def cmd_verify(a):
     from .verification import run_all
-    print("DOLL-E verification suite (analytic benchmarks and conservation laws)")
+    from . import verify_full
+    print("DOLL-E verification suite (analytic benchmarks, conservation laws, independent models)")
     n_ok = 0
 
     def show(r):
@@ -220,7 +221,10 @@ def cmd_verify(a):
         n_ok += r["passed"]
         print(f"  {'PASS' if r['passed'] else 'FAIL'}  {r['seconds']:6.1f}s  {r['name']}: {r['value']}  [{r['criterion']}]",
               flush=True)
+    print("Part 1: shared physics and the v0.5 engine (also runs in the browser)")
     results = run_all(show)
+    print("Part 2: the v0.6 full-contact engine (dem.py, statics.py, loads.py, vibration.py)")
+    results += verify_full.run_all(show)
     print(f"{n_ok}/{len(results)} checks passed")
     if a.json:
         Path(a.json).write_text(json.dumps(results, indent=2))
@@ -237,6 +241,9 @@ def cmd_materials(a):
 def cmd_mission(a):
     from .mission import run_mission, launch_report, apply_scenario
     mission = _load(a.config)
+    if a.grains:
+        for t in mission["tubules"]:
+            t["dust"]["count"] = int(a.grains)
     m = apply_scenario(mission, a.scenario)
     rep = launch_report(m)
     print(f"Launch loads ({m.get('scenario') or 'nominal'}): per-grain wall pull-off thresholds and the loads of each phase")
@@ -253,8 +260,9 @@ def cmd_mission(a):
         print(f"    random-vibration estimate (Gaussian at the test level; see PROVENANCE.md): freed in the ground test "
               f"{100 * v['ground_random_test']:.1f}% (sine test {100 * v['ground_sine_test']:.1f}%), lift-off to burnout "
               f"{100 * v['flight_lift_off_to_burnout']:.1f}%, all {100 * v['all']:.1f}%")
-    print("\n  'pulled off' = pull-off normal to the aft face only. Rolling along the face is not modelled: it may start"
-          "\n  at ~0.1-1 g of tangential load for ~100 um grains (estimate, see PROVENANCE.md), below the spin loads.")
+    print("\n  'pulled off' and 'could slide' are this report's quasi-static estimate (pull-off normal to the aft face,"
+          "\n  sliding along it). The simulation itself resolves rolling, sliding and twisting on every wall: rolling"
+          "\n  starts at ~1 g of sideways load for 100 um silica on clean glass (PROVENANCE.md), below the spin loads.")
     out = Path(a.out or Path("results") / "mission" / (a.scenario or "nominal"))
     if a.loads_only:
         out.mkdir(parents=True, exist_ok=True)
@@ -263,6 +271,14 @@ def cmd_mission(a):
         return 0
     print(f"\nSimulating {len(m['tubules'])} tubules from T+{m.get('simulate_from_s', 0):g} s to the end of the run "
           f"(splashdown + 5 s unless simulate_to_s is set) ...")
+    mission.setdefault("progress", True)
+    if a.checkpoint_at:
+        mission["checkpoints_s"] = list(a.checkpoint_at)
+    if a.resume_from:
+        if a.resume_at is None:
+            raise SystemExit("--resume-from needs --resume-at")
+        mission["resume_from"], mission["resume_at_s"] = a.resume_from, a.resume_at
+        print(f"Continuing from the checkpoints at T+{a.resume_at:g} s in {a.resume_from} (verified identical up to then)")
     summary, _ = run_mission(mission, out, a.scenario, jobs=a.jobs)
     for t in summary["tubules"]:
         print(f"  {t['tubule']}: {t['grains_released']} of {t['n_grains']} grains released at least once "
@@ -310,6 +326,13 @@ def cmd_sizes(a):
 
 def cmd_lammps(a):
     from .lammps_check import compare
+    import runpy
+    tool = Path(__file__).resolve().parents[1] / "tools" / "lammps_contact_check.py"
+    if tool.exists():
+        print("Full contact model (JKR, sliding, rolling, twisting) vs LAMMPS GRANULAR, same coefficients and step:")
+        mod = runpy.run_path(str(tool))
+        Path(a.out).mkdir(parents=True, exist_ok=True)
+        mod["main"](str(Path(a.out) / "lammps_contact_check.json"))
     res = compare(Path(a.out))
     for r in res["collisions"]:
         print(f"{r['material']}: undamped sticking threshold LAMMPS {r['lammps_threshold_m_s']*1e3:.4f} mm/s vs DOLL-E "
@@ -384,6 +407,12 @@ def main(argv=None):
     mi.add_argument("--out")
     mi.add_argument("--jobs", type=int, default=1, help="run tubules in parallel processes")
     mi.add_argument("--loads-only", action="store_true", help="only the analytic launch-load report")
+    mi.add_argument("--checkpoint-at", type=float, nargs="*", help="flight times [s] at which to save each tubule's "
+                    "state (to <out>/checkpoints) for other scenarios to continue from")
+    mi.add_argument("--resume-from", help="a checkpoints directory of another scenario's run: continue from it "
+                    "(verified: the scenarios must be identical up to --resume-at)")
+    mi.add_argument("--resume-at", type=float, help="the checkpoint time to continue from [s]")
+    mi.add_argument("--grains", type=int, help="grains per tubule (overrides the config's example amount)")
     mi.set_defaults(fn=cmd_mission)
     sz = sub.add_parser("sizes", help="size distributions: fit D10/D50/D90 or measure microscope images")
     sz.add_argument("--image", nargs="+")
