@@ -65,8 +65,22 @@ def tubule_names(sc):
                 f"m = apply_scenario(json.loads(open({str(ROOT / CONFIG)!r}, encoding='utf-8').read()), "
                 f"{None if sc == 'nominal' else sc!r}); print(json.dumps([tubule_chamber(m, t)['name'] "
                 "for t in m['tubules']]))")
-        out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, check=True)
+        cache = ROOT / "results" / "campaign_names.json"
+        known = json.loads(cache.read_text(encoding="utf-8")) if cache.exists() else {}
+        if known.get("config") == (ROOT / CONFIG).read_text(encoding="utf-8") and sc in known:
+            _NAMES[sc] = known[sc]
+            return _NAMES[sc]
+        while True:                  # (the child needs ~0.3 GB: wait while the machine is short of memory)
+            out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True)
+            if out.returncode == 0:
+                break
+            print(f"tubule names of {sc}: {out.stderr.strip().splitlines()[-1:]}; trying again in 60 s", flush=True)
+            time.sleep(60)
         _NAMES[sc] = json.loads(out.stdout.strip().splitlines()[-1])
+        if known.get("config") != (ROOT / CONFIG).read_text(encoding="utf-8"):
+            known = {"config": (ROOT / CONFIG).read_text(encoding="utf-8")}
+        known[sc] = _NAMES[sc]
+        cache.write_text(json.dumps(known), encoding="utf-8")
     return _NAMES[sc]
 
 
@@ -175,8 +189,9 @@ def start(sc, i, attempt):
         src, T = BRANCH[sc]
         arg += ["--resume-from", str((out_dir(src) / "checkpoints").relative_to(ROOT)), "--resume-at", str(T)]
     env = dict(os.environ, NUMBA_NUM_THREADS=os.environ.get("NUMBA_NUM_THREADS", "1"))
-    log = open(ROOT / "results" / f"mission_{sc}_T{i + 1}.log", "a" if attempt else "w", encoding="utf-8")
-    if attempt:
+    again = attempt or (out_dir(sc) / "autosave" / f"{tubule_names(sc)[i]}.pkl").exists()     # continuing
+    log = open(ROOT / "results" / f"mission_{sc}_T{i + 1}.log", "a" if again else "w", encoding="utf-8")
+    if again:
         log.write(f"\n--- started again (attempt {attempt + 1}) {time.ctime()} ---\n")
         log.flush()
     p = subprocess.Popen([sys.executable, "-u", "-m", "dolle_sim", "mission", CONFIG, *arg], cwd=ROOT, stdout=log,
