@@ -282,8 +282,7 @@ def cmd_mission(a):
     if a.tubule is not None:
         from .mission import run_tubule
         path = run_tubule(mission, out, a.scenario, a.tubule)
-        print(f"
-Tubule {a.tubule} done: final state in {path}")
+        print(f"Tubule {a.tubule} done: final state in {path}")
         return 0
     if a.assemble:
         from .mission import assemble_mission

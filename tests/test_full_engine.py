@@ -264,3 +264,23 @@ def test_tubule_by_tubule_run_is_the_mission_run(tmp_path):
     assert json.dumps(s1, sort_keys=True, default=str) == json.dumps(s2, sort_keys=True, default=str)
     for a, b in zip(sims1, sims2):
         assert all(np.array_equal(getattr(a, k), getattr(b, k)) for k in ("x", "v", "w", "regime"))
+
+
+def test_campaign_cli_tubule_jobs_and_assemble(tmp_path):
+    """The command lines the campaign runs: one tubule at a time (`mission --tubule i`), then `mission --assemble`."""
+    import subprocess
+    import sys
+    m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
+    m["tubules"] = m["tubules"][:2]
+    for t in m["tubules"]:
+        t["dust"]["count"] = 8
+    m["simulate_to_s"] = 1.0
+    cfg = tmp_path / "tiny.json"
+    cfg.write_text(json.dumps(m))
+    out = tmp_path / "out"
+    for arg in (["--tubule", "0"], ["--tubule", "1"], ["--assemble"]):
+        r = subprocess.run([sys.executable, "-m", "dolle_sim", "mission", str(cfg), "--out", str(out), *arg],
+                           cwd=ROOT, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    s = json.loads((out / "mission_summary.json").read_text())
+    assert [t["n_grains"] for t in s["tubules"]] == [8, 8]
