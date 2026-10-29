@@ -9,10 +9,11 @@ can start; when a scenario's four tubules are done its outputs are written (`--a
 results/mission_<s>.log) and '<s> exit=<code> <seconds> s' is appended to results/mission_scenarios_done.txt.
 Scheduling tubules one by one keeps every core busy (the tubules of one scenario take very different times).
 
-Every job saves its whole state every 30 minutes of computing (results/mission/<s>/autosave). A job that dies (out of
-memory, a reboot) is started again up to three times and continues from its last autosave, bit-for-bit the
-uninterrupted run (tested); this script itself can be stopped and started again: finished tubules (their final
-states in results/mission/<s>/tubules) are not run again. A job starts only when the machine has the memory for it.
+Every job saves its whole state every 30 minutes of computing (results/mission/<s>/autosave). A job that dies is
+started again and continues from its last autosave, bit-for-bit the uninterrupted run (tested): after running out of
+memory as often as it takes (once the machine has the memory again), after any other failure up to three times. A job
+starts only when the machine can commit its memory. This script can be stopped and started again: finished tubules
+(their final states in results/mission/<s>/tubules) are not run again, and jobs still running are adopted.
 
 Scenarios that are identical to another up to some time continue from that one's checkpoint instead of repeating
 the same flight (engine.branch verifies that they are identical up to then, and the result is bit-for-bit the run
@@ -89,6 +90,56 @@ def free_commit_gb():
         return float("inf")
 
 
+def out_of_memory(sc, i):
+    """Did the tubule's last attempt die of memory exhaustion (its log ends with a MemoryError)?"""
+    try:
+        with open(ROOT / "results" / f"mission_{sc}_T{i + 1}.log", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 3000))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return False
+    return "MemoryError" in tail.split("--- started again")[-1]
+
+
+class Adopted:
+    """A tubule job left running by an earlier run of this script (not our child: its exit code is unknown, so
+    success is its final state on disk)."""
+    def __init__(self, proc, sc, name):
+        self.proc, self.sc, self.name, self.returncode = proc, sc, name, None
+
+    def poll(self):
+        import psutil
+        try:
+            alive = self.proc.is_running() and self.proc.status() != psutil.STATUS_ZOMBIE
+        except psutil.Error:
+            alive = False
+        if alive:
+            return None
+        self.returncode = 0 if done_tubule(self.sc, self.name) else 1
+        return self.returncode
+
+
+def running_jobs(names):
+    """Tubule jobs of this campaign that are already running: (scenario, tubule) -> Adopted."""
+    import psutil
+    found = {}
+    for pr in psutil.process_iter(["cmdline"]):
+        c = pr.info.get("cmdline") or []
+        if "dolle_sim" not in c or "mission" not in c or "--tubule" not in c:
+            continue
+        sc = c[c.index("--scenario") + 1] if "--scenario" in c else "nominal"
+        i = int(c[c.index("--tubule") + 1])
+        if sc in names:
+            found[(sc, i)] = Adopted(pr, sc, names[sc][i])
+    return found
+
+
+class _Null:
+    def close(self):
+        pass
+
+
 def base_args(sc):
     arg = [] if sc == "nominal" else ["--scenario", sc]
     return arg + ["--grains", str(GRAINS)]
@@ -151,7 +202,12 @@ def main():
     assembled = {sc for sc in todo if len(final[sc]) == len(names[sc])
                  and (out_dir(sc) / "mission_summary.json").exists()}
     jobs = [(sc, i) for sc in todo for i in range(len(names[sc])) if i not in final[sc]]
-    running, tries, t0, results, last_start = {}, {}, time.time(), [], 0.0
+    running, tries, attempts, t0, results, last_start = {}, {}, {}, time.time(), [], 0.0
+    for job, p in running_jobs(names).items():
+        if job in jobs:
+            jobs.remove(job)
+            running[job] = (p, _Null())
+            print(f"adopted the running job {job[0]} T{job[1] + 1} (pid {p.proc.pid})", flush=True)
     for sc in todo:
         if sc not in assembled and len(final[sc]) == len(names[sc]):
             results.append(assemble(sc, t0, list(final[sc].values())))
@@ -163,10 +219,14 @@ def main():
                 del running[job]
                 sc, i = job
                 print(f"{sc} T{i + 1} exit={p.returncode} {time.time() - t0:.0f} s", flush=True)
-                if p.returncode != 0 and tries.get(job, 0) < RETRIES:
-                    tries[job] = tries.get(job, 0) + 1
-                    jobs.insert(0, job)              # continues from its autosave
-                    continue
+                if p.returncode != 0:
+                    oom = out_of_memory(sc, i)
+                    if oom or tries.get(job, 0) < RETRIES:
+                        if not oom:
+                            tries[job] = tries.get(job, 0) + 1
+                        attempts[job] = attempts.get(job, 0) + 1
+                        jobs.insert(0, job)          # continues from its autosave
+                        continue
                 final[sc][i] = p.returncode
                 if len(final[sc]) == len(names[sc]):
                     results.append(assemble(sc, t0, list(final[sc].values())))
@@ -179,7 +239,7 @@ def main():
             sc, i = job
             if ready(sc, i, names, final):
                 jobs.remove(job)
-                running[job] = start(sc, i, tries.get(job, 0))
+                running[job] = start(sc, i, attempts.get(job, 0))
                 last_start = time.time()
         time.sleep(10)
     return max(results) if results else 0
