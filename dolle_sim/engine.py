@@ -2153,13 +2153,30 @@ class FullContactSim:
             mean_abs_charge_e=float(np.abs(self.base.q).mean() / 1.602176634e-19),
             net_charge_e=float(self.base.q.sum() / 1.602176634e-19)))
 
-    def run(self, progress=True, callback=None, callback_interval_s=0.5):
-        self.base._build_neighbors()
+    def save_autosave(self, path, next_out, wall):
+        """Save the whole state to `path` (atomically) so that a run killed later (out of memory, reboot) continues
+        from here: the continued run is bit-for-bit the uninterrupted one (nothing here changes the state)."""
+        self._next_out = next_out
+        self._wall_prev = wall
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(path)
+
+    def run(self, progress=True, callback=None, callback_interval_s=0.5, autosave_path=None, autosave_s=1800.0):
+        # the neighbour lists are built when a run starts; a run continued from a saved state keeps the saved lists
+        # (rebuilt only when needed, exactly as in the uninterrupted run)
+        if not getattr(self, "_run_started", False):
+            self.base._build_neighbors()
+            self._run_started = True
         t = self.t
         next_out = 0.0 if self._next_out is None else self._next_out
         out_dt = self.base.out_dt
         cps = sorted(c - self.env.t0_flight for c in self.checkpoints if c - self.env.t0_flight > t + 1e-9)
-        t0 = last = last_cb = time.time()
+        t0 = last = last_cb = last_save = time.time()
+        wall_prev = getattr(self, "_wall_prev", 0.0)
         while t < self.duration - 1e-12:
             if t >= next_out - 1e-12:
                 self._record(t)
@@ -2168,6 +2185,9 @@ class FullContactSim:
                 self._next_out = next_out
                 self.save_checkpoint()
                 cps.pop(0)
+            if autosave_path is not None and time.time() - last_save >= autosave_s:
+                self.save_autosave(autosave_path, next_out, wall_prev + time.time() - t0)
+                last_save = time.time()
             t_cap = min(next_out, cps[0]) if cps else next_out
             if not (self.regime != ASLEEP).any():
                 t_new = self._skip_asleep(t, t_cap)
@@ -2190,12 +2210,12 @@ class FullContactSim:
                       f" rolling {int((self.regime == ROLL).sum())} slaved {int((self.regime == SLAV).sum())} "
                       f"free {int((self.regime == FREE).sum())} "
                       f"asleep {int((self.regime == ASLEEP).sum())}  "
-                      f"impacts {len(self.collisions)}  ({time.time() - t0:.0f} s)", flush=True)
+                      f"impacts {len(self.collisions)}  ({wall_prev + time.time() - t0:.0f} s)", flush=True)
         for rec in self._pending.values():
             if rec["outcome"] == "pending":
                 rec["outcome"] = "stick" if self.t - rec["t"] >= 0 else "pending"
         self._record(t)
-        self.wall_time = time.time() - t0
+        self.wall_time = wall_prev + time.time() - t0
         return self
 
 

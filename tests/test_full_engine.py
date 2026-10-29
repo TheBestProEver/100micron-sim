@@ -284,3 +284,53 @@ def test_campaign_cli_tubule_jobs_and_assemble(tmp_path):
         assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     s = json.loads((out / "mission_summary.json").read_text())
     assert [t["n_grains"] for t in s["tubules"]] == [8, 8]
+
+
+def test_killed_tubule_run_continues_from_its_autosave(tmp_path):
+    """A tubule run killed part-way (out of memory, reboot) and started again continues from its last autosave; the
+    result is bit-for-bit the uninterrupted run, and an autosave of another configuration is not used."""
+    import pickle
+    from dolle_sim import engine
+    from dolle_sim.mission import _tubule_args, _run_one, autosave_path, run_tubule
+    m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
+    m["tubules"] = m["tubules"][:1]
+    m["tubules"][0]["dust"]["count"] = 40
+    m["simulate_to_s"] = 6.0                     # through burnout (grains wake, roll and collide)
+    m["autosave_s"] = 0.0                        # save at every outer step
+    _, _, args = _tubule_args(m, tmp_path / "a", None)
+    A = _run_one(args[0])                        # uninterrupted
+    assert A.n_events["active_grain_steps"] > 0
+    run = engine.FullContactSim.run
+    calls = {"n": 0}
+
+    def killed(self, *a, **k):                   # die after ~2/3 of the outer steps
+        def cb(t, d, ev):
+            calls["n"] += 1
+            if t > 0.66 * d:
+                raise MemoryError("killed")
+        return run(self, *a, callback=cb, callback_interval_s=0.0, **k)
+    engine.FullContactSim.run = killed
+    try:
+        with pytest.raises(MemoryError):
+            run_tubule(m, tmp_path / "b", None, 0)
+    finally:
+        engine.FullContactSim.run = run
+    auto = autosave_path(tmp_path / "b", A.name)
+    with open(auto, "rb") as f:
+        mid = pickle.load(f)
+    assert 0.5 * A.duration < mid.t < A.duration
+    path = run_tubule(m, tmp_path / "b", None, 0)    # started again: continues from the autosave
+    assert not auto.exists()
+    with open(path, "rb") as f:
+        B = pickle.load(f)
+    assert all(np.array_equal(getattr(A, k), getattr(B, k)) for k in ("x", "v", "w", "regime"))
+    assert len(A.collisions) == len(B.collisions) and A.n_events == B.n_events
+    # an autosave of another configuration (here: another dust amount) is ignored
+    m2 = json.loads(json.dumps(m))
+    m2["tubules"][0]["dust"]["count"] = 41
+    m2["simulate_to_s"] = 0.5
+    with open(auto, "wb") as f:
+        pickle.dump(mid, f)
+    _, _, args2 = _tubule_args(m2, tmp_path / "b", None)
+    C = _run_one(args2[0])
+    assert C.N == 41 and abs(C.t - 0.5) < 1e-9

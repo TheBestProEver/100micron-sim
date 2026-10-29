@@ -279,6 +279,8 @@ def cmd_mission(a):
             raise SystemExit("--resume-from needs --resume-at")
         mission["resume_from"], mission["resume_at_s"] = a.resume_from, a.resume_at
         print(f"Continuing from the checkpoints at T+{a.resume_at:g} s in {a.resume_from} (verified identical up to then)")
+    if a.autosave_min:
+        mission["autosave_s"] = 60.0 * a.autosave_min
     if a.tubule is not None:
         from .mission import run_tubule
         path = run_tubule(mission, out, a.scenario, a.tubule)
@@ -425,6 +427,8 @@ def main(argv=None):
     mi.add_argument("--tubule", type=int, help="run only this tubule (0-3) and save its final state (for a campaign "
                     "that schedules tubules one by one)")
     mi.add_argument("--assemble", action="store_true", help="write the outputs from the tubules' saved final states")
+    mi.add_argument("--autosave-min", type=float, help="save each tubule's state every this many minutes of computing "
+                    "(to <out>/autosave); a run started again continues from it, bit-for-bit")
     mi.set_defaults(fn=cmd_mission)
     sz = sub.add_parser("sizes", help="size distributions: fit D10/D50/D90 or measure microscope images")
     sz.add_argument("--image", nargs="+")

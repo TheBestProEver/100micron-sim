@@ -128,7 +128,7 @@ def mission_cfg(m: dict) -> dict:
            "environment": env, "forces": m.get("forces", {}), "contact": m.get("contact", {}),
            "camera": m.get("camera", {}), "materials": m.get("materials", {}),
            "engine": m.get("engine", "full"), "progress": m.get("progress", False)}
-    for k in ("checkpoints_s", "resume_from", "resume_at_s"):      # see _run_one and engine.branch
+    for k in ("checkpoints_s", "resume_from", "resume_at_s", "autosave_s"):      # see _run_one and engine.branch
         if m.get(k) is not None:
             cfg[k] = m[k]
     return cfg
@@ -249,8 +249,29 @@ def _run_one(args):
                       flush=True)
             except (ValueError, FileNotFoundError) as e:
                 print(f"  [{s.name}] not branched ({e}); running from lift-off", flush=True)
-    s.run(progress=bool(cfg.get("progress", False)))
+    auto = None
+    if cfg.get("autosave_s") is not None and cfg.get("engine", "full") == "full":
+        # a run killed before its end (out of memory, reboot) continues from its last autosave: the same tubule and
+        # configuration (the saved run's initial-state signature equals this one's), bit-for-bit the uninterrupted run
+        import pickle
+        auto = autosave_path(out_dir, s.name)
+        if auto.exists():
+            with open(auto, "rb") as f:
+                A = pickle.load(f)
+            if A.name == s.name and A._init_sig == s._init_sig:
+                print(f"  [{s.name}] continuing from its autosave at T+{A.env.t0_flight + A.t:.3f} s", flush=True)
+                s = A
+            else:
+                print(f"  [{s.name}] autosave {auto.name} is of another configuration; not used", flush=True)
+    if auto is not None:
+        s.run(progress=bool(cfg.get("progress", False)), autosave_path=auto, autosave_s=float(cfg["autosave_s"]))
+    else:
+        s.run(progress=bool(cfg.get("progress", False)))
     return s
+
+
+def autosave_path(out: Path, name: str) -> Path:
+    return Path(out) / "autosave" / f"{name}.pkl"
 
 
 def _in_window(c_t, t0, prof):
@@ -309,6 +330,7 @@ def run_tubule(mission: dict, out: Path, scenario: str | None, index: int) -> Pa
     with open(tmp, "wb") as f:
         pickle.dump(s, f, protocol=pickle.HIGHEST_PROTOCOL)
     tmp.replace(path)
+    autosave_path(out, s.name).unlink(missing_ok=True)
     return path
 
 
