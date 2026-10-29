@@ -4,7 +4,7 @@ Generated from `dolle_sim/provenance.py` (do not edit by hand; run `python tools
 
 **None of the DOLL-E physics comes from REBOUND or LAMMPS.** No code from either is copied, translated or called by the simulator, and it runs with both unavailable (tested).
 
-REBOUND is used in one optional file, **dolle_sim/rebound_check.py** (417 of 12885 lines). That file re-runs a simplified chamber inside REBOUND as an outside check of our trajectory integration and collision bookkeeping; it does not check the sticking physics. Two of our methods are standard ones REBOUND also uses (second-order leapfrog / velocity Verlet and direct-sum gravity), and our collision detection is related to its 'line' mode, all written independently.
+REBOUND is used in one optional file, **dolle_sim/rebound_check.py** (417 of 12964 lines). That file re-runs a simplified chamber inside REBOUND as an outside check of our trajectory integration and collision bookkeeping; it does not check the sticking physics. Two of our methods are standard ones REBOUND also uses (second-order leapfrog / velocity Verlet and direct-sum gravity), and our collision detection is related to its 'line' mode, all written independently.
 
 LAMMPS, a widely used open-source particle code, is likewise used only in one optional file, **dolle_sim/lammps_check.py** (195 lines). That file compares the JKR contact with LAMMPS's own implementation. With the same rule for when a contact breaks, the undamped sticking speeds agree to 0.1-0.3%, the restitution to within 0.011 and the pull-off force from a wall to 0.14%. With DOLL-E's default rule (the one all simulations use) the undamped sticking speeds are 1.42x higher.
 

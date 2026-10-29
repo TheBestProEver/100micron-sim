@@ -45,7 +45,7 @@ class Loads:
                 br.update((a, b))
         else:
             self._sk = np.array([0.0, 1e9])
-            w = 2 * math.pi * float(env.omega @ env.spin_axis)
+            w = float(env.omega @ env.spin_axis)          # env.omega is in rad/s already
             self._sv = np.array([w, w])
             br = set()
         for r in self.release:
@@ -84,14 +84,22 @@ class Loads:
                 out[on, r["axis"]] += r["a"] * np.sin(2 * math.pi * r["f"] * tau)
         return out
 
-    def vibration_accel(self, T):
+    def vibration_accel(self, T, side=None):
         T = np.atleast_1d(np.asarray(T, float))
         out = np.zeros((len(T), 3))
         for h in self.vib:
-            out -= h.accel(T).T
+            out -= h.accel(T, side).T
         return out
 
-    def accel(self, T, coarse=1e-5):
+    def accel_seg(self, Ts):
+        """accel at the sample times of one integration segment: the first a step's start (limits from the right),
+        the others step ends (from the left), so a load that switches on or off at a segment boundary is charged to
+        the side it belongs to."""
+        a = self.accel(Ts, side="-")
+        a[0] = self.accel(Ts[:1], side="+")[0]
+        return a
+
+    def accel(self, T, coarse=1e-5, side=None):
         """Uniform apparent acceleration [m/s^2] at flight times T (sorted). The smooth flight profile is evaluated
         on a grid of `coarse` seconds and interpolated linearly (error <= coarse^2 max|a''|/8, ~1e-10 g for the
         profile's slowest-varying parts and ~1e-6 of the 0.05 s splash pulse); release waveforms and vibration
@@ -104,16 +112,23 @@ class Loads:
             a = np.column_stack([np.interp(T, g, ag[:, k]) for k in range(3)])
         else:
             a = self.profile_accel(T)
-        return a + self.release_accel(T) + self.vibration_accel(T)
+        return a + self.release_accel(T) + self.vibration_accel(T, side)
 
     def accel_bound(self, T0, T1):
-        """A bound on |a| along each axis over [T0, T1]: the flight profile at 5 points with the curvature margin
-        h^2 |a''| / 8 (|a''| from the samples' second differences, doubled); a release waveform by its amplitude;
-        the vibration exactly (the largest |value| of each cubic piece of its spline over the interval)."""
+        """A bound on |a| along each axis over [T0, T1]. The flight profile: at 5 points and at its own knots inside
+        the interval (the descent table's points, the peaks of the half-sine shocks), which is exact for its
+        constant, piecewise-linear and half-sine parts, plus the curvature margin h^2 |a''| / 8 (|a''| from the
+        5 samples' second differences, doubled) for the smooth ascent drag. A release waveform by its amplitude. The
+        vibration exactly (the largest |value| of each cubic piece of its spline over the interval, both ends
+        included)."""
         T0, T1 = float(T0), float(max(T1, T0))
         Ts = np.linspace(T0, T1, 5)
         ap = self.profile_accel(Ts)
         out = np.abs(ap).max(0)
+        if self.prof is not None:
+            extra = self.prof.knots_in(T0, T1)
+            if len(extra):
+                out = np.maximum(out, np.abs(self.profile_accel(np.asarray(extra))).max(0))
         h = (T1 - T0) / 4
         if h > 0:
             d2 = np.abs(ap[2:] - 2 * ap[1:-1] + ap[:-2]).max(0) / (h * h)
@@ -122,7 +137,7 @@ class Loads:
             if r["start"] < T1 and r["end"] > T0:
                 out[r["axis"]] += r["a"]
         for hv in self.vib:
-            if hv.t0 < T1 and hv.t0 + hv.T > T0:
+            if hv.t0 <= T1 and hv.t0 + hv.T >= T0:
                 out = out + hv.abs_max(T0, T1)
         return out
 

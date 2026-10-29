@@ -100,6 +100,10 @@ class FullContactSim:
         self.v = b.V.copy()
         self.w = b.L / b.I0[:, None]
         self.loads = Loads(b.env, b.release, self._vibration(chamber.get("vibration"), seed))
+        if b.env.jitter_rms > 0 or getattr(b.env, "_csv", None) is not None:
+            raise ValueError(f"{self.name}: g-jitter (jitter_rms_g) and accel_csv are not represented in the "
+                             "full-contact engine's loads, so its motion bounds could not cover them; set "
+                             "jitter_rms_g = 0 and leave out accel_csv (the event-driven engine supports both)")
         self.off = b.axis_offset.copy()
         self.L = self.size.copy()
         self.regime = np.full(N, FREE, np.int8)
@@ -346,7 +350,7 @@ class FullContactSim:
         if prof is not None and free.any() and (T < prof.ug_start_s or T >= prof.ug_end_s):
             a_g = max(float(np.linalg.norm(prof.apparent_accel(T))), 1e-6) / G0
             dt = min(dt, self.base.dt_launch * 2.0 ** math.floor(math.log2(math.sqrt(25.0 / a_g))))
-        W = float(np.abs(self.loads.omega(np.array([T, T + dt]))).max())
+        W = float(np.linalg.norm(self.loads.omega(np.array([T, T + dt])), axis=1).max())
         if W > 0:
             dt = min(dt, 0.02 / W)
         if self.loads.fast_window(T, T + dt):
@@ -366,8 +370,8 @@ class FullContactSim:
         farthest point of the tubule, and the velocity-dependent Coriolis and drag terms c |v| (c = 2 Omega + g) with
         the speed they can reach: |a| <= (a0 + c |v0|) exp(c H) (Gronwall)."""
         a = self.loads.accel_bound(T, T + H)
-        Om = float(np.abs(self.loads.omega(np.array([T, T + H]))).max())
-        Omd = float(np.abs(self.loads.omega_dot(np.array([T, T + H - 1e-12]))).max())
+        Om = float(np.linalg.norm(self.loads.omega(np.array([T, T + H])), axis=1).max())
+        Omd = float(np.linalg.norm(self.loads.omega_dot(np.array([T, T + H - 1e-12])), axis=1).max())
         rmax = float(np.linalg.norm(np.abs(self.off) + self.L))
         vm = np.linalg.norm(self.v, axis=1)
         c = 2 * Om + self.gdrag
@@ -405,6 +409,8 @@ class FullContactSim:
                                                          "redos_rolling_envelope" if rolled else "redos_outside_record")
             why[key] = why.get(key, 0) + 1
             self._restore(snap)
+            if vf is None and bad <= force and (missed | rolled) <= noexit:
+                force = noexit = set(range(self.N))   # nothing would change: every grain in the DEM throughout
             force |= bad                           # in the DEM from the start: the same check cannot fail again for them
             noexit |= missed | rolled              # these stay in it for the whole step: an exit could repeat the failure
             if vf is not None:
@@ -429,6 +435,8 @@ class FullContactSim:
     def __getstate__(self):
         st = self.__dict__.copy()
         st["_islands"] = {i: {k: v for k, v in isl.items() if k != "lu"} for i, isl in self._islands.items()}
+        for k in ("_chk", "_vd_step", "_ag_step", "_noexit"):     # the last step's scratch state
+            st.pop(k, None)
         return st
 
     def checkpoint_path(self, T, directory=None):
@@ -706,11 +714,13 @@ class FullContactSim:
                 if tb > tc + 1e-15:
                     obs = np.maximum(obs, vg[idx])
             over = obs > vb
-            zero = over & (vb <= 1e-6 * obs)       # a bound of ~0 (a grain taken to be at rest): no factor can mend it
-            bad.update(int(k) for k in idx[zero])  # the grain goes into the DEM from the start instead
+            # a bound of ~0 (a grain taken to be at rest) that no factor can mend: that grain goes into the DEM
+            # from the start instead, if it was not there already (then the bounds are scaled)
+            zero = over & (vb <= 1e-6 * obs) & (reg_seen[idx] != ACTIVE)
+            bad.update(int(k) for k in idx[zero])
             sc = over & ~zero
             if sc.any():
-                vf = max(vf or 0.0, self._vdem_fac * 1.25 * float((obs[sc] / vb[sc]).max()))
+                vf = max(vf or 0.0, self._vdem_fac * 1.25 * float((obs[sc] / np.maximum(vb[sc], 1e-300)).max()))
         # a grain that entered the DEM during the step (not active at its start): up to then its capture time (or,
         # asleep, its static certificate) kept it clear of every other grain's bounded motion; from then on it is
         # within dmax of where it entered, and must be clear of every grain outside the DEM at the same time
@@ -734,7 +744,8 @@ class FullContactSim:
             for q, g in enumerate(cand):
                 for idx in tree.query_ball_point(xr[g], 2 * rmax + float(S.max()) + Dg[q] + self.d_cap + 1e-12):
                     k = int(K[idx])
-                    if k == int(g) or (KC[idx] >= 0 and KC[idx] == cl.get(int(g), -2)) or TB[idx] < t_in[g] - 1e-15:
+                    if k == int(g) or (KC[idx] >= 0 and KC[idx] == cl.get(int(g), -2)) \
+                            or TB[idx] <= t_in[g] + 1e-15 or TA[idx] > t_in[g] + 1e-15:
                         continue
                     # closest approach of the record's straight line to where g entered, while both are out of
                     # their reach of each other's treatment: [max(from, t_in), to]
@@ -1187,8 +1198,7 @@ class FullContactSim:
         b.L[free] = self.w[free] * self.I[free, None]
         b.pos = b.X[b.body] + b.off
         b.env.update(t)
-        a_app = b.env.apparent_accel(t, H) + self.loads.release_accel(np.array([b.env.t0_flight + t]))[0] \
-            + self.loads.vibration_accel(np.array([b.env.t0_flight + t]))[0]
+        a_app = self.loads.accel(np.array([b.env.t0_flight + t]), side="+")[0]
         b._a_app_now = a_app
         if b.env.profile is not None:
             b._W_drift = 2 * math.pi * b.env.profile.spin_hz(b.env.t0_flight + t + 0.5 * H)
@@ -1197,8 +1207,7 @@ class FullContactSim:
         b._drift(H, act)
         b.env.update(t + H)
         F1 = b._forces_pos(b._mono_vel())
-        a1 = b.env.apparent_accel(t + H, H) + self.loads.release_accel(np.array([b.env.t0_flight + t + H]))[0] \
-            + self.loads.vibration_accel(np.array([b.env.t0_flight + t + H]))[0]
+        a1 = self.loads.accel(np.array([b.env.t0_flight + t + H]), side="-")[0]
         b._kick(F1, a1, 0.5 * H, brownian=True)
         self.x[free], self.v[free] = b.pos[free], b.V[free]
         self.w[free] = b.L[free] / self.I[free, None]
@@ -1236,25 +1245,23 @@ class FullContactSim:
         out = np.flatnonzero(self._chk["was_out"] & (self.regime != ACTIVE))
         if not len(out):
             return
-        x = self.x
-        tree = cKDTree(x)
-        rmax = float(self.rad.max())
-        for k in out:
-            k = int(k)
-            for f in range(6):
-                ax = f // 2
-                g = (x[k, ax] if f % 2 == 0 else self.L[ax] - x[k, ax]) - self.rad[k]
-                if g < -1e-12:
-                    row = self._key.get((k, -1 - f))
-                    if row is None or self._hist[row, dem.H_TOUCH] < 0.5:
-                        self._chk["missed"].add(k)
-            for j in tree.query_ball_point(x[k], self.rad[k] + rmax):
-                if j == k:
-                    continue
-                if self.rad[k] + self.rad[j] - float(np.linalg.norm(x[j] - x[k])) > 1e-12:
-                    row = self._key.get((min(k, j), max(k, j)))
-                    if row is None or self._hist[row, dem.H_TOUCH] < 0.5:
-                        self._chk["missed"].update((k, int(j)))
+        x, r = self.x, self.rad
+        xo, ro = x[out], r[out][:, None]
+        gaps = np.hstack([xo - ro, self.L[None, :] - xo - ro])        # columns: faces 0, 2, 4, 1, 3, 5
+        for q, c in zip(*np.nonzero(gaps < -1e-12)):
+            k, f = int(out[q]), (2 * c if c < 3 else 2 * (c - 3) + 1)
+            row = self._key.get((k, -1 - f))
+            if row is None or self._hist[row, dem.H_TOUCH] < 0.5:
+                self._chk["missed"].add(k)
+        lists = cKDTree(x).query_ball_point(xo, r[out] + float(r.max()))
+        ii = np.repeat(out, [len(l) for l in lists])
+        jj = np.fromiter((j for l in lists for j in l), np.int64, len(ii))
+        ov = r[ii] + r[jj] - np.linalg.norm(x[jj] - x[ii], axis=1)
+        for k, j in zip(ii[(ov > 1e-12) & (ii != jj)], jj[(ov > 1e-12) & (ii != jj)]):
+            k, j = int(k), int(j)
+            row = self._key.get((min(k, j), max(k, j)))
+            if row is None or self._hist[row, dem.H_TOUCH] < 0.5:
+                self._chk["missed"].update((k, j))
 
     def _candidates(self, ai, skin):
         loc = {int(g): k for k, g in enumerate(ai)}
@@ -1296,7 +1303,7 @@ class FullContactSim:
         dt = H / n
         skin = 0.5 * float(self.rad.min())
         Ts_all = T0 + np.arange(1, n + 1) * dt
-        acc_all = self.loads.accel(Ts_all)
+        acc_all = self.loads.accel(Ts_all, side="-")
         Om_all = self.loads.omega(Ts_all)
         Omd_all = self.loads.omega_dot(Ts_all)
         chk = self._chk
@@ -1329,7 +1336,7 @@ class FullContactSim:
             Tq = np.zeros_like(x)
             Fn = np.zeros(len(rows))
             Tn1 = np.array([Tn])
-            dem.compute_forces(x, v, w, m, I, self.L, ci, cj, prm, hist, 0.0, self.loads.accel(Tn1)[0],
+            dem.compute_forces(x, v, w, m, I, self.L, ci, cj, prm, hist, 0.0, self.loads.accel(Tn1, side="+")[0],
                                self.loads.omega(Tn1)[0], self.loads.omega_dot(Tn1)[0], self.off, gdrag, F, Tq, Fn,
                                Fext, Tn)
             xb = x.copy()
@@ -1619,7 +1626,7 @@ class FullContactSim:
         n = max(1, int(math.ceil(H / dt)))
         dt = H / n
         Ts = T0 + np.arange(n + 1) * dt
-        acc, Om, Omd = self.loads.accel(Ts), self.loads.omega(Ts), self.loads.omega_dot(Ts)
+        acc, Om, Omd = self.loads.accel_seg(Ts), self.loads.omega(Ts), self.loads.omega_dot(Ts)
         faces = np.array([self._roll_face[int(k)] for k in ri], np.int64)
         rows = np.array([self._key[(int(k), -1 - int(f))] for k, f in zip(ri, faces)], np.int64)
         x0, v0, w0, h0 = self.x[ri].copy(), self.v[ri].copy(), self.w[ri].copy(), self._hist[rows].copy()
@@ -1734,7 +1741,8 @@ class FullContactSim:
         if not (eta0 <= slaved.ETA0_MAX and etaF <= slaved.ETAF_MAX):
             return self._rej("slaving_error")
         Ta = np.array([T])
-        lam, n, dl, Gu = slaved.enter(x, v, w, m, I, rad, ci, cj, prm, hist, self.L, self.off, self.loads.accel(Ta)[0],
+        lam, n, dl, Gu = slaved.enter(x, v, w, m, I, rad, ci, cj, prm, hist, self.L, self.off,
+                                      self.loads.accel(Ta, side="+")[0],
                                       self.loads.omega(Ta)[0], self.loads.omega_dot(Ta)[0], self.gdrag[mem],
                                       np.ascontiguousarray(self._F_lr[mem]))
         if lam is None:
@@ -1813,7 +1821,7 @@ class FullContactSim:
             self.n_events["slaved_stops_indicator"] = self.n_events.get("slaved_stops_indicator", 0) + 1
             return pre
         c["w_soft"] = max(w_soft, 1e-30)
-        a_max = float(np.linalg.norm(np.abs(self.loads.accel(np.array([T, T + H]))).max(0)))
+        a_max = float(np.linalg.norm(self.loads.accel_bound(T, T + H)))
         reach = float(np.linalg.norm(self.v[mem], axis=1).max()) * H + 0.5 * a_max * H * H
         for _ in range(3):
             xo, ro = self._slv_obstacles(mem, reach)
@@ -1862,7 +1870,7 @@ class FullContactSim:
             acc, Om, Omd = pre["acc"][:n + 1], pre["Om"][:n + 1], pre["Omd"][:n + 1]
         else:
             Ts = T0 + np.arange(n + 1) * dt
-            acc, Om, Omd = self.loads.accel(Ts), self.loads.omega(Ts), self.loads.omega_dot(Ts)
+            acc, Om, Omd = self.loads.accel_seg(Ts), self.loads.omega(Ts), self.loads.omega_dot(Ts)
             pre["acc"], pre["Om"], pre["Omd"] = acc, Om, Omd
         cface = np.zeros((len(mem), 6), np.bool_)
         for k in range(len(ci)):

@@ -379,21 +379,27 @@ def check_engine_handoff():
     S.x[:], S.v[:], S.w[:] = x0, v0, w0
     S.regime[:] = FREE
     S.base.F_static[:] = 0.0
-    segs = []                                      # the engine's DEM segments (start, length, steps) on the kept path
+    segs = []                    # the engine's DEM segments on the kept path: start, length, steps, state in and out
     dem_run = S._dem
+
+    def state():
+        row = S._key.get((0, 1))
+        return S.x.copy(), S.v.copy(), S.w.copy(), (S._hist[row].copy() if row is not None else None)
 
     def traced(ai, t, H):
         vrel = 2 * float(np.linalg.norm(S.v[ai], axis=1).max()) if len(ai) else 0.0
         n = max(1, int(math.ceil(H / min(S._dt_dem, S._hertz_dt(vrel)))))
         segs[:] = [q for q in segs if q[0] < t - 1e-15]        # a redo restarts the step: drop the discarded path
-        segs.append((t, H, n))
-        return dem_run(ai, t, H)
+        s_in = state()
+        out = dem_run(ai, t, H)
+        segs.append((t, H, n, sorted(int(k) for k in ai), s_in, state()))
+        return out
     S._dem = traced
     S.run(progress=False)
     mat = get_material("silica")
 
-    def system():
-        return dem.DEMSystem(x0, v0, w0, R, mat.rho, mat.E, mat.nu, mat.gamma, mat.e_dry, mat.yield_pressure,
+    def system(x=x0, v=v0, w=w0):
+        return dem.DEMSystem(x, v, w, R, mat.rho, mat.E, mat.nu, mat.gamma, mat.e_dry, mat.yield_pressure,
                              [0.01, 0.01, 0.01], dict(E=1e11, nu=0.2, gamma=0.02, e_dry=0.8), walls=False,
                              mu_pp=S._mu(0, 1), h_roll=S.h_roll, q_roll=S.q_roll, q_twist=S.q_twist)
 
@@ -417,39 +423,48 @@ def check_engine_handoff():
     def diffs(A, B):
         return (float(np.abs(A.v - B.v).max() / np.abs(v0).max()), float(np.abs(A.w - B.w).max() / np.abs(w0).max()),
                 float(np.abs(A.x - B.x).max() / R))
-    # (a) the DEM alone on the engine's own time grid: its segments, free flight in between
-    G = system()
-    tg = 0.0
-    for t0, H, n in segs:
-        if t0 > tg:
-            fly(G, t0 - tg)
+    # (a1) the free flight up to the first hand-off against straight lines; (a2) each DEM segment against the DEM
+    # alone from the state the engine handed over, on the engine's grid (both grains in it, contact history copied)
+    t1, (xa, va, wa, _) = segs[0][0], segs[0][4]
+    e_fly = (float(np.abs(va - v0).max() / np.abs(v0).max()), float(np.abs(wa - w0).max() / np.abs(w0).max()),
+             float(np.abs(xa - (x0 + v0 * t1)).max() / R))
+    e_grid = (0.0, 0.0, 0.0)
+    for t0, H, n, ai, (xi, vi, wi, hi), (xo, vo, wo, ho) in segs:
+        if ai != [0, 1]:
+            continue
+        G = system(xi, vi, wi)
+        if hi is not None:
+            G.hist[0] = hi
         G.run(H / n, n)
-        tg = t0 + H
-    if tg < 2e-3:
-        fly(G, 2e-3 - tg)
-    e_grid = diffs(S, G)
+        e_grid = tuple(max(a, b) for a, b in zip(e_grid, (
+            float(np.abs(vo - G.v).max() / np.abs(v0).max()), float(np.abs(wo - G.w).max() / np.abs(w0).max()),
+            float(np.abs(xo - G.x).max() / R))))
     # (b) against a fine reference (1/8 of the engine's step), beside the DEM's own spread over 8 grid phases
     dt = min(S._dt_dem, S._hertz_dt(2 * float(np.abs(v0).max())))
     F = ref(dt / 8)
     e_fine = diffs(S, F)
     spread = np.max([diffs(ref(dt, ph), F) for ph in np.arange(8) / 8], axis=0)
     n_imp = sum(1 for c in S.collisions if c["kind"] == "pp")
-    ok = (n_imp == 1 and len(segs) > 0 and max(e_grid) <= 1e-8
+    ok = (n_imp == 1 and len(segs) > 0 and max(e_fly) <= 1e-9 and max(e_grid) <= 1e-8
           and all(a <= 1.5 * b + 1e-12 for a, b in zip(e_fine, spread)))
     return _res("engine_handoff", "Free flight to contact hand-off (engine)",
                 "Two silica grains (one spinning at 200 rad/s) approach obliquely at 5 cm/s, 40 um apart. The engine flies "
                 "them exactly, hands them to the DEM before they can come within the capture distance (leaving and "
-                "rejoining it as its bounds allow), resolves the impact and lets them fly apart. After 2 ms it is "
-                "compared (a) with the DEM alone on the engine's own time grid (its DEM segments, free flight in "
-                "closed form between them, which is what velocity Verlet gives without forces): the hand-off itself "
-                "must add nothing beyond round-off (amplified by the stiff contact; 1e-8); and (b) with a fine DEM reference (1/8 of the engine's step): it "
-                "must lie within 1.5x the spread of the DEM at the engine's step over 8 phases of the time grid "
-                "(where an impact starts between two steps is the DEM's own discretisation error).",
-                f"impacts {n_imp}; {len(segs)} DEM segments; (a) vs the DEM on the engine's grid: velocity "
-                f"{e_grid[0]:.1e}, spin {e_grid[1]:.1e}, position {e_grid[2]:.1e} of R; (b) vs the fine reference: "
+                "rejoining it as its bounds allow), resolves the impact and lets them fly apart. Checked in parts: "
+                "(a1) the free flight up to the first hand-off against straight lines (the only other forces are "
+                "the ~1e-9 m/s^2 tidal and mutual-gravity terms); (a2) every DEM segment the engine ran against the "
+                "DEM alone from the state the engine handed over, on the engine's own grid: the hand-off itself must "
+                "add nothing beyond round-off (1e-8, the stiff contact amplifies round-off); (b) after 2 ms, against "
+                "a fine DEM reference (1/8 of the engine's step) from the same start: within 1.5x the spread of the "
+                "DEM at the engine's step over 8 phases of the time grid (where an impact starts between two steps "
+                "is the DEM's own discretisation error, and an adhesive impact amplifies any difference in the state "
+                "it starts from).",
+                f"impacts {n_imp}; {len(segs)} DEM segments; (a1) free flight vs straight lines: velocity "
+                f"{e_fly[0]:.1e}, spin {e_fly[1]:.1e}, position {e_fly[2]:.1e} of R; (a2) DEM segments vs the DEM "
+                f"alone: {e_grid[0]:.1e}, {e_grid[1]:.1e}, {e_grid[2]:.1e}; (b) vs the fine reference: "
                 f"{e_fine[0]:.1e}, {e_fine[1]:.1e}, {e_fine[2]:.1e}; DEM grid-phase spread {spread[0]:.1e}, "
                 f"{spread[1]:.1e}, {spread[2]:.1e}",
-                "1 impact; (a) each <= 1e-8; (b) each <= 1.5x the grid-phase spread", ok)
+                "1 impact; (a1) each <= 1e-9; (a2) each <= 1e-8; (b) each <= 1.5x the grid-phase spread", ok)
 
 
 CHECKS += [check_engine_handoff]

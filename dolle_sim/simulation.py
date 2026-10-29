@@ -702,12 +702,34 @@ class ChamberSim:
         return f_sc, wc, f_img
 
     def _pair_forces(self):
-        """Short-range Coulomb, polarisation and mutual-gravity forces between nearby grains."""
+        """Short-range Coulomb, polarisation and mutual-gravity forces between nearby grains. Each pair's force is
+        kept and recomputed only when one of its grains has moved or changed charge (the same formula on the same
+        numbers, summed in the same order: identical to recomputing every pair)."""
         F = np.zeros((self.N, 3))
-        charged = self.q.any()
+        charged = bool(self.q.any())
         i, j = self.lrlist[:, 0], self.lrlist[:, 1]
         sel = self.body[i] != self.body[j]
         i, j = i[sel], j[sel]
+        hold = self.dt * self.lr_every
+        c = getattr(self, "_pf_cache", None)
+        if c is not None and c["lr"] is self.lrlist and c["hold"] == hold and c["charged"] == charged \
+                and np.array_equal(c["body"], self.body):
+            ch = np.any(self.pos != c["pos"], axis=1) | (self.q != c["q"])
+            upd = ch[i] | ch[j]
+            f = c["f"]
+            if upd.any():
+                f = f.copy()
+                f[upd] = self._pair_f(i[upd], j[upd], charged, hold)
+        else:
+            f = self._pair_f(i, j, charged, hold)
+        self._pf_cache = dict(lr=self.lrlist, hold=hold, charged=charged, body=self.body.copy(), pos=self.pos.copy(),
+                              q=self.q.copy(), f=f)
+        for k in range(3):
+            F[:, k] += np.bincount(i, f[:, k], self.N) - np.bincount(j, f[:, k], self.N)
+        return F
+
+    def _pair_f(self, i, j, charged, hold):
+        """The pair forces on grain i of the pairs (i, j) [N] (minus that on j)."""
         r = self.pos[i] - self.pos[j]                 # from j to i
         d = np.maximum(np.linalg.norm(r, axis=1), self.rad[i] + self.rad[j])
         ok = d < self.coulomb_cut
@@ -725,13 +747,9 @@ class ChamberSim:
         # than ~1/4 of their separation (prevents overshoot for close, strongly-attracting pairs; the
         # true infall is then resolved by the contact model at impact)
         mu = self.mass[i] * self.mass[j] / (self.mass[i] + self.mass[j])
-        hold = self.dt * self.lr_every
         cap = mu * d / (2 * hold ** 2)
         fmag = np.clip(fmag, -cap, cap)
-        f = (fmag * ok / d)[:, None] * r
-        for k in range(3):
-            F[:, k] += np.bincount(i, f[:, k], self.N) - np.bincount(j, f[:, k], self.N)
-        return F
+        return (fmag * ok / d)[:, None] * r
 
     # ------------------------------------------------------------ neighbour lists
     def _speed_bound(self, vm):

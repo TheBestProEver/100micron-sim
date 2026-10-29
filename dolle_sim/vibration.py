@@ -116,16 +116,26 @@ class VibrationHistory:
         s = np.asarray(T, float) - self.t0
         return s, (s >= 0) & (s <= self.T)
 
-    def accel(self, T):
-        s, ok = self._local(T)
+    def accel(self, T, side=None):
+        """a(T) (zero outside the window). side '+': the limit from the right (the value a step starting at T uses:
+        window [t0, t0 + T)); '-': from the left (a step ending at T: (t0, t0 + T]); None: the closed window."""
+        s = np.asarray(T, float) - self.t0
+        if side is None:
+            ok = (s >= 0) & (s <= self.T)
+        else:                                 # a step boundary on a window end may be off by rounding: 1e-6 sample
+            e = 1e-6 / self.fs
+            ok = ((s > e) if side == "-" else (s >= -e)) & ((s < self.T - e) if side == "+" else (s <= self.T + e))
         return np.where(ok, self.a(np.clip(s, 0, self.T)), 0.0)
 
     def abs_max(self, T0, T1):
         """The largest |a| along each axis over [T0, T1], exactly: each cubic piece's values at the ends of its part
         of the interval and at its stationary points inside it."""
-        s0, s1 = max(float(T0) - self.t0, 0.0), min(float(T1) - self.t0, self.T)
-        if s1 < s0:
+        a0, a1 = float(T0) - self.t0, float(T1) - self.t0
+        e = 1e-6 / self.fs                              # window ends off by rounding (as in accel)
+        if a1 < -e or a0 > self.T + e:
             return np.zeros(3)
+        s0, s1 = min(max(a0, 0.0), self.T), max(min(a1, self.T), 0.0)
+        s1 = max(s1, s0)
         x, c = self.a.x, self.a.c                                     # c: (4, pieces, 3), descending powers
         i0 = int(np.clip(np.searchsorted(x, s0, side="right") - 1, 0, len(x) - 2))
         i1 = int(np.clip(np.searchsorted(x, s1, side="right") - 1, 0, len(x) - 2))

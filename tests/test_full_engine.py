@@ -219,3 +219,27 @@ def test_contact_formed_outside_the_dem_is_redone():
     S.run(progress=False)
     assert S.n_events.get("redos_missed_contact", 0) >= 1
     assert S.x[0, 2] > R and S.v[0, 2] > 0                        # it bounced off the floor
+
+
+def test_vibration_window_ends_are_one_sided_and_bounded():
+    """A step that starts where the vibration ends feels none of it, a step that ends there feels its last value, and
+    the bound over an interval touching a window end includes the end value."""
+    from dolle_sim.vibration import VibrationHistory
+    h = VibrationHistory(1.0, 20000.0, np.random.default_rng(0).normal(size=(3, 201)))
+    end = np.array([h.t0 + h.T])
+    assert np.all(h.accel(end, "+") == 0.0) and np.any(h.accel(end, "-") != 0.0)
+    assert np.all(h.accel(np.array([h.t0]), "-") == 0.0) and np.any(h.accel(np.array([h.t0]), "+") != 0.0)
+    assert np.all(h.abs_max(end[0], end[0] + 1e-4) >= np.abs(h.accel(end, "-")[:, 0]) * (1 - 1e-12))
+
+
+def test_engine_refuses_loads_it_cannot_bound():
+    """g-jitter is random with no bound, so the full-contact engine refuses it rather than ignoring it."""
+    from dolle_sim.engine import FullContactSim
+    cfg = {"dt_s": 1e-3, "duration_s": 1e-3, "output_fps": 100,
+           "environment": {"preset": "ideal", "pressure_pa": 0.0, "jitter_rms_g": 1e-3},
+           "contact": {"contact_charging": False}, "forces": {}}
+    ch = {"name": "j", "size_m": [0.002] * 3, "wall_material": "glass_borosilicate",
+          "particles": [{"material": "silica", "count": 1, "radius_m": 50e-6, "velocity": {"speed_mean_m_s": 0.0},
+                         "initial_state": {"type": "free"}}]}
+    with pytest.raises(ValueError):
+        FullContactSim(cfg, ch, 0)

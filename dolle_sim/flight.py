@@ -323,6 +323,19 @@ class FlightProfile:
                 a += float(p["peak_g"]) * math.sin(math.pi * (t - t0) / tau)   # half-sine shock pulse
         return a
 
+    def knots_in(self, t0: float, t1: float) -> list:
+        """Times inside (t0, t1) where the specific force can peak between samples: the descent table's points and
+        the peaks of the half-sine shocks (parachute opening, splash, user impulses)."""
+        out = []
+        if t1 > self.apogee_s and t0 < self.chute_s:
+            tt = np.asarray(self._t)
+            out += tt[(tt > t0) & (tt < t1)].tolist()
+        for a, b in self.event_windows():
+            pk = 0.5 * (a + b)
+            if t0 < pk < t1:
+                out.append(pk)
+        return out
+
     def event_windows(self) -> list:
         """Short load events the time step must resolve: the user impulses, the parachute opening, the splash."""
         w = [(float(i["t_s"]), float(i["t_s"]) + float(i["duration_s"])) for i in self.impulses]
