@@ -40,7 +40,6 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 CONFIG = "configs/mission_quarter_deck.json"
 ORDER = ["nominal", "launch_vibration", "rough_grains", "kick+spin_1hz", "kick", "no_release", "strong_shaker",
          "no_drag", "kick+lying", "kick+gas_100pa", "kick+gas_1atm", "rough_grains+hang_nose_up",
@@ -55,10 +54,20 @@ BRANCH = {"kick": ("nominal", 89.9), "no_release": ("nominal", 89.9), "strong_sh
           "rough_grains+shock_oblique": ("rough_grains", 459.0)}
 
 
+_NAMES = {}
+
+
 def tubule_names(sc):
-    from dolle_sim.mission import apply_scenario, tubule_chamber
-    m = apply_scenario(json.loads((ROOT / CONFIG).read_text(encoding="utf-8")), None if sc == "nominal" else sc)
-    return [tubule_chamber(m, t)["name"] for t in m["tubules"]]
+    """The scenario's tubule names, computed in a child process (this script stays small: it imports none of the
+    simulator, which would hold ~0.5 GB for the whole campaign)."""
+    if sc not in _NAMES:
+        code = ("import json, sys; from dolle_sim.mission import apply_scenario, tubule_chamber; "
+                f"m = apply_scenario(json.loads(open({str(ROOT / CONFIG)!r}, encoding='utf-8').read()), "
+                f"{None if sc == 'nominal' else sc!r}); print(json.dumps([tubule_chamber(m, t)['name'] "
+                "for t in m['tubules']]))")
+        out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, check=True)
+        _NAMES[sc] = json.loads(out.stdout.strip().splitlines()[-1])
+    return _NAMES[sc]
 
 
 def out_dir(sc):
@@ -66,8 +75,7 @@ def out_dir(sc):
 
 
 def done_tubule(sc, name):
-    from dolle_sim.mission import final_state_path
-    return final_state_path(out_dir(sc), name).exists()
+    return (out_dir(sc) / "tubules" / f"{name}.pkl").exists()        # dolle_sim.mission.final_state_path
 
 
 def free_commit_gb():
