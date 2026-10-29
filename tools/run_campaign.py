@@ -99,7 +99,7 @@ def free_commit_gb():
 
 
 def out_of_memory(sc, i):
-    """Did the tubule's last attempt die of memory exhaustion (its log ends with a MemoryError)?"""
+    """Did the tubule's last attempt die of memory exhaustion?"""
     try:
         with open(ROOT / "results" / f"mission_{sc}_T{i + 1}.log", "rb") as f:
             f.seek(0, 2)
@@ -107,7 +107,9 @@ def out_of_memory(sc, i):
             tail = f.read().decode("utf-8", "replace")
     except OSError:
         return False
-    return "MemoryError" in tail.split("--- started again")[-1]
+    tail = tail.split("--- started again")[-1]
+    # a MemoryError, or a hard crash (no Python traceback) while the machine is short of memory
+    return "MemoryError" in tail or ("Traceback" not in tail and free_commit_gb() < 1.0)
 
 
 class Adopted:
