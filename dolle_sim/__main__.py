@@ -279,7 +279,17 @@ def cmd_mission(a):
             raise SystemExit("--resume-from needs --resume-at")
         mission["resume_from"], mission["resume_at_s"] = a.resume_from, a.resume_at
         print(f"Continuing from the checkpoints at T+{a.resume_at:g} s in {a.resume_from} (verified identical up to then)")
-    summary, _ = run_mission(mission, out, a.scenario, jobs=a.jobs)
+    if a.tubule is not None:
+        from .mission import run_tubule
+        path = run_tubule(mission, out, a.scenario, a.tubule)
+        print(f"
+Tubule {a.tubule} done: final state in {path}")
+        return 0
+    if a.assemble:
+        from .mission import assemble_mission
+        summary, _ = assemble_mission(mission, out, a.scenario)
+    else:
+        summary, _ = run_mission(mission, out, a.scenario, jobs=a.jobs)
     for t in summary["tubules"]:
         print(f"  {t['tubule']}: {t['grains_released']} of {t['n_grains']} grains released at least once "
               f"({t['detachment_events']} release events: {t['detachments_by_phase']}); {t['free_at_power_off']} free at "
@@ -413,6 +423,9 @@ def main(argv=None):
                     "(verified: the scenarios must be identical up to --resume-at)")
     mi.add_argument("--resume-at", type=float, help="the checkpoint time to continue from [s]")
     mi.add_argument("--grains", type=int, help="grains per tubule (overrides the config's example amount)")
+    mi.add_argument("--tubule", type=int, help="run only this tubule (0-3) and save its final state (for a campaign "
+                    "that schedules tubules one by one)")
+    mi.add_argument("--assemble", action="store_true", help="write the outputs from the tubules' saved final states")
     mi.set_defaults(fn=cmd_mission)
     sz = sub.add_parser("sizes", help="size distributions: fit D10/D50/D90 or measure microscope images")
     sz.add_argument("--image", nargs="+")

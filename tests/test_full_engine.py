@@ -243,3 +243,24 @@ def test_engine_refuses_loads_it_cannot_bound():
                          "initial_state": {"type": "free"}}]}
     with pytest.raises(ValueError):
         FullContactSim(cfg, ch, 0)
+
+
+def test_tubule_by_tubule_run_is_the_mission_run(tmp_path):
+    """A campaign may run a scenario's tubules one by one (run_tubule) and assemble the outputs: the result is
+    exactly run_mission's (same configurations and seeds)."""
+    from dolle_sim.mission import run_mission, run_tubule, assemble_mission
+    m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
+    m["tubules"] = m["tubules"][:2]
+    for t in m["tubules"]:
+        t["dust"]["count"] = 12
+    m["simulate_to_s"] = 2.0
+    s1, sims1 = run_mission(m, tmp_path / "a", jobs=1, write_outputs=False)
+    for i in range(2):
+        run_tubule(m, tmp_path / "b", None, i)
+    s2, sims2 = assemble_mission(m, tmp_path / "b", write_outputs=False)
+    for s in (s1, s2):                                          # computing time differs, of course
+        for t in s["tubules"]:
+            t.pop("wall_time_s", None)
+    assert json.dumps(s1, sort_keys=True, default=str) == json.dumps(s2, sort_keys=True, default=str)
+    for a, b in zip(sims1, sims2):
+        assert all(np.array_equal(getattr(a, k), getattr(b, k)) for k in ("x", "v", "w", "regime"))

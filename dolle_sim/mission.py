@@ -286,18 +286,57 @@ def summarize(sim, prof: FlightProfile) -> dict:
             "events": dict(sim.n_events), "wall_time_s": getattr(sim, "wall_time", None)}
 
 
-def run_mission(mission: dict, out: Path, scenario: str | None = None, jobs: int = 1, write_outputs=True):
+def _tubule_args(mission: dict, out: Path, scenario: str | None):
     m = apply_scenario(mission, scenario)
-    prof = FlightProfile.from_config(m.get("flight_profile"))
     cfg = mission_cfg(m)
+    return m, cfg, [(cfg, tubule_chamber(m, t), int(m.get("seed", 0)) + i, out) for i, t in enumerate(m["tubules"])]
+
+
+def final_state_path(out: Path, name: str) -> Path:
+    return Path(out) / "tubules" / f"{name}.pkl"
+
+
+def run_tubule(mission: dict, out: Path, scenario: str | None, index: int) -> Path:
+    """Run one tubule of a scenario (the same configuration and seed as in run_mission) and save its final state, so
+    a campaign can schedule tubules one by one; assemble_mission writes the scenario's outputs from the four."""
+    import pickle
     out.mkdir(parents=True, exist_ok=True)
-    args = [(cfg, tubule_chamber(m, t), int(m.get("seed", 0)) + i, out) for i, t in enumerate(m["tubules"])]
+    m, cfg, args = _tubule_args(mission, out, scenario)
+    s = _run_one(args[index])
+    path = final_state_path(out, s.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump(s, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(path)
+    return path
+
+
+def assemble_mission(mission: dict, out: Path, scenario: str | None = None, write_outputs=True):
+    """The scenario's outputs from its tubules' saved final states (run_tubule)."""
+    import pickle
+    m, cfg, args = _tubule_args(mission, out, scenario)
+    sims = []
+    for a in args:
+        with open(final_state_path(out, a[1]["name"]), "rb") as f:
+            sims.append(pickle.load(f))
+    return _write_mission(m, cfg, out, sims, write_outputs)
+
+
+def run_mission(mission: dict, out: Path, scenario: str | None = None, jobs: int = 1, write_outputs=True):
+    out.mkdir(parents=True, exist_ok=True)
+    m, cfg, args = _tubule_args(mission, out, scenario)
     if jobs > 1:
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=jobs) as ex:
             sims = list(ex.map(_run_one, args))
     else:
         sims = [_run_one(a) for a in args]
+    return _write_mission(m, cfg, out, sims, write_outputs)
+
+
+def _write_mission(m, cfg, out, sims, write_outputs):
+    prof = FlightProfile.from_config(m.get("flight_profile"))
     summary = {"name": m.get("name"), "scenario": m.get("scenario"), "flight_profile": prof.to_dict(),
                "gas": m.get("gas"), "launch_loads": launch_report(m),
                "tubules": [summarize(s, prof) for s in sims]}
