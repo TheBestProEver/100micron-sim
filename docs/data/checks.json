@@ -9,7 +9,7 @@
     "criterion": "|e - 1| < 1e-3",
     "passed": true,
     "details": "",
-    "seconds": 0.31
+    "seconds": 0.3
    },
    {
     "id": "damping",
@@ -69,7 +69,7 @@
     "criterion": "< 10 nm",
     "passed": true,
     "details": "",
-    "seconds": 0.11
+    "seconds": 0.08
    },
    {
     "id": "rotating_frame",
@@ -79,7 +79,7 @@
     "criterion": "< 1 nm; ratio > 3.5",
     "passed": true,
     "details": "",
-    "seconds": 3.14
+    "seconds": 4.11
    },
    {
     "id": "rigid_body",
@@ -89,7 +89,7 @@
     "criterion": "max dE < 1e-3, drift < 1e-5, dL < 1e-10",
     "passed": true,
     "details": "",
-    "seconds": 1.59
+    "seconds": 2.07
    },
    {
     "id": "impulse",
@@ -119,7 +119,7 @@
     "criterion": "< 1 nm, no corrections",
     "passed": true,
     "details": "",
-    "seconds": 2.44
+    "seconds": 1.37
    },
    {
     "id": "no_overlap",
@@ -129,7 +129,7 @@
     "criterion": "< 1e-3 R",
     "passed": true,
     "details": "",
-    "seconds": 4.22
+    "seconds": 3.87
    },
    {
     "id": "space_charge",
@@ -139,7 +139,7 @@
     "criterion": "< 6%; image within 10%",
     "passed": true,
     "details": "1 mm: 0.987; 2 mm: 0.994; 3 mm: 1.009; 5 mm: 1.011",
-    "seconds": 0.13
+    "seconds": 0.11
    },
    {
     "id": "charging",
@@ -159,7 +159,7 @@
     "criterion": "< 5%; coverage 40-95%",
     "passed": true,
     "details": "",
-    "seconds": 8.52
+    "seconds": 6.35
    },
    {
     "id": "spin_rotating_frame",
@@ -169,7 +169,7 @@
     "criterion": "< 1e-9",
     "passed": true,
     "details": "",
-    "seconds": 7.74
+    "seconds": 6.85
    },
    {
     "id": "fragmentation_energy",
@@ -179,7 +179,7 @@
     "criterion": "<= 1e-9, none, >= 20 fragmentations",
     "passed": true,
     "details": "",
-    "seconds": 3.7
+    "seconds": 3.05
    },
    {
     "id": "friction_energy",
@@ -189,7 +189,7 @@
     "criterion": "<= 0",
     "passed": true,
     "details": "",
-    "seconds": 0.32
+    "seconds": 0.27
    },
    {
     "id": "drag_limits",
@@ -219,7 +219,7 @@
     "criterion": "within 5%",
     "passed": true,
     "details": "",
-    "seconds": 0.68
+    "seconds": 0.53
    },
    {
     "id": "flight_frame",
@@ -229,7 +229,7 @@
     "criterion": "< 0.2%; ratio > 3.5; < 1e-8",
     "passed": true,
     "details": "",
-    "seconds": 25.65
+    "seconds": 29.02
    },
    {
     "id": "detachment",
@@ -239,7 +239,7 @@
     "criterion": "exact; < 1e-9 m/s",
     "passed": true,
     "details": "",
-    "seconds": 1.53
+    "seconds": 1.01
    },
    {
     "id": "settling",
@@ -249,7 +249,7 @@
     "criterion": "> 95%, > 90% aft, none outside",
     "passed": true,
     "details": "",
-    "seconds": 6.1
+    "seconds": 5.24
    },
    {
     "id": "reentry",
@@ -259,7 +259,7 @@
     "criterion": "< 1e-5; < 5 m; < 1e-5",
     "passed": true,
     "details": "",
-    "seconds": 2.17
+    "seconds": 2.4
    }
   ],
   "part2": [
@@ -272,7 +272,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 14.9
+    "seconds": 13.6
    },
    {
     "id": "dem_conservation",
@@ -305,7 +305,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 0.0
+    "seconds": 0.1
    },
    {
     "id": "random_vibration",
@@ -316,7 +316,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 6.6
+    "seconds": 4.8
    },
    {
     "id": "time_step",
@@ -338,7 +338,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 0.7
+    "seconds": 0.6
    },
    {
     "id": "sleep_exact",
@@ -349,29 +349,29 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 3.6
+    "seconds": 3.3
    },
    {
     "id": "engine_handoff",
     "name": "Free flight to contact hand-off (engine)",
-    "what": "Two silica grains (one spinning at 200 rad/s) approach obliquely at 5 cm/s, 40 um apart. The engine flies them exactly, hands them to the DEM within the capture distance, resolves the impact and lets them fly apart. Compared after 2 ms with the same initial state run in the DEM throughout (at half the engine's step): the engine may differ by no more than 3x the DEM's own step error (DEM at the engine's step vs half of it), i.e. the hand-off adds nothing beyond time discretisation.",
-    "value": "impacts 1; engine vs reference: velocity 4.4e-04, spin 4.1e-04, position 3.1e-04 of R; DEM step error: 4.0e-04, 5.1e-04, 2.8e-04",
-    "criterion": "1 impact; each <= 3x the step error",
+    "what": "Two silica grains (one spinning at 200 rad/s) approach obliquely at 5 cm/s, 40 um apart. The engine flies them exactly, hands them to the DEM before they can come within the capture distance (leaving and rejoining it as its bounds allow), resolves the impact and lets them fly apart. After 2 ms it is compared (a) with the DEM alone on the engine's own time grid (its DEM segments, free flight in closed form between them, which is what velocity Verlet gives without forces): the hand-off itself must add nothing beyond round-off (amplified by the stiff contact; 1e-8); and (b) with a fine DEM reference (1/8 of the engine's step): it must lie within 1.5x the spread of the DEM at the engine's step over 8 phases of the time grid (where an impact starts between two steps is the DEM's own discretisation error).",
+    "value": "impacts 1; 2 DEM segments; (a) vs the DEM on the engine's grid: velocity 2.5e-10, spin 8.9e-11, position 1.4e-10 of R; (b) vs the fine reference: 1.8e-03, 7.0e-04, 1.3e-03; DEM grid-phase spread 2.0e-03, 3.0e-03, 1.4e-03",
+    "criterion": "1 impact; (a) each <= 1e-8; (b) each <= 1.5x the grid-phase spread",
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 1.0
+    "seconds": 3.6
    },
    {
     "id": "engine_regimes",
     "name": "Engine regimes vs all-DEM",
     "what": "A row of 3 resting 50 um silica grains on a glass floor under 1 g, 6 um apart, struck end-on by a grain at 6 cm/s (the blow passes down the row); a grain rolling at 4 mm/s beside the row; a grain landing on the row from above at 1.5 cm/s; 5 more grains resting apart. Run 2 ms by the engine (sleepers join the DEM when approached, the rolling grain on the slaved model, flight exact, every step verified) and with every grain in the full DEM throughout (at the engine's step and at half of it). The engine may differ from the all-DEM run by no more than 3x the DEM's own step error, with the same contacts and outcomes.",
-    "value": "contacts: 5 (same in all runs: True); engine vs all-DEM: position 1.2e-03 R, velocity 4.2e-04 of 6 cm/s; DEM step error 8.8e-04 R, 6.2e-04; sleepers joined on approach 1, verified steps 2, steps redone 2",
+    "value": "contacts: 5 (same in all runs: True); engine vs all-DEM: position 4.8e-04 R, velocity 3.5e-04 of 6 cm/s; DEM step error 8.8e-04 R, 6.2e-04; sleepers joined on approach 0, verified steps 2, steps redone 4",
     "criterion": "same contacts; each <= 3x the step error",
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 6.0
+    "seconds": 5.2
    },
    {
     "id": "linres",
@@ -393,18 +393,18 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 4.7
+    "seconds": 4.2
    },
    {
     "id": "engine_slaved",
     "name": "Slaved clusters in the engine vs all-DEM",
     "what": "A stuck pair of 50 um silica grains on a glass floor rolls sideways under 10 g (1 g pressing) while a single grain rolls after it, 0.4 mm behind and 10 cm/s faster, and hits it. Run 6 ms by the engine (the pair on the slaved model, the single grain on the slaved rolling model, both captured into the full model before they meet) and with every grain in the full model throughout (at the engine's step and half of it). Same contacts and outcomes; each grain within 3x the full model's own step error plus 3e-5 of its path (the slaved models' validated accuracy); slaved steps taken.",
-    "value": "contacts 5 (same as all-DEM: True); slaved entries 3, slaved grain-steps 8480; pair rolled 24.22 R; engine vs all-DEM 5.8e-06 R (allowed 4.8e-03-1.7e-02 R); DEM step error 5.5e-03 R; steps redone 3",
+    "value": "contacts 5 (same as all-DEM: True); slaved entries 3, slaved grain-steps 8480; pair rolled 24.22 R; engine vs all-DEM 5.8e-06 R (allowed 4.8e-03-1.7e-02 R); DEM step error 5.5e-03 R; steps redone 4",
     "criterion": "same contacts; slaved steps taken; each grain <= 3x step error + 3e-5 of its path",
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 11.9
+    "seconds": 9.7
    }
   ]
  },
@@ -531,7 +531,7 @@
   ]
  },
  "unit_tests": {
-  "tests": 92,
+  "tests": 96,
   "failures": 0,
   "errors": 0,
   "skipped": 0

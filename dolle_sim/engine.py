@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import heapq
 import json
 import math
 import pickle
@@ -360,14 +361,18 @@ class FullContactSim:
         return min(dt, self.duration - t)
 
     def _motion_bound(self, H, T):
-        """Most each grain can move in H: |v| H + (1/2) a_max H^2, a_max bounding every body force per unit mass."""
-        a = np.abs(self.loads.accel(np.array([T, T + H]))).max(0)
+        """Most each grain can move in H: |v| H + (1/2) a_max H^2, a_max bounding every body force per unit mass
+        over the step: the loads' bound over [T, T + H] (Loads.accel_bound), centrifugal and Euler terms out to the
+        farthest point of the tubule, and the velocity-dependent Coriolis and drag terms c |v| (c = 2 Omega + g) with
+        the speed they can reach: |a| <= (a0 + c |v0|) exp(c H) (Gronwall)."""
+        a = self.loads.accel_bound(T, T + H)
         Om = float(np.abs(self.loads.omega(np.array([T, T + H]))).max())
-        Omd = float(np.abs(self.loads.omega_dot(np.array([T]))).max())
+        Omd = float(np.abs(self.loads.omega_dot(np.array([T, T + H - 1e-12]))).max())
         rmax = float(np.linalg.norm(np.abs(self.off) + self.L))
         vm = np.linalg.norm(self.v, axis=1)
-        amax = np.linalg.norm(a) + Om * Om * rmax + Omd * rmax + 2 * Om * vm + self.gdrag * vm \
-            + np.linalg.norm(self._F_lr, axis=1) / self.m
+        c = 2 * Om + self.gdrag
+        amax = (np.linalg.norm(a) + Om * Om * rmax + Omd * rmax + np.linalg.norm(self._F_lr, axis=1) / self.m
+                + c * vm) * np.exp(c * H)
         return vm * H + 0.5 * amax * H * H + 1e-9
 
     def _motion_bound_rest(self, H, T):
@@ -383,25 +388,48 @@ class FullContactSim:
         treatment made about another is checked against what actually happened. The speed of every grain in the DEM
         against the speed bound the others used for it; the path of every rolling grain against the rolling envelope
         the others used for it; every grain that entered the DEM during the step (a sleeper a DEM grain came up to, a
-        flying or rolling grain that was captured) against every grain advanced outside the DEM. If a check fails the
+        flying or rolling grain that was captured) against every grain outside the DEM after it entered. If a check fails the
         step is redone from its start, with those grains in the DEM from the start (or a larger speed bound), so no
         interaction is ever missed."""
         snap = self._snapshot()
         force, vfac = (set(range(self.N)) if self.all_dem else set()), 1.0
+        noexit = set()
+        why = {}
         for _ in range(64):
-            bad, vf = self._step_once(t, H, force, vfac)
+            bad, vf = self._step_once(t, H, force, vfac, noexit)
             if not bad and vf is None:
                 break
+            missed = set(self._chk["missed"])
+            rolled = set(int(k) for k in self._chk["roll_bad"])
+            key = "redos_missed_contact" if missed else ("redos_speed_bound" if vf is not None else
+                                                         "redos_rolling_envelope" if rolled else "redos_outside_record")
+            why[key] = why.get(key, 0) + 1
             self._restore(snap)
-            self.n_events["redos"] = self.n_events.get("redos", 0) + 1
-            force |= bad
+            force |= bad                           # in the DEM from the start: the same check cannot fail again for them
+            noexit |= missed | rolled              # these stay in it for the whole step: an exit could repeat the failure
             if vf is not None:
                 vfac = vf
         else:
             raise RuntimeError(f"{self.name}: the step at t = {t} s could not be verified")
+        for key, n in why.items():                 # every redo, by the check that asked for it
+            self.n_events[key] = self.n_events.get(key, 0) + n
+            self.n_events["redos"] = self.n_events.get("redos", 0) + n
         self.t = t + H
         self._log_events(t + H)
         self._classify(t + H)
+
+    @staticmethod
+    def _island_lu(isl):
+        """The island's LU factor (refactorised, identically, after a checkpoint is loaded)."""
+        if isl.get("lu") is None:
+            from scipy.sparse.linalg import splu
+            isl["lu"] = splu(isl["K"])
+        return isl["lu"]
+
+    def __getstate__(self):
+        st = self.__dict__.copy()
+        st["_islands"] = {i: {k: v for k, v in isl.items() if k != "lu"} for i, isl in self._islands.items()}
+        return st
 
     def checkpoint_path(self, T, directory=None):
         return Path(directory or self.checkpoint_dir) / f"{self.name}_T{T:08.3f}.pkl"
@@ -438,7 +466,7 @@ class FullContactSim:
         self.base.rng.bit_generator.state = copy.deepcopy(sn["rng"])
         self._slv, self._slv_of, self._next_slv = copy.deepcopy(sn["slv"]), dict(sn["slv_of"]), sn["next_slv"]
 
-    def _step_once(self, t, H, force, vfac):
+    def _step_once(self, t, H, force, vfac, noexit=frozenset()):
         T = self.env.t0_flight + t
         self._update_long_range(t)
         v_start = self.v.copy()
@@ -533,8 +561,11 @@ class FullContactSim:
                           c["lam"].copy())
             self._slv_restore(pre)
         self._vdem_fac = vfac
+        self._noexit = noexit
+        # dmax: each grain's largest distance in the step from x_ref, where it was when it entered the DEM (t_in)
         self._chk = dict(speed=[], vmax=[], outside=[], dmax=np.zeros(self.N), in_dem=np.zeros(self.N, bool),
-                         roll_bad=set(), x_seen=x_seen, slv_of=dict(self._slv_of))
+                         t_in=np.full(self.N, np.inf), x_ref=x_seen.copy(), roll_bad=set(), x_seen=x_seen,
+                         slv_of=dict(self._slv_of), exited={}, missed=set(), was_out=np.zeros(self.N, bool))
         vm0 = np.linalg.norm(self.v, axis=1)
         a_b = np.maximum((s - s_off - vm0 * H) * 2 / (H * H), 0.0)
         # 3. capture times: the earliest time each free or rolling grain could come within the capture distance of
@@ -559,8 +590,10 @@ class FullContactSim:
             for cid in list(self._slv):
                 c, pre = self._slv[cid], slv_pre[cid]
                 mem = c["members"]
-                self._chk["outside"].append((mem.copy(), x_seen[mem].copy(), pre["s"].copy()))
                 t_j = min(min(th[int(k)] for k in mem), pre["t_stop"])
+                self._chk["outside"].append((mem.copy(), x_seen[mem].copy(), pre["s"].copy(), t, t + min(t_j, H),
+                                             np.zeros((len(mem), 3)), pre["s"].copy()))
+                self._chk["was_out"][mem] = True
                 if t_j >= H:                      # it runs through: the pre-run's end state
                     xe, ve, we, he, le = pre["end"]
                     self.x[mem], self.v[mem], self.w[mem] = xe, ve, we
@@ -581,11 +614,11 @@ class FullContactSim:
                     xjoin.append((t + msteps * dts, [int(k) for k in mem]))
             whole_f = np.array([k for k in fr if th[k] >= H], np.int64)
             if len(whole_f):
-                self._outside(whole_f, s[whole_f])
+                self._outside(whole_f, s[whole_f], t, t + H, self.v[whole_f], s[whole_f] - vm0[whole_f] * H)
                 self._free_flight(whole_f, t, H)
             whole_r = np.array([k for k in ro if th[k] >= H], np.int64)
             if len(whole_r):
-                self._outside(whole_r, s[whole_r])
+                self._outside(whole_r, s[whole_r], t, t + H)
                 failed = self._roll_step(whole_r, t, H, vm0[whole_r], a_b[whole_r], s_off[whole_r])
                 self.regime[failed] = ACTIVE
             groups = {}
@@ -597,10 +630,10 @@ class FullContactSim:
                 flyers = np.array([k for k in g if self.regime[k] == FREE], np.int64)
                 rollers = np.array([k for k in g if self.regime[k] == ROLL], np.int64)
                 if kk > 0 and len(flyers):
-                    self._outside(flyers, s[flyers])
+                    self._outside(flyers, s[flyers], t, t + kk * dt_d, self.v[flyers], s[flyers] - vm0[flyers] * H)
                     self._free_flight(flyers, t, kk * dt_d)
                 if kk > 0 and len(rollers):
-                    self._outside(rollers, s[rollers])
+                    self._outside(rollers, s[rollers], t, t + kk * dt_d)
                     failed = self._roll_step(rollers, t, kk * dt_d, vm0[rollers], a_b[rollers], s_off[rollers])
                     for k in failed:              # back at the step start: in the DEM for the whole step
                         self.regime[k] = ACTIVE
@@ -610,9 +643,9 @@ class FullContactSim:
                     self.regime[k] = ACTIVE
                 joins.setdefault(kk, []).extend(g)
         # 4. active grains: full-stiffness DEM over [t, t + H] in chunks; captured grains join at their capture
-        # times, sleepers when a DEM grain comes up to them; after each chunk, grains that touch nothing and are clear
-        # of everything for the rest of the step go back to free flight, and grains resting on one wall and clear go
-        # back to the slaved rolling model
+        # times, sleepers when a DEM grain comes up to them; after each chunk, grains that touch nothing go back to
+        # free flight, and grains resting on one wall to the slaved rolling model, up to the earliest time they could
+        # come within the capture distance of anything (the rest of the step at most), and join the DEM again then
         ai = np.flatnonzero(self.regime == ACTIVE)
         late = {kk: v for kk, v in joins.items() if kk > 0}
         tj = {kk: t + kk * dt_d for kk in late}
@@ -620,32 +653,46 @@ class FullContactSim:
             late[-1 - q] = g
             tj[-1 - q] = tq
         if len(ai):
-            join_at = sorted((tj[q], q) for q in late)
+            join_at = [(tj[q], q) for q in late]
+            heapq.heapify(join_at)
             in_late = set(k for v in late.values() for k in v)
             cur = np.array([k for k in ai if int(k) not in in_late], np.int64)
             t_cur, t_end = t, t + H
             chunk = 20000 * self._dt_dem
             s_full = s.copy()
             s_full[self.regime == ASLEEP] = 0.0
-            jq = 0
+            nkey = -10 ** 9                       # keys of the rejoins (captures are > 0, slaved clusters -1 - q)
             while t_cur < t_end - 1e-15:
-                t_next = join_at[jq][0] if jq < len(join_at) else t_end
+                t_next = join_at[0][0] if join_at else t_end
                 seg_end = min(t_next, t_cur + chunk, t_end)
                 if seg_end > t_cur + 1e-15 and len(cur):
                     cur = self._dem(cur, t_cur, seg_end - t_cur)
                 t_cur = seg_end
-                while jq < len(join_at) and join_at[jq][0] <= t_cur + 1e-15:
-                    cur = np.union1d(cur, np.array(late[join_at[jq][1]], np.int64))
-                    jq += 1
+                while join_at and join_at[0][0] <= t_cur + 1e-15:
+                    g = np.array(late.pop(heapq.heappop(join_at)[1]), np.int64)
+                    for k in g:
+                        self._roll_face.pop(int(k), None)
+                    self.regime[g] = ACTIVE
+                    cur = np.union1d(cur, g)
                 if t_cur < t_end - 1e-15 and len(cur):
-                    cur = self._early_exit(cur, t_cur, t_end, x_seen, s_full, v_start, t, H)
+                    cur, rejoin = self._early_exit(cur, t_cur, t_end, x_seen, s_full, v_start, t, H)
+                    for tq, g in rejoin:
+                        late[nkey] = g
+                        heapq.heappush(join_at, (tq, nkey))
+                        nkey += 1
         return self._verify(s, reg_seen)
 
-    def _outside(self, ks, S):
-        """Record grains about to be advanced outside the DEM: position now and the bound on their displacement."""
+    def _outside(self, ks, S, t_from, t_back, V=None, C=None):
+        """Record grains about to be advanced outside the DEM from t_from to t_back (the step's end, or when they
+        join the DEM): position now, a bound S on their displacement, and for free flight its velocity V now and a
+        bound C on the deviation from the straight line (|x(t) - x - V (t - t_from)| <= C; else V = 0, C = S)."""
         ks = np.asarray(ks, np.int64)
         if len(ks):
-            self._chk["outside"].append((ks.copy(), self.x[ks].copy(), np.asarray(S, float).copy()))
+            S = np.asarray(S, float).copy()
+            V = np.zeros((len(ks), 3)) if V is None else np.asarray(V, float).copy()
+            C = S.copy() if C is None else np.minimum(np.asarray(C, float), S)
+            self._chk["outside"].append((ks.copy(), self.x[ks].copy(), S, float(t_from), float(t_back), V, C))
+            self._chk["was_out"][ks] = True
 
     def _verify(self, s, reg_seen):
         """The step's checks (see step). Returns (grains to put in the DEM from the start, new speed factor or
@@ -659,8 +706,16 @@ class FullContactSim:
                 if tb > tc + 1e-15:
                     obs = np.maximum(obs, vg[idx])
             over = obs > vb
-            if over.any():
-                vf = max(vf or 0.0, self._vdem_fac * 1.25 * float((obs[over] / np.maximum(vb[over], 1e-30)).max()))
+            zero = over & (vb <= 1e-6 * obs)       # a bound of ~0 (a grain taken to be at rest): no factor can mend it
+            bad.update(int(k) for k in idx[zero])  # the grain goes into the DEM from the start instead
+            sc = over & ~zero
+            if sc.any():
+                vf = max(vf or 0.0, self._vdem_fac * 1.25 * float((obs[sc] / vb[sc]).max()))
+        # a grain that entered the DEM during the step (not active at its start): up to then its capture time (or,
+        # asleep, its static certificate) kept it clear of every other grain's bounded motion; from then on it is
+        # within dmax of where it entered, and must be clear of every grain outside the DEM at the same time
+        self._missed_end()
+        bad |= chk["missed"]
         cand = np.flatnonzero(chk["in_dem"] & (reg_seen != ACTIVE))
         if len(cand) and chk["outside"]:
             K = np.concatenate([r[0] for r in chk["outside"]])
@@ -668,97 +723,166 @@ class FullContactSim:
             KC = np.array([cl.get(int(k), -1) for k in K], np.int64)       # by the slaved model, then the DEM
             X = np.vstack([r[1] for r in chk["outside"]])
             S = np.concatenate([r[2] for r in chk["outside"]])
-            xs = chk["x_seen"]
-            Dg = np.maximum(chk["dmax"][cand], np.where(reg_seen[cand] == ASLEEP, 0.0, s[cand]))
+            TA = np.concatenate([np.full(len(r[0]), r[3]) for r in chk["outside"]])
+            TB = np.concatenate([np.full(len(r[0]), r[4]) for r in chk["outside"]])
+            V = np.vstack([r[5] for r in chk["outside"]])
+            C = np.concatenate([r[6] for r in chk["outside"]])
+            xr, t_in = chk["x_ref"], chk["t_in"]
+            Dg = chk["dmax"][cand]
             tree = cKDTree(X)
             rmax = float(self.rad.max())
             for q, g in enumerate(cand):
-                for idx in tree.query_ball_point(xs[g], 2 * rmax + float(S.max()) + Dg[q] + self.d_cap + 1e-12):
+                for idx in tree.query_ball_point(xr[g], 2 * rmax + float(S.max()) + Dg[q] + self.d_cap + 1e-12):
                     k = int(K[idx])
-                    if k == int(g) or (KC[idx] >= 0 and KC[idx] == cl.get(int(g), -2)):
+                    if k == int(g) or (KC[idx] >= 0 and KC[idx] == cl.get(int(g), -2)) or TB[idx] < t_in[g] - 1e-15:
                         continue
-                    gap = float(np.linalg.norm(xs[g] - X[idx])) - self.rad[g] - self.rad[k]
-                    if gap - S[idx] - Dg[q] <= self.d_cap:
+                    # closest approach of the record's straight line to where g entered, while both are out of
+                    # their reach of each other's treatment: [max(from, t_in), to]
+                    d0 = xr[g] - X[idx]
+                    v2 = float(V[idx] @ V[idx])
+                    ta, tb = max(TA[idx], t_in[g]) - TA[idx], TB[idx] - TA[idx]
+                    tau = min(max(float(d0 @ V[idx]) / v2, ta), max(ta, tb)) if v2 > 0 else 0.0
+                    gap = float(np.linalg.norm(d0 - V[idx] * tau)) - self.rad[g] - self.rad[k]
+                    if gap - C[idx] - Dg[q] <= self.d_cap:
                         bad.add(int(g))
                         break
         self.n_events["checked_steps"] = self.n_events.get("checked_steps", 0) + 1
         return bad, vf
 
-    def _early_exit(self, cur, t_now, t_end, x_start, s_full, v_start=None, t_step=None, H=None):
-        """Grains in the DEM that touch nothing and provably cannot come within the capture distance of anything
-        before t_end leave it and fly freely to t_end. The bounds: walls along their normals with the grain's own
-        velocity; grains outside the DEM by their step-start positions and whole-step motion bounds; grains still in
-        the DEM by their current positions and a speed bound for the rest of the step; sleeping grains do not move."""
+    def _early_exit(self, cur, t_now, t_end, x_start, s_full, v_start, t_step, H):
+        """Grains in the DEM that touch nothing (or rest on one wall only) leave it: exact free flight (or the slaved
+        rolling model) up to a lower bound on the earliest time they could come within the capture distance of
+        anything, where they join the DEM again (or to t_end if that is earlier). The bounds, all time-resolved:
+        * walls along their normals: the gap is g0 + u tau - a tau^2 / 2 at the least (u the velocity away from the
+          wall, a the grain's acceleration bound); for a rolling grain g0 - |v| tau - a tau^2 / 2 - offset (its
+          rolling envelope bounds the distance, not the direction);
+        * grains still in the DEM: current positions, their speed and acceleration bounds for the rest of the step
+          (local, never below the step-start bounds; recorded and checked against the actual speeds);
+        * grains that left the DEM earlier in this step: within S of where they left it until they rejoin, then
+          their step-start speed bounds (recorded and checked);
+        * free and sleeping grains outside the DEM all step: straight-line relative motion plus curvature bounds;
+        * other grains outside the DEM (late joiners, slaved clusters): their step-start positions and whole-step
+          motion bounds; once they join the DEM the step's verification checks them against every outside record.
+        Rejoin times are rounded down to a grid (earlier is always safe) so that fewer DEM segments are cut.
+        Returns the grains still in the DEM and [(time, [grain]), ...] for those coming back later in the step."""
         if self.all_dem:
-            return cur
-        in_c = np.zeros(self.N, bool)
-        in_c[cur] = True
-        touch = self._touching(in_c)
+            return cur, []
+        in_cur = np.zeros(self.N, bool)
+        in_cur[cur] = True
+        touch = self._touching(in_cur)
         busy = set()
+        nw = {}
+        npr = set()
         for i, j in touch:
             busy.add(i)
-            if j >= 0:
+            if j < 0:
+                nw.setdefault(i, []).append(-1 - j)
+            else:
                 busy.add(j)
+                npr.add(i)
+                npr.add(j)
         rem = t_end - t_now
         T = self.env.t0_flight + t_now
         vm = np.linalg.norm(self.v, axis=1)
         s_rem = self._motion_bound(rem, T)
-
-        def own_face(k):
-            return nw[k][0]
         a_k = np.maximum((s_rem - vm * rem) * 2 / (rem * rem), 0.0)
         d_cap = self.d_cap
-        in_cur = np.zeros(self.N, bool)
-        in_cur[cur] = True
-        # speed bounds of the grains in the DEM for the rest of the step: local (their own interaction groups now),
-        # and never below the bounds set at the step start, which also cover grains that may still join them
+        chk = self._chk
+        exited = chk["exited"]
         vdc, agc = self._speed_bounds(rem, a_k, in_cur)
         vdc = np.maximum(vdc, self._vd_step)
         agc = np.maximum(agc, self._ag_step)
         ref = np.where(in_cur[:, None], self.x, x_start)
-        sk_of, off_of = {}, {}
-        s_ref = np.where(in_cur, vdc * rem + 0.5 * agc * rem * rem, s_full)
-        out = []
-        rollers = []
-        nw = {}
-        npr = set()
-        for i, j in touch:
-            if j < 0:
-                nw.setdefault(i, []).append(-1 - j)
-            else:
-                npr.add(i)
-                npr.add(j)
+        off_any = self._off_any()
+        s_ref = np.where(in_cur, vdc * rem + 0.5 * agc * rem * rem + off_any, s_full)
+        for j, (te, xe, Se, tr, Ve, Ae) in exited.items():
+            if not in_cur[j]:
+                ref[j] = xe
+                s_ref[j] = Se + (Ve * rem + 0.5 * Ae * rem * rem + off_any[j] if tr < t_end else 0.0)
+        t_min = 1000 * self._dt_dem                # leaving for less than this is not worth it
+        qg = 250 * self._dt_dem                    # grid of the rejoin times
+
+        def t_iso(gap, v, a):
+            g = gap - d_cap
+            if g <= 0:
+                return 0.0
+            if a <= 0:
+                return g / v if v > 0 else np.inf
+            return 2 * g / (v + math.sqrt(v * v + 2 * a * g))
+
+        def t_lin(d0, dv, c):
+            q0 = float(d0 @ d0)
+            if q0 <= c * c:
+                return 0.0
+            b = float(d0 @ dv)
+            a2 = float(dv @ dv)
+            if a2 == 0.0 or b >= 0.0:
+                return np.inf
+            disc = b * b - a2 * (q0 - c * c)
+            if disc < 0:
+                return np.inf
+            return (-b - math.sqrt(disc)) / a2
         tree = None
+        out, rollers = [], []
+        tc_of, sk_of, off_of, vk_of = {}, {}, {}, {}
+        used = {}                                  # grains outside whose step-start speed bound was relied on
         for k in cur:
             k = int(k)
+            if k in self._noexit:
+                continue
             own = -1
             if k in busy:
                 if not self.use_roll or k in npr or len(nw.get(k, [])) != 1:
                     continue
                 own = nw[k][0]
-            ok = True
+            off_k = self._roll_off(np.array([k]), np.array([own]))[0] if own >= 0 else 0.0
+            vk = vm[k]
+            if own >= 0:                          # it starts rolling at r w x n (_try_roll): the larger speed
+                vk = max(vk, float(np.linalg.norm(self.rad[k] * np.cross(self.w[k], self._wall_normal(own)))))
+            tc = np.inf
             for f in range(6):
                 if f == own:
                     continue
                 ax = f // 2
-                g0 = (self.x[k, ax] if f % 2 == 0 else self.L[ax] - self.x[k, ax]) - self.rad[k] - d_cap
+                g0 = (self.x[k, ax] if f % 2 == 0 else self.L[ax] - self.x[k, ax]) - self.rad[k] - d_cap - off_k
                 u = self.v[k, ax] if f % 2 == 0 else -self.v[k, ax]
-                if g0 + min(u, 0.0) * rem - 0.5 * a_k[k] * rem * rem <= 0:
-                    ok = False
+                if g0 <= 0:
+                    tc = 0.0
                     break
-            if not ok:
+                a = a_k[k]
+                if own >= 0:                      # rolling: the envelope bounds the distance, not the direction
+                    tw = 2 * g0 / (vk + math.sqrt(vk * vk + 2 * a * g0)) if vk > 0 or a > 0 else np.inf
+                elif a > 0:
+                    r = math.sqrt(u * u + 2 * a * g0)
+                    tw = 2 * g0 / (r - u) if u <= 0 else (u + r) / a
+                else:
+                    tw = g0 / -u if u < 0 else np.inf
+                tc = min(tc, tw)
+            if tc < t_min:
                 continue
             if tree is None:
                 tree = cKDTree(ref)
-            off_k = self._roll_off(np.array([k]), np.array([own]))[0] if own >= 0 else 0.0
-            s_k = vm[k] * rem + 0.5 * a_k[k] * rem * rem + off_k
-            sk_of[k], off_of[k] = s_k, off_k
+            s_k = vk * rem + 0.5 * a_k[k] * rem * rem + off_k
+            mine = {}
             for j in tree.query_ball_point(self.x[k], 2 * self.rad.max() + d_cap + s_k + float(s_ref.max())):
                 if j == k:
                     continue
                 rsum = self.rad[j] + self.rad[k]
-                if v_start is not None and not in_cur[j] and self.regime[j] in (FREE, ASLEEP):
-                    # straight-line relative motion over the rest of the step + curvature bounds
+                if in_cur[j]:
+                    gap = float(np.linalg.norm(self.x[j] - self.x[k])) - rsum - off_k - off_any[j]
+                    tc = min(tc, t_iso(gap, vk + vdc[j], a_k[k] + agc[j]))
+                elif j in exited:
+                    # within S of where it left until it rejoins; then in the DEM with the speed bound it had there
+                    # when it left (recorded and checked against its speed after rejoining)
+                    te, xe, Se, tr, Ve, Ae = exited[j]
+                    gap = float(np.linalg.norm(xe - self.x[k])) - rsum - off_k - Se
+                    t1 = t_iso(gap, vk, a_k[k])
+                    if tr < t_end and t1 > tr - t_now:          # it may be back in the DEM by then
+                        t2 = t_iso(gap - off_any[j], vk + Ve, a_k[k] + Ae)
+                        t1 = max(tr - t_now, t2)
+                        mine[j] = Ve
+                    tc = min(tc, t1)
+                elif self.regime[j] in (FREE, ASLEEP):
                     if self.regime[j] == FREE:
                         a_j = max((s_full[j] - float(np.linalg.norm(v_start[j])) * H) * 2 / (H * H), 0.0)
                         d0 = x_start[j] + v_start[j] * (t_now - t_step) - self.x[k]
@@ -768,42 +892,83 @@ class FullContactSim:
                         d0 = self.x[j] - self.x[k]
                         dv = -self.v[k]
                         curv = 0.5 * a_k[k] * rem * rem + off_k
-                    a2 = float(dv @ dv)
-                    tau = 0.0 if a2 == 0 else min(max(-float(d0 @ dv) / a2, 0.0), rem)
-                    dmin = float(np.linalg.norm(d0 + dv * tau))
-                    if dmin - rsum - curv <= d_cap:
-                        ok = False
-                        break
-                    continue
-                gap = float(np.linalg.norm(ref[j] - self.x[k])) - rsum
-                if gap - s_ref[j] - s_k <= d_cap:
-                    ok = False
-                    break
-            if ok:
-                (rollers if own >= 0 else out).append(k)
-        back = []
-        for k in rollers:
-            if self._try_roll(k, own_face(k), T, rem):
-                kk = np.array([k], np.int64)
-                self._outside(kk, [sk_of[k]])
-                failed = self._roll_step(kk, t_now, rem, vm[kk], a_k[kk], np.array([off_of[k]]))
-                if len(failed):
-                    self.regime[k] = ACTIVE
+                    if own >= 0:                  # a roller may turn: no direction assumed
+                        tc = min(tc, t_iso(float(np.linalg.norm(d0)) - rsum - curv + 0.5 * a_k[k] * rem * rem,
+                                           vk + float(np.linalg.norm(dv + self.v[k])), a_k[k]))
+                    else:
+                        tc = min(tc, t_lin(d0, dv, rsum + d_cap + curv))
                 else:
-                    back.append(k)
-        if back:
-            cur = np.setdiff1d(cur, np.array(back, np.int64))
-            self.n_events["roll_reentries"] = self.n_events.get("roll_reentries", 0) + len(back)
-        if back or out:
-            self._chk["speed"].append((t_now, cur.copy(), vdc[cur]))
-        if out:
-            out = np.array(out, np.int64)
-            self.regime[out] = FREE
-            self._outside(out, [sk_of[k] for k in out])
-            self._free_flight(out, t_now, rem)
-            self.n_events["early_exits"] = self.n_events.get("early_exits", 0) + len(out)
-            cur = np.setdiff1d(cur, out)
-        return cur
+                    gap = float(np.linalg.norm(x_start[j] - self.x[k])) - rsum - off_k - s_full[j]
+                    tc = min(tc, t_iso(gap, vk, a_k[k]))
+                if tc < t_min:
+                    break
+            if tc < t_min:
+                continue
+            if tc < rem:
+                tg = t_step + math.floor((t_now + tc - t_step) / qg) * qg - t_now
+                if tg >= t_min:
+                    tc = tg
+            else:
+                tc = rem
+            used.update(mine)
+            tc_of[k] = tc
+            off_of[k] = off_k
+            vk_of[k] = vk
+            sk_of[k] = vk * tc + 0.5 * a_k[k] * tc * tc + off_k
+            (rollers if own >= 0 else out).append(k)
+        rejoin = []
+        left = []
+        xe_of = {k: self.x[k].copy() for k in out}
+        for k in rollers:
+            tc = tc_of[k]
+            if self._try_roll(k, nw[k][0], T, tc):
+                kk = np.array([k], np.int64)
+                xe_of[k] = self.x[k].copy()
+                self._outside(kk, [sk_of[k]], t_now, t_now + tc)
+                failed = self._roll_step(kk, t_now, tc, np.array([vk_of[k]]), a_k[kk], np.array([off_of[k]]))
+                if len(failed):
+                    chk["outside"].pop()          # it stays in the DEM: no record
+                    self.regime[k] = ACTIVE
+                    continue
+                left.append(k)
+        n_roll = len(left)
+        for k in out:
+            kk = np.array([k], np.int64)
+            self.regime[k] = FREE
+            tq = tc_of[k]
+            self._outside(kk, [sk_of[k]], t_now, t_now + tq, self.v[kk], [0.5 * a_k[k] * tq * tq + 1e-12])
+            self._free_flight(kk, t_now, tq)
+            left.append(k)
+        if not left:
+            return cur, []
+        # where each one left and how far it may get: the record for the others' checks, and its largest distance
+        # from where it entered the DEM (the step's verification uses it for grains not active at the start)
+        xs = chk["x_ref"]
+        for k in left:
+            xe, Se = xe_of[k], sk_of[k]
+            tr = t_now + tc_of[k] if tc_of[k] < rem else t_end
+            exited[k] = (t_now, xe, Se, tr, vdc[k], agc[k])
+            chk["dmax"][k] = max(chk["dmax"][k], float(np.linalg.norm(xe - xs[k])) + Se)
+            if tr < t_end:
+                rejoin.append((tr, [k]))
+        # every grain the exits took as in the DEM, the leavers too: their speed after a rejoin is what the others
+        # relied on (a leaver that stays out has no DEM speed to check)
+        chk["speed"].append((t_now, cur.copy(), vdc[cur]))
+        cur = np.setdiff1d(cur, np.array(left, np.int64))
+        if used:
+            ug = np.array(sorted(used), np.int64)
+            chk["speed"].append((t_now, ug, np.array([used[j] for j in ug])))
+        self.n_events["roll_reentries"] = self.n_events.get("roll_reentries", 0) + n_roll
+        self.n_events["early_exits"] = self.n_events.get("early_exits", 0) + len(left) - n_roll
+        self.n_events["early_exit_rejoins"] = self.n_events.get("early_exit_rejoins", 0) + len(rejoin)
+        return cur, rejoin
+
+    def _off_any(self):
+        """The largest rolling offset each grain could have on any wall (rocking deflection + 1 nm)."""
+        if getattr(self, "_off_any_c", None) is None:
+            self._off_any_c = np.array([max(self._params(k, -1 - f)[dem.P_MUR] * self._params(k, -1 - f)[dem.P_REFF]
+                                            for f in range(6)) + 1e-9 for k in range(self.N)])
+        return self._off_any_c
 
     def _roll_off(self, ri, faces):
         """Constant part of the rolling envelope: the elastic rocking deflection (below xi_crit each way) and 1 nm."""
@@ -884,8 +1049,9 @@ class FullContactSim:
     def _capture_times(self, free, H, T, s, s_off):
         """For each free or rolling grain, a lower bound on the time at which it could first come within the capture
         distance d_cap of a wall or another grain during the step.
-        * walls: the gap along the wall normal is g0 + u tau - a tau^2/2 at the least (u its velocity away from the
-          wall, a the grain's acceleration bound);
+        * walls: for a free grain the gap along the wall normal is g0 + u tau - a tau^2/2 at the least (u its
+          velocity away from the wall, a its acceleration bound); a rolling grain may turn, so g0 - |v| tau -
+          a tau^2/2 - offset (its rolling envelope);
         * another free grain or a sleeping one: their relative motion is a straight line d0 + dv tau plus a curvature
           of at most (a_i + a_j) tau^2 / 2, so the distance is at least |d0 + dv tau| - (a_i + a_j) H^2 / 2;
         * a rolling grain: its envelope |v| tau + a tau^2 / 2 + offset (rolling bound);
@@ -897,6 +1063,7 @@ class FullContactSim:
         vm = np.linalg.norm(self.v, axis=1)
         a_bound = np.maximum((s - s_off - vm * H) * 2 / (H * H), 0.0)   # per-grain acceleration bound
         vd, ag = self._vd_step, self._ag_step
+        off_any = self._off_any()
         out = np.full(len(free), np.inf)
         used = np.zeros(self.N, bool)
         act = self.regime == ACTIVE
@@ -942,7 +1109,9 @@ class FullContactSim:
                     best = 0.0
                     break
                 a = a_bound[k]
-                if a > 0:
+                if k_roll:                        # the envelope bounds the distance rolled, not its direction
+                    tw = 2 * g0 / (vm[k] + math.sqrt(vm[k] * vm[k] + 2 * a * g0)) if vm[k] > 0 or a > 0 else np.inf
+                elif a > 0:
                     tw = (u + math.sqrt(u * u + 2 * a * g0)) / a
                 else:
                     tw = g0 / -u if u < 0 else np.inf
@@ -954,8 +1123,8 @@ class FullContactSim:
                 rj = self.regime[jj]
                 if k_slv and (rj == ASLEEP or self._slv_of.get(int(jj)) == self._slv_of.get(int(k))):
                     continue                      # checked exactly by the pre-run (static, or the same cluster)
-                if rj == ACTIVE:
-                    gap = float(np.linalg.norm(self.x[jj] - self.x[k])) - rsum - s_off[k]
+                if rj == ACTIVE:                  # (it may roll on a wall later: its rocking offset too)
+                    gap = float(np.linalg.norm(self.x[jj] - self.x[k])) - rsum - s_off[k] - off_any[jj]
                     tp = t_iso(gap, vm_e[k] + vd[jj], a_bound[k] + ag[jj])
                     used[jj] = True
                 elif k_roll or k_slv or rj == ROLL or rj == SLAV:
@@ -1035,6 +1204,58 @@ class FullContactSim:
         self.w[free] = b.L[free] / self.I[free, None]
 
     # ------------------------------------------------------------------ DEM of the active grains
+    def _missed(self, ai, x, ci, cj, rows):
+        """Grains entering the DEM after being advanced outside it in this step that overlap a wall or grain they have
+        no contact with: a contact formed outside the DEM, which no bound allows. The step's verification redoes the
+        step with them in the DEM throughout. (Grains placed overlapping in an initial state form their contacts in
+        the DEM's first step, as they should.)"""
+        if not len(rows):
+            return
+        wo = self._chk["was_out"]
+        pp = cj >= 0
+        sel = wo[ai[ci]] | (pp & wo[ai[np.maximum(cj, 0)]])
+        if not sel.any():
+            return
+        ci, cj, rows, pp = ci[sel], cj[sel], rows[sel], pp[sel]
+        dl = np.empty(len(rows))
+        if pp.any():
+            dl[pp] = self.rad[ai[ci[pp]]] + self.rad[ai[cj[pp]]] - np.linalg.norm(x[ci[pp]] - x[cj[pp]], axis=1)
+        wq = ~pp
+        if wq.any():
+            f = -1 - cj[wq]
+            ax = f // 2
+            xa = x[ci[wq], ax]
+            dl[wq] = self.rad[ai[ci[wq]]] - np.where(f % 2 == 0, xa, self.L[ax] - xa)
+        miss = (dl > 1e-12) & (self._hist[rows, dem.H_TOUCH] < 0.5)
+        if miss.any():
+            self._chk["missed"].update(int(k) for k in ai[ci[miss]])
+            self._chk["missed"].update(int(k) for k in ai[cj[miss & pp]])
+
+    def _missed_end(self):
+        """The same check at the end of the step for the grains advanced outside the DEM and still outside it."""
+        out = np.flatnonzero(self._chk["was_out"] & (self.regime != ACTIVE))
+        if not len(out):
+            return
+        x = self.x
+        tree = cKDTree(x)
+        rmax = float(self.rad.max())
+        for k in out:
+            k = int(k)
+            for f in range(6):
+                ax = f // 2
+                g = (x[k, ax] if f % 2 == 0 else self.L[ax] - x[k, ax]) - self.rad[k]
+                if g < -1e-12:
+                    row = self._key.get((k, -1 - f))
+                    if row is None or self._hist[row, dem.H_TOUCH] < 0.5:
+                        self._chk["missed"].add(k)
+            for j in tree.query_ball_point(x[k], self.rad[k] + rmax):
+                if j == k:
+                    continue
+                if self.rad[k] + self.rad[j] - float(np.linalg.norm(x[j] - x[k])) > 1e-12:
+                    row = self._key.get((min(k, j), max(k, j)))
+                    if row is None or self._hist[row, dem.H_TOUCH] < 0.5:
+                        self._chk["missed"].update((k, int(j)))
+
     def _candidates(self, ai, skin):
         loc = {int(g): k for k, g in enumerate(ai)}
         ci, cj, rows = [], [], []
@@ -1065,8 +1286,8 @@ class FullContactSim:
         static obstacles: one joins (woken at its exact equilibrium, at rest; a cluster whole) as soon as a DEM grain
         comes within 2 d_cap of it, before any contact can form. Between contact-list builds each DEM grain may move at
         most min(half the skin, its clearance to the nearest sleeper - 2 d_cap), so none is missed. Records each
-        chunk's largest speed and each grain's largest distance from where it was when the step's regimes were set
-        (for the step's verification)."""
+        chunk's largest speed, and each grain's entry time, entry position and largest distance from it (for the
+        step's verification)."""
         T0 = self.env.t0_flight + t
         ai = np.asarray(ai, np.int64)
         vrel = 2 * float(np.linalg.norm(self.v[ai], axis=1).max()) if len(ai) else 0.0
@@ -1085,17 +1306,23 @@ class FullContactSim:
         while done < n:
             Tn = T0 + done * dt
             ai, lim = self._watch(ai, Tn, skin)
-            chk["in_dem"][ai] = True
+            new = ai[~chk["in_dem"][ai]]
+            if len(new):
+                chk["in_dem"][new] = True
+                chk["t_in"][new] = t + done * dt
+                chk["x_ref"][new] = self.x[new]
+                chk["dmax"][new] = 0.0
             x = np.ascontiguousarray(self.x[ai])
             v = np.ascontiguousarray(self.v[ai])
             w = np.ascontiguousarray(self.w[ai])
             m, I = self.m[ai], self.I[ai]
             gdrag = self.gdrag[ai]
             Fext = np.ascontiguousarray(self._F_lr[ai])
-            xs = np.ascontiguousarray(chk["x_seen"][ai])
+            xs = np.ascontiguousarray(chk["x_ref"][ai])
             dmax = chk["dmax"][ai].copy()
             vmaxg = np.zeros(len(ai))
             ci, cj, rows = self._candidates(ai, skin)
+            self._missed(ai, x, ci, cj, rows)
             prm = np.ascontiguousarray(self._prm[rows])
             hist = np.ascontiguousarray(self._hist[rows])
             F = np.zeros_like(x)
@@ -1432,7 +1659,7 @@ class FullContactSim:
 
     def _island_ratio(self, isl, T):
         dF = self._island_load(isl["members"], T) - isl["F_ref"]
-        du = isl["lu"].solve(dF)
+        du = self._island_lu(isl).solve(dF)
         lam = isl["lam"] + isl["J"] @ du
         if "dl" in isl:                       # sleeping with a tracked residual motion: its largest effect included
             return statics.margins_bounded(lam, isl["dl"], isl["prm"], isl["out"])
@@ -1733,7 +1960,7 @@ class FullContactSim:
         lam, Fnet, out = statics.state(xn, ci, cj, prm, hn, self.L)
         iid = self._next_island
         self._next_island += 1
-        self._islands[iid] = dict(members=mem, ci=ci, cj=cj, rows=rows, prm=prm, out=out, lam=lam, J=J,
+        self._islands[iid] = dict(members=mem, ci=ci, cj=cj, rows=rows, prm=prm, out=out, lam=lam, J=J, K=K,
                                   lu=splu(K), F_ref=self._island_load(mem, T), T_ref=T)
         if res is not None:
             self._islands[iid]["res"] = res
@@ -1750,7 +1977,7 @@ class FullContactSim:
         from the reference state; positions and spring histories), at rest."""
         isl = self._islands.pop(iid)
         mem = isl["members"]
-        du = isl["lu"].solve(self._island_load(mem, T) - isl["F_ref"]).reshape(-1, 6)
+        du = self._island_lu(isl).solve(self._island_load(mem, T) - isl["F_ref"]).reshape(-1, 6)
         vr = np.zeros((len(mem), 6))
         if "res" in isl:                      # the residual motion, evolved exactly since the cluster fell asleep
             r = isl["res"]

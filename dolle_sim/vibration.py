@@ -120,6 +120,34 @@ class VibrationHistory:
         s, ok = self._local(T)
         return np.where(ok, self.a(np.clip(s, 0, self.T)), 0.0)
 
+    def abs_max(self, T0, T1):
+        """The largest |a| along each axis over [T0, T1], exactly: each cubic piece's values at the ends of its part
+        of the interval and at its stationary points inside it."""
+        s0, s1 = max(float(T0) - self.t0, 0.0), min(float(T1) - self.t0, self.T)
+        if s1 < s0:
+            return np.zeros(3)
+        x, c = self.a.x, self.a.c                                     # c: (4, pieces, 3), descending powers
+        i0 = int(np.clip(np.searchsorted(x, s0, side="right") - 1, 0, len(x) - 2))
+        i1 = int(np.clip(np.searchsorted(x, s1, side="right") - 1, 0, len(x) - 2))
+        out = np.zeros(3)
+        for i in range(i0, i1 + 1):
+            lo, hi = max(s0, x[i]) - x[i], min(s1, x[i + 1]) - x[i]
+            for ax in range(3):
+                c3, c2, c1, c0 = c[:, i, ax]
+                pts = [lo, hi]
+                A, B, C = 3 * c3, 2 * c2, c1                          # derivative A u^2 + B u + C
+                if A != 0:
+                    D = B * B - 4 * A * C
+                    if D >= 0:
+                        r = math.sqrt(D)
+                        pts += [(-B - r) / (2 * A), (-B + r) / (2 * A)]
+                elif B != 0:
+                    pts.append(-C / B)
+                for u in pts:
+                    if lo <= u <= hi:
+                        out[ax] = max(out[ax], abs(((c3 * u + c2) * u + c1) * u + c0))
+        return out
+
     def velocity(self, T):
         s, ok = self._local(T)
         return np.where(ok, self.v(np.clip(s, 0, self.T)), self.v(self.T) * (s > self.T))

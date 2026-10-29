@@ -89,6 +89,35 @@ def test_cluster_sleeps_and_wakes_whole():
     assert np.abs(S.x - x_sleep).max() < 1e-9
 
 
+def test_checkpoint_with_sleeping_cluster_is_exact():
+    """A state holding a sleeping cluster (its factorised stiffness is not picklable and is rebuilt on loading)
+    saves, loads and continues bit-for-bit as the run kept in memory."""
+    import pickle
+    from dolle_sim.engine import FullContactSim, ACTIVE, ASLEEP
+    cfg = {"dt_s": 1e-3, "duration_s": 0.3, "output_fps": 100,
+           "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": [0.0, 0.0, -1.0]},
+           "contact": {"contact_charging": False}, "forces": {}}
+    ch = {"name": "pair", "size_m": [0.001, 0.001, 0.001], "wall_material": "glass_borosilicate",
+          "particles": [{"material": "silica", "count": 2, "radius_m": 50e-6, "velocity": {"speed_mean_m_s": 0.0},
+                         "initial_state": {"type": "free"}}]}
+    S = FullContactSim(cfg, ch, 0)
+    S.base.F_static[:] = 0.0
+    R = 50e-6
+    S.x[0] = [0.5e-3, 0.5e-3, R]
+    S.x[1] = [0.5e-3 + 2 * R - 2e-9, 0.5e-3, R]
+    S.v[:], S.w[:] = 0.0, 0.0
+    S.regime[:] = ACTIVE
+    S.run(progress=False)
+    assert (S.regime == ASLEEP).all() and S._islands
+    L = pickle.loads(pickle.dumps(S, protocol=pickle.HIGHEST_PROTOCOL))
+    assert all(isl.get("lu") is None for isl in L._islands.values())
+    for sim in (S, L):
+        sim.duration = 0.35
+        sim.run(progress=False)
+    assert all(np.array_equal(getattr(S, a), getattr(L, a)) for a in ("x", "v", "w", "regime"))
+    assert all(isl.get("lu") is not None for isl in L._islands.values())
+
+
 def test_branch_from_checkpoint_is_exact(tmp_path):
     """A run continued from another scenario's checkpoint (identical up to it) is bit-for-bit the run of its own
     scenario from lift-off; a branch into a scenario that differs earlier is refused."""
@@ -120,3 +149,73 @@ def test_branch_from_checkpoint_is_exact(tmp_path):
     late = [dict(kick[0], start_s=3.9)]
     with pytest.raises(ValueError):
         branch(cp, sim(late, cps=()))
+
+
+def _scene(n, size=0.002, g=(0.0, 0.0, -1.0)):
+    from dolle_sim.engine import FullContactSim
+    cfg = {"dt_s": 1e-3, "duration_s": 0.3, "output_fps": 100,
+           "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": list(g)},
+           "contact": {"contact_charging": False}, "forces": {}}
+    ch = {"name": "scene", "size_m": [size] * 3, "wall_material": "glass_borosilicate",
+          "particles": [{"material": "silica", "count": n, "radius_m": 50e-6, "velocity": {"speed_mean_m_s": 0.0},
+                         "initial_state": {"type": "free"}}]}
+    S = FullContactSim(cfg, ch, 0)
+    S.base.F_static[:] = 0.0
+    S.v[:], S.w[:] = 0.0, 0.0
+    return S
+
+
+def test_rolling_grain_wall_bound_assumes_no_direction():
+    """A rolling grain's envelope bounds how far it rolls, not in which direction (Coriolis, the rolling resistance
+    and the load along the wall turn it): rolling parallel to a side wall 10 um away at 10 mm/s, its capture time
+    for that wall is at most (gap - d_cap) / |v|."""
+    from dolle_sim.engine import ROLL
+    S = _scene(1)
+    R, T0 = 50e-6, float(S.env.t0_flight)
+    S.x[0] = [S.L[0] - R - 10e-6, 1e-3, R]
+    S._place_at_equilibrium(0, 4, S._row(0, -5), T0)
+    S.regime[0] = ROLL
+    S._roll_face[0] = 4
+    S.v[0] = [0.0, 0.01, 0.0]
+    S.w[0] = [-0.01 / R, 0.0, 0.0]
+    H = 1e-3
+    s, s_off = S._motion_bound(H, T0), np.zeros(1)
+    s[:], s_off[:] = S._roll_bound(np.array([0]), H, T0)
+    S._vd_step, S._ag_step = np.zeros(1), np.zeros(1)
+    t_hit, _ = S._capture_times(np.array([0]), H, T0, s, s_off)
+    gap = S.L[0] - S.rad[0] - S.x[0, 0]
+    assert t_hit[0] <= (gap - S.d_cap) / 0.01 * (1 + 1e-9)
+
+
+def test_grains_leaving_together_have_their_speed_bounds_checked():
+    """Grains that leave the DEM in one call (each relying on the others' speed bounds) and rejoin later are in the
+    speed record of that call, so their speed after rejoining is checked against what the others assumed."""
+    from dolle_sim.engine import ACTIVE
+    S = _scene(4, g=(0.0, 0.0, 0.0))
+    R, c = 50e-6, 1e-3
+    S.x[0] = [c, c, c]
+    S.x[1] = [c + 2 * R + 0.5e-6, c, c]
+    S.x[2] = [c + 4 * R + 1.1e-6, c, c]
+    S.x[3] = [c + 6 * R + 1.1e-6 - 2e-9, c, c]
+    S.v[2] = S.v[3] = [-1e-3, 0.0, 0.0]
+    S.regime[:] = ACTIVE
+    S.base._build_neighbors()
+    S._step_once(0.0, S._outer_dt(0.0), set(), 1.0)
+    left = [(te, k) for k, (te, xe, Se, tr, Ve, Ae) in S._chk["exited"].items() if tr < S._outer_dt(0.0)]
+    assert left
+    for te, k in left:
+        assert any(abs(tc - te) < 1e-15 and k in set(idx.tolist()) for tc, idx, vb in S._chk["speed"])
+
+
+def test_contact_formed_outside_the_dem_is_redone():
+    """Safety net: a grain whose capture-time bound is (deliberately) wrong flies into a wall outside the DEM; the
+    overlap without a contact is found, the step is redone with the grain in the DEM throughout, and it bounces."""
+    S = _scene(1, g=(0.0, 0.0, 0.0))
+    R = 50e-6
+    S.x[0] = [1e-3, 1e-3, R + 5e-6]
+    S.v[0] = [0.0, 0.0, -0.05]
+    S._capture_times = lambda free, H, T, s, s_off: (np.full(len(free), np.inf), np.zeros(S.N, bool))
+    S.duration = 2e-3
+    S.run(progress=False)
+    assert S.n_events.get("redos_missed_contact", 0) >= 1
+    assert S.x[0, 2] > R and S.v[0, 2] > 0                        # it bounced off the floor

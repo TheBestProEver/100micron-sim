@@ -106,6 +106,26 @@ class Loads:
             a = self.profile_accel(T)
         return a + self.release_accel(T) + self.vibration_accel(T)
 
+    def accel_bound(self, T0, T1):
+        """A bound on |a| along each axis over [T0, T1]: the flight profile at 5 points with the curvature margin
+        h^2 |a''| / 8 (|a''| from the samples' second differences, doubled); a release waveform by its amplitude;
+        the vibration exactly (the largest |value| of each cubic piece of its spline over the interval)."""
+        T0, T1 = float(T0), float(max(T1, T0))
+        Ts = np.linspace(T0, T1, 5)
+        ap = self.profile_accel(Ts)
+        out = np.abs(ap).max(0)
+        h = (T1 - T0) / 4
+        if h > 0:
+            d2 = np.abs(ap[2:] - 2 * ap[1:-1] + ap[:-2]).max(0) / (h * h)
+            out = out + 2 * d2 * h * h / 8
+        for r in self.release:
+            if r["start"] < T1 and r["end"] > T0:
+                out[r["axis"]] += r["a"]
+        for hv in self.vib:
+            if hv.t0 < T1 and hv.t0 + hv.T > T0:
+                out = out + hv.abs_max(T0, T1)
+        return out
+
     # ------------------------------------------------------------------ windows
     def fast_window(self, T0, T1):
         """True if a release waveform or vibration acts anywhere in [T0, T1] (loads with ~kHz content)."""

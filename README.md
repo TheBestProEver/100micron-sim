@@ -22,11 +22,13 @@ It was written from scratch for DOLL-E and has two engines:
   aggregates, no fragmentation rules and no frozen wall grains: stuck grains are ordinary contacts that can
   roll, slide, twist and break. A full-stiffness run of the whole flight would take ~10⁴ core-days, so the
   engine uses the full model wherever something can happen and **exact or verified** treatments elsewhere:
-  exact free flight up to the earliest time a grain could come within 0.1 µm of anything; resting grains and
+  exact free flight up to the earliest time a grain could come within 0.1 µm of anything (and again after each
+  contact, up to the next such time, so a bouncing grain is in the full model only near its bounces); resting grains and
   wall-anchored clusters held static while a certificate shows every contact stays inside its elastic limits;
   grains rolling on one wall, and stuck clusters rolling along a wall, on slaved models (the stiff contact modes held quasi-static, rolling and twisting integrated with the full springs) that match the full model to ≤ 3×10⁻⁵ of the rolled path; clusters that are still rocking sleep with that residual motion kept as exact linear response and added back when they wake. **Every step is checked
   after it is taken** and redone in the full model if any assumption one grain's treatment made about another
-  failed. See [All checks and criteria](#all-checks-and-criteria).
+  failed; as a last safety net, a grain that reaches the full model overlapping something it has no contact with
+  (which no bound allows) also makes the step be redone. See [All checks and criteria](#all-checks-and-criteria).
 * **The event-driven engine (v0.5; long free-flying cloud runs, `run`, and the browser app).** Grains and rigid
   aggregates fly under the external forces in millisecond steps (velocity Verlet with exact drag and Coriolis;
   Dullweber–Leimkuhler–McLachlan rotation). Impacts are found by continuous collision detection, processed in
@@ -524,8 +526,9 @@ cannot drift from the runs:
 | REBOUND, 6 comparisons | `python -m dolle_sim rebound-check ...` | trajectories and collision statistics of a flying cloud (below) |
 | unit and regression tests | `python -m pytest -q` | every module, the flight timeline, mission runs on both engines, provenance |
 
-In every mission run the engine also counts, in `mission_summary.json`, the steps it verified, the steps it
-had to redo and the grains that joined the contact dynamics on approach.
+In every mission run the engine also counts, in `mission_summary.json`, the steps it verified, every redo by the
+check that asked for it (`redos_speed_bound`, `redos_outside_record`, `redos_rolling_envelope`, `redos_missed_contact`: the safety net) and
+the grains that joined the contact dynamics on approach.
 
 ## Validation
 
