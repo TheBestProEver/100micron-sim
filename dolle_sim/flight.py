@@ -323,13 +323,18 @@ class FlightProfile:
                 a += float(p["peak_g"]) * math.sin(math.pi * (t - t0) / tau)   # half-sine shock pulse
         return a
 
+    def kinks_in(self, t0: float, t1: float) -> list:
+        """Times inside (t0, t1) where the slope of the specific force jumps: the descent table's points (the fall is
+        interpolated linearly between them). The other slope jumps are at breakpoints (Loads.breakpoints)."""
+        if t1 > self.apogee_s and t0 < self.chute_s:
+            tt = np.asarray(self._t)
+            return tt[(tt > t0) & (tt < t1)].tolist()
+        return []
+
     def knots_in(self, t0: float, t1: float) -> list:
         """Times inside (t0, t1) where the specific force can peak between samples: the descent table's points and
         the peaks of the half-sine shocks (parachute opening, splash, user impulses)."""
-        out = []
-        if t1 > self.apogee_s and t0 < self.chute_s:
-            tt = np.asarray(self._t)
-            out += tt[(tt > t0) & (tt < t1)].tolist()
+        out = self.kinks_in(t0, t1)
         for a, b in self.event_windows():
             pk = 0.5 * (a + b)
             if t0 < pk < t1:
@@ -341,6 +346,18 @@ class FlightProfile:
         w = [(float(i["t_s"]), float(i["t_s"]) + float(i["duration_s"])) for i in self.impulses]
         return w + [(self.chute_s, self.chute_s + self.chute_open_s),
                     (self.splash_s, self.splash_s + self.splash_stop_s)]
+
+    def shock_pulses(self) -> list:
+        """The half-sine shocks as (start, duration, peak [m/s^2], direction): the parachute opening, the splash and
+        the user impulses. Inside its window each adds -peak sin(pi (t - start) / duration) direction to
+        apparent_accel (axial_g, impulse_g), so its second time derivative is at most peak (pi / duration)^2: the
+        exact curvature bound the step certificates use (Loads.chord_dev)."""
+        z = np.array([0.0, 0.0, 1.0])
+        out = [(float(i["t_s"]), float(i["duration_s"]), float(i["peak_g"]) * G0, z) for i in self.impulses]
+        for a, dur, peak in ((self.chute_s, self.chute_open_s, (self.opening_peak_g - 1.0) * G0),
+                             (self.splash_s, self.splash_stop_s, self.v_sea / self.splash_stop_s * 0.5 * math.pi)):
+            out.append((a, dur, peak, self.load_direction(a + 0.5 * dur)))
+        return [q for q in out if q[1] > 0]
 
     def apparent_accel(self, t: float) -> np.ndarray:
         """Uniform apparent acceleration on a free grain in the tubule frame [m/s^2]: minus the specific force."""
