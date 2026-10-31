@@ -8,15 +8,31 @@ Each grain is in one of three regimes, switched by exact or bounded tests:
 * ACTIVE: everything that touches something, or could touch something within H, is integrated by the full-stiffness
   soft-sphere DEM of dem.py (JKR + plastic yield + damping, Mindlin sliding, rolling and twisting springs with their
   limits; checked against LAMMPS to <= 2e-6), at a step of the fastest contact period / steps_per_period.
-* ASLEEP: a grain resting on a wall whose contact is proven to stay inside its elastic limits: for the loads over the
-  next step, the normal load stays above -F_c (pull-off), the tangential load below the sliding limit, and the rolling
-  and twisting loads below theirs, each with a 2% margin. Inside these limits the contact mechanics is elastic, so no
-  plastic variable (contact point, rolled distance, twist) can change and the grain cannot move (except by elastic
-  deflections of < 1e-10 m). The test runs every outer step; the grain wakes (becomes ACTIVE) the moment it fails, at
-  every load breakpoint (thrust on/off, de-spin, shocks), during release waveforms and vibration (kHz loads), and when
-  another body could reach it. On waking, its springs are set to the exact static solution for the current load, so
-  waking adds no transient. A woken grain goes back to sleep once its residual motion is too small to reach a limit.
-Grains touching other grains (aggregates, piles) stay ACTIVE (v0.6: no sleep for multi-contact clusters yet).
+* ASLEEP: a grain resting on a wall, or a wall-anchored cluster of grains (a pile, an aggregate in a corner), whose
+  contacts are proven to stay inside their limits for the loads over the next step. A single grain sleeps while the
+  normal load stays above -F_c (pull-off) and the sliding, rolling and twisting loads below their limits, each with a
+  2% margin (the loads at the step's samples plus their deviation from the chord between them, Loads.chord_dev; the
+  same test at entry and at every step): inside these limits the contact mechanics is elastic, no plastic variable
+  (contact point, rolled distance, twist) can change and the grain cannot move. A cluster sleeps as an island at its
+  exact static equilibrium, which is recomputed every step from the committed state by a Newton solve with the
+  sliding, rolling and twisting caps lifted (statics.solve_equilibrium), the caps being allowed to be reached: tier 1
+  (static) when every bounded sliding, rolling and twisting ratio stays <= 1 + 1e-6 along the step, the bound
+  covering the loads' deviation from their chord inside the step (Loads.chord_dev, spin_chord), the solve's residual,
+  the dynamics of the quasi-static drift and the kernel's nonlinearity measured at the mid-chord state; the real
+  kernel then takes no clip branch, so the plastic variables are exact and the committed state is the kernel's own
+  equilibrium to 1e-6 of the caps. Tier 2 (creep, cfg contact.creep_islands) when a cap is exceeded: the kernel's
+  own one-shot return map is iterated to equilibrium with its consistent tangent (statics.released_stiffness), the
+  step's error is estimated by a half-step pair and every tolerated term is summed into a budget (island_budget_rel
+  of the deflection at the cap) that wakes the island when spent. Loads at step ends are limits from the left, so a
+  step ending at a load breakpoint is certified against the pre-jump load and the DEM resolves the jump from the
+  committed pre-jump state.
+  The tests run every outer step; a sleeper wakes (becomes ACTIVE) the moment its test fails, at every load
+  breakpoint (thrust on/off, de-spin, shocks), during release waveforms and vibration (kHz loads), when another body
+  could reach it, and an island also at pull-off, break, yield, contact formation, a mechanism, excessive motion,
+  flow or path error, and the budget (reasons counted as island_wake_*; every bound reported: island_bound_xi,
+  island_flow_m, island_snap_rel, island_wake_transient_m). On waking, a state at the exact static solution of the
+  current load, at rest, is handed to the DEM, so waking adds no transient; a cluster still moving may sleep with its
+  residual motion tracked as exact linear response (statics.residual_modes).
 
 Impacts are recorded when a contact forms (approach speed, tangential speed, normal, relative velocity), and their
 outcome when it breaks (bounce, exit speed) or when it has held for 2 ms (stick).
@@ -50,6 +66,19 @@ BRANCH_ALLOWED = ("cfg", "chamber", "base.cfg", "base.chamber", "base.release", 
 STICK_HOLD_S = 2e-3          # a contact that has held this long after forming is a stick
 LINRES_MAX = 64              # clusters up to this size may sleep with their residual motion tracked exactly
 FACE_NAMES = ["-x", "+x", "-y", "+y", "-z", "+z"]
+# sleeping clusters at their sliding/rolling/twisting caps (_try_sleep_island, _island_advance): the cfg["contact"]
+# keys with their defaults (island_gap_m None: 2 d_cap), the reasons an island wakes, the counters that always exist
+ISLAND_DEFAULTS = dict(cap_sleep=True, creep_islands=True, island_tol_rel=1e-6, island_ratchet_rel=1e-3,
+                       island_motion_m=1e-9, island_flow_max=0.05, island_path_tol=1e-3, island_budget_rel=1e-2,
+                       island_gap_m=None, island_hyst_steps=20, island_newton_max=40, twist_continuity=False)
+ISLAND_WAKE_REASONS = ("fast", "loading", "pulloff", "break", "yield", "newcontact", "mechanism", "motion", "flow",
+                       "twist", "path", "budget", "newton", "approach")
+ISLAND_COUNTERS = (("cluster_sleep_cap", "cluster_sleep_creep", "island_static_steps", "island_creep_steps",
+                    "island_newton_iters", "island_refactor", "island_wake_fallback", "island_twist_continuity")
+                   + tuple("island_wake_" + w for w in ISLAND_WAKE_REASONS)
+                   + tuple("cluster_awake_" + w for w in ("mechanism", "over_limit", "ratchet", "certificate", "drift",
+                                                          "newton", "transition")))
+ISLAND_FLOATS = ("island_bound_xi", "island_flow_m", "island_snap_rel", "island_wake_transient_m")
 
 # friction coefficients (rolling_params.md): silica on glass 0.4 (Meyer et al. 2014; Buckley 1973 in vacuum 0.5),
 # silica-silica 0.6 (Liu et al. 2017), graphite dry/vacuum 0.5 (Buckley 1971). Other pairs: 0.4 (ASSUMED).
@@ -134,6 +163,13 @@ class FullContactSim:
         self._slv_of = {}           # grain -> slaved cluster id
         self._next_slv = 0
         self.max_island = int(cc.get("max_sleeping_cluster", 800))
+        for k, v in ISLAND_DEFAULTS.items():       # sleeping clusters at their caps (_try_sleep_island, _island_advance)
+            setattr(self, k, float(cc.get(k, 2 * self.d_cap)) if v is None else type(v)(cc.get(k, v)))
+        for key in ISLAND_COUNTERS:
+            self.n_events[key] = 0
+        for key in ISLAND_FLOATS:
+            self.n_events[key] = 0.0
+        self._isl_pending = {}      # island id -> its state advanced over the step, committed once the step is verified
         self._F_lr = np.zeros((N, 3))
         for k, ax, side in b._settled:
             face = 2 * ax + (1 if side > 0 else 0)
@@ -241,11 +277,13 @@ class FullContactSim:
         n[ax] = 1.0 if face % 2 == 0 else -1.0       # from the wall into the tubule
         return n
 
-    def _body_force(self, idx, T):
-        """Quasi-static force [N] and torque on resting grains idx at flight time T (v = 0, omega = 0)."""
-        a = self.loads.accel(np.array([T]))[0]
+    def _body_force(self, idx, T, side=None):
+        """Quasi-static force [N] and torque on resting grains idx at flight time T (v = 0, omega = 0); side "-"
+        takes the loads as their limits from the left (Loads.accel, omega_dot), for step ends and skip samples: a
+        step ending at a load breakpoint lies in the preceding piece."""
+        a = self.loads.accel(np.array([T]), side=side)[0]
         Om = self.loads.omega(T)[0]
-        Omd = self.loads.omega_dot(T)[0]
+        Omd = self.loads.omega_dot(T, side=side)[0]
         r = self.x[idx] + self.off[None, :]
         cen = -np.cross(Om[None, :], np.cross(Om[None, :], r))
         eul = -np.cross(Omd[None, :], r)
@@ -253,9 +291,14 @@ class FullContactSim:
         T_in = -self.I[idx, None] * Omd[None, :]            # spin held relative to the tubule
         return F, T_in
 
-    def _margins(self, idx, faces, F, Tq):
+    def _margins(self, idx, faces, F, Tq, dF=None):
         """For grains idx resting on faces (one wall contact each): the ratios of the static normal, sliding,
-        rolling and twisting loads to their limits. > 1 - margin means the grain must be woken."""
+        rolling and twisting loads to their limits, > 1 - margin meaning the grain must be woken; with dF
+        (len(idx),) [N] the worst case when the load may deviate from F, Tq by up to dF in force and dF R in torque
+        (as statics.margins_bounded: the pressing load lowered by dF, the tangential force raised by dF, the
+        twisting and the rolling torques by dF R; the loads' deviation from their chord inside a step,
+        _chord_force). Returns the worst ratio per grain, the contact rows, the pressing load, the tangential load,
+        the torque, the wall normals and the ratios by kind (4 x len(idx): pull-off, sliding, rolling, twisting)."""
         rows = np.array([self._key[(int(i), -1 - int(f))] for i, f in zip(idx, faces)])
         p = self._prm[rows]
         h = self._hist[rows]
@@ -264,16 +307,32 @@ class FullContactSim:
         Fn = -(F * n).sum(1)                                 # pressing load (> 0 pushes the grain onto the wall)
         Ft = F + Fn[:, None] * n
         Fc = np.where(h[:, dem.H_YLD] > 0.5, h[:, dem.H_FCP], p[:, dem.P_FC])
-        Fncrit = np.abs(Fn + 2 * Fc)
-        ft = np.linalg.norm(Ft, axis=1)
-        tw = np.abs((Tq * n).sum(1))
-        tt = np.linalg.norm(Tq - (Tq * n).sum(1)[:, None] * n, axis=1)
         R = p[:, dem.P_REFF]
-        r_pull = np.where(Fn < 0, -Fn / Fc, 0.0)
-        r_slide = ft / (p[:, dem.P_MUT] * Fncrit)
-        r_roll = (ft + tt / R) / (p[:, dem.P_MUR] * Fncrit)
+        d = np.zeros(len(idx)) if dF is None else np.asarray(dF, float)
+        Fn_lo = Fn - d
+        Fncrit = np.maximum(Fn_lo + 2 * Fc, 0.0)
+        ft = np.linalg.norm(Ft, axis=1) + d
+        tw = np.abs((Tq * n).sum(1)) + d * R
+        tt = np.linalg.norm(Tq - (Tq * n).sum(1)[:, None] * n, axis=1) + d * R
+        r_pull = np.where(Fn_lo < 0, -Fn_lo / Fc, 0.0)
+        r_slide = ft / np.maximum(p[:, dem.P_MUT] * Fncrit, 1e-300)
+        r_roll = (ft + tt / R) / np.maximum(p[:, dem.P_MUR] * Fncrit, 1e-300)
         r_twist = tw / np.maximum(p[:, dem.P_MUTW] * Fncrit, 1e-300)
-        return np.maximum.reduce([r_pull, r_slide, r_roll, r_twist]), rows, Fn, Ft, Tq, n
+        kinds = np.vstack([r_pull, r_slide, r_roll, r_twist])
+        return kinds.max(0), rows, Fn, Ft, Tq, n, kinds
+
+    def _chord_force(self, idx, T0, T1):
+        """The most the quasi-static load on each resting grain idx can deviate, anywhere inside [T0, T1], from the
+        chord joining its values at the ends [N]: m (||Loads.chord_dev|| + Loads.spin_chord |r_perp|), r_perp the
+        distance from the spin axis as in the centrifugal term of _body_force; the Euler force -Omega_dot x r and
+        torque -I Omega_dot are piecewise constant inside a step and deviate by nothing. 0 on constant and linear
+        load pieces, where the single-grain tests are exact at their samples."""
+        cd = float(np.linalg.norm(self.loads.chord_dev(T0, T1)))
+        sc = float(self.loads.spin_chord(T0, T1))
+        r = self.x[idx] + self.off[None, :]
+        ax = np.asarray(self.loads.axis, float)
+        rp = np.linalg.norm(r - (r @ ax)[:, None] * ax[None, :], axis=1)
+        return self.m[idx] * (cd + sc * rp)
 
     def _place_at_equilibrium(self, k, face, row, T, F=None, Tq=None):
         """Put grain k at the exact static equilibrium of its one wall contact under the load at T: normal overlap
@@ -420,6 +479,18 @@ class FullContactSim:
         for key, n in why.items():                 # every redo, by the check that asked for it
             self.n_events[key] = self.n_events.get(key, 0) + n
             self.n_events["redos"] = self.n_events.get("redos", 0) + n
+        # sleeping clusters whose certificate held become what it advanced them to (one woken during the step, by a
+        # redo or a DEM grain's approach, is no longer an island and keeps nothing); the DEM's own measure of the
+        # motion of the clusters woken in this step is recorded
+        for iid, new in list(getattr(self, "_isl_pending", {}).items()):
+            if iid in self._islands:
+                self._island_commit(iid, new)
+        self._isl_pending = {}
+        woken = getattr(self, "_woken_mem", [])
+        if woken:
+            dm = float(self._chk["dmax"][np.concatenate(woken)].max())
+            self.n_events["island_wake_transient_m"] = max(self.n_events.get("island_wake_transient_m", 0.0), dm)
+        self._island_report()
         self.t = t + H
         self._log_events(t + H)
         self._classify(t + H)
@@ -435,9 +506,22 @@ class FullContactSim:
     def __getstate__(self):
         st = self.__dict__.copy()
         st["_islands"] = {i: {k: v for k, v in isl.items() if k != "lu"} for i, isl in self._islands.items()}
-        for k in ("_chk", "_vd_step", "_ag_step", "_noexit"):     # the last step's scratch state
-            st.pop(k, None)
+        for k in ("_chk", "_vd_step", "_ag_step", "_noexit", "_isl_pending", "_s_isl", "_s_isl_max", "_woken_mem"):
+            st.pop(k, None)                                           # the last step's scratch state
         return st
+
+    def __setstate__(self, st):
+        """A state saved by this or a previous code version: the cap-sleep settings missing from an older one take
+        their defaults and its counters exist (island dicts of the older format are upgraded at first use)."""
+        self.__dict__.update(st)
+        for k, v in ISLAND_DEFAULTS.items():
+            if k not in self.__dict__:
+                setattr(self, k, 2 * self.d_cap if v is None else v)
+        for key in ISLAND_COUNTERS:
+            self.n_events.setdefault(key, 0)
+        for key in ISLAND_FLOATS:
+            self.n_events.setdefault(key, 0.0)
+        self._isl_pending = {}
 
     def checkpoint_path(self, T, directory=None):
         return Path(directory or self.checkpoint_dir) / f"{self.name}_T{T:08.3f}.pkl"
@@ -473,13 +557,16 @@ class FullContactSim:
         self._next_island, self._last_face, self.n_events = sn["next_island"], sn["last_face"], dict(sn["n_events"])
         self.base.rng.bit_generator.state = copy.deepcopy(sn["rng"])
         self._slv, self._slv_of, self._next_slv = copy.deepcopy(sn["slv"]), dict(sn["slv_of"]), sn["next_slv"]
+        self._isl_pending, self._woken_mem = {}, []  # the failed attempt's advanced islands and wakes are discarded
 
     def _step_once(self, t, H, force, vfac, noexit=frozenset()):
         T = self.env.t0_flight + t
         self._update_long_range(t)
         v_start = self.v.copy()
         fast = self.loads.fast_window(T, T + H) or self.loads.breakpoint_in(T - 1e-9, T + 1e-9)
-        # 1. asleep grains: certificate for the loads over the step (start, middle, end)
+        # 1. asleep grains: certificate for the loads over the step (start, middle, end; the end load as the limit
+        # from the left, the loads' deviation from their chord inside the step added as in statics.margins_bounded;
+        # the same test as the entry, _try_sleep)
         asl = np.array([k for k in np.flatnonzero(self.regime == ASLEEP) if int(k) in self._sleep_face], np.int64)
         wake = np.zeros(self.N, bool)
         if len(asl):
@@ -488,21 +575,46 @@ class FullContactSim:
             else:
                 faces = np.array([self._sleep_face[k] for k in asl])
                 worst = np.zeros(len(asl))
-                for Ts in (T, T + 0.5 * H, T + H):
-                    F, Tq = self._body_force(asl, Ts)
-                    ratio = self._margins(asl, faces, F, Tq)[0]
+                dF = self._chord_force(asl, T, T + H)
+                for Ts, side in ((T, None), (T + 0.5 * H, None), (T + H, "-")):
+                    F, Tq = self._body_force(asl, Ts, side)
+                    ratio = self._margins(asl, faces, F, Tq, dF)[0]
                     worst = np.maximum(worst, ratio)
                 wake[asl[worst > 1 - self.margin]] = True
+        # sleeping clusters: a fast load or a breakpoint wakes them; a tier-0 island (the linear certificate of
+        # v0.6: cap_sleep off, a tracked residual motion, or an island of the previous code version) is tested on its
+        # linear response at the start, middle and end of the step (the end load as the limit from the left); the
+        # others are advanced to the step's end by _island_advance, their end state pending until the step is
+        # verified (_island_commit in step), and the most each member can move inside the step (s_isl) is its
+        # displacement allowance in every motion bound below
+        self._isl_pending = {}
+        self._woken_mem = []
+        s_isl = np.zeros(self.N)
         for iid in list(self._islands):
             isl = self._islands[iid]
             if fast:
                 wake[isl["members"]] = True
+                self._count("island_wake_fast")
                 continue
-            worst = 0.0
-            for Ts in (T, T + 0.5 * H, T + H):
-                worst = max(worst, float(self._island_ratio(isl, Ts).max()))
-            if worst > 1 - self.margin:
+            if self.cap_sleep and "tier" not in isl and "res" not in isl:
+                isl = self._islands[iid] = self._island_upgrade(isl)
+            if isl.get("tier", 0) == 0 or "res" in isl:
+                worst = 0.0
+                for Ts, side in ((T, None), (T + 0.5 * H, None), (T + H, "-")):
+                    worst = max(worst, float(self._island_ratio(isl, Ts, side).max()))
+                if worst > 1 - self.margin:
+                    wake[isl["members"]] = True
+                    self._count("island_wake_loading")
+                continue
+            ok, new, why = self._island_advance(isl, T, T + H)
+            if ok:
+                self._isl_pending[iid] = new
+                s_isl[isl["members"]] = new["s_isl"]
+            else:
                 wake[isl["members"]] = True
+                self._count("island_wake_" + why)
+        self._s_isl = s_isl
+        self._s_isl_max = float(s_isl.max()) if self.N else 0.0
         # 2. wake: a cluster wakes whole (into the DEM); a single grain goes to the slaved rolling model. Grains a
         # redo names go into the DEM from the start. Sleepers whose certificate holds stay asleep (static): one joins
         # the DEM when a DEM grain comes within 2 d_cap of it (see _dem), or a rolling or flying grain is captured near
@@ -545,9 +657,10 @@ class FullContactSim:
             for k in np.flatnonzero(self.regime == ROLL):
                 self._roll_face.pop(int(k), None)
                 self.regime[k] = ACTIVE
-        # motion bounds: |v| H + a_max H^2 / 2 (body forces), the rolling envelope for rolling grains, 0 asleep
+        # motion bounds: |v| H + a_max H^2 / 2 (body forces), the rolling envelope for rolling grains, the drift of
+        # a sleeping island (0 for a single sleeper and a tier-0 island)
         s = self._motion_bound(H, T)
-        s[self.regime == ASLEEP] = 0.0
+        s[self.regime == ASLEEP] = s_isl[self.regime == ASLEEP]
         s_off = np.zeros(self.N)
         ro_all = np.flatnonzero(self.regime == ROLL)
         if len(ro_all):
@@ -584,6 +697,8 @@ class FullContactSim:
         dt_d = min(self._dt_dem, self._hertz_dt(2 * float(np.linalg.norm(self.v, axis=1).max())))
         self._join_dt = dt_d
         mob_idx = np.flatnonzero((self.regime == FREE) | (self.regime == ROLL) | (self.regime == SLAV))
+        # (sleepers need no speed bound: a sleeping island's drift is its displacement allowance s_isl in s, and a
+        # member woken inside the step gets local bounds where it joins, _early_exit)
         self._vd_step, self._ag_step = self._speed_bounds(H, a_b, self.regime != ASLEEP)
         if len(mob_idx):
             t_hit, used = self._capture_times(mob_idx, H, T, s, s_off)
@@ -668,7 +783,7 @@ class FullContactSim:
             t_cur, t_end = t, t + H
             chunk = 20000 * self._dt_dem
             s_full = s.copy()
-            s_full[self.regime == ASLEEP] = 0.0
+            s_full[self.regime == ASLEEP] = self._s_isl[self.regime == ASLEEP]
             nkey = -10 ** 9                       # keys of the rejoins (captures are > 0, slaved clusters -1 - q)
             while t_cur < t_end - 1e-15:
                 t_next = join_at[0][0] if join_at else t_end
@@ -723,7 +838,9 @@ class FullContactSim:
                 vf = max(vf or 0.0, self._vdem_fac * 1.25 * float((obs[sc] / np.maximum(vb[sc], 1e-300)).max()))
         # a grain that entered the DEM during the step (not active at its start): up to then its capture time (or,
         # asleep, its static certificate) kept it clear of every other grain's bounded motion; from then on it is
-        # within dmax of where it entered, and must be clear of every grain outside the DEM at the same time
+        # within dmax of where it entered, and must be clear of every grain outside the DEM at the same time (a
+        # member of a sleeping cluster woken by an approach too: placed within s_isl of its committed position,
+        # which the others' bounds allowed for, its dmax is measured from where it was placed)
         self._missed_end()
         bad |= chk["missed"]
         cand = np.flatnonzero(chk["in_dem"] & (reg_seen != ACTIVE))
@@ -771,7 +888,8 @@ class FullContactSim:
           (local, never below the step-start bounds; recorded and checked against the actual speeds);
         * grains that left the DEM earlier in this step: within S of where they left it until they rejoin, then
           their step-start speed bounds (recorded and checked);
-        * free and sleeping grains outside the DEM all step: straight-line relative motion plus curvature bounds;
+        * free and sleeping grains outside the DEM all step: straight-line relative motion plus curvature bounds (a
+          sleeping cluster's drift allowance s_isl, its entry in s_full, added to the curvature);
         * other grains outside the DEM (late joiners, slaved clusters): their step-start positions and whole-step
           motion bounds; once they join the DEM the step's verification checks them against every outside record.
         Rejoin times are rounded down to a grid (earlier is always safe) so that fewer DEM segments are cut.
@@ -899,10 +1017,10 @@ class FullContactSim:
                         d0 = x_start[j] + v_start[j] * (t_now - t_step) - self.x[k]
                         dv = v_start[j] - self.v[k]
                         curv = 0.5 * a_j * H * H + 0.5 * a_k[k] * rem * rem + off_k
-                    else:
+                    else:                         # asleep: within s_full[j] (= s_isl) of its committed position
                         d0 = self.x[j] - self.x[k]
                         dv = -self.v[k]
-                        curv = 0.5 * a_k[k] * rem * rem + off_k
+                        curv = 0.5 * a_k[k] * rem * rem + off_k + s_full[j]
                     if own >= 0:                  # a roller may turn: no direction assumed
                         tc = min(tc, t_iso(float(np.linalg.norm(d0)) - rsum - curv + 0.5 * a_k[k] * rem * rem,
                                            vk + float(np.linalg.norm(dv + self.v[k])), a_k[k]))
@@ -1057,6 +1175,12 @@ class FullContactSim:
         vb_all[idx], ag_all[idx] = vb * self._vdem_fac, amax
         return vb_all, ag_all
 
+    def _drift(self):
+        """Each sleeper's displacement allowance inside the current step (the s_isl of its island, set by _step_once;
+        0 for a single sleeper, and for every grain before the first step) and the largest of them."""
+        s = getattr(self, "_s_isl", None)
+        return (s, self._s_isl_max) if s is not None else (np.zeros(self.N), 0.0)
+
     def _capture_times(self, free, H, T, s, s_off):
         """For each free or rolling grain, a lower bound on the time at which it could first come within the capture
         distance d_cap of a wall or another grain during the step.
@@ -1067,13 +1191,16 @@ class FullContactSim:
           of at most (a_i + a_j) tau^2 / 2, so the distance is at least |d0 + dv tau| - (a_i + a_j) H^2 / 2;
         * a rolling grain: its envelope |v| tau + a tau^2 / 2 + offset (rolling bound);
         * a grain in the DEM: no direction is assumed, only its local speed bound (contacts can turn it).
-        Sleeping grains do not move (their certificate holds for the step; one that joins the DEM is checked
-        afterwards, see _verify). The speed bound of each grain in the DEM is local (_speed_bounds) and checked
-        against its actual speed afterwards. Returns the times and which DEM grains' bounds were used."""
+        A single sleeping grain does not move; a sleeping cluster may drift by at most s_isl (its certificate's
+        allowance, _step_once), by which its gaps are shrunk (their certificates hold for the step; one that joins
+        the DEM is checked afterwards, see _verify). The speed bound of each grain in the DEM is local
+        (_speed_bounds) and checked against its actual speed afterwards. Returns the times and which DEM grains'
+        bounds were used."""
         d_cap = self.d_cap
         vm = np.linalg.norm(self.v, axis=1)
         a_bound = np.maximum((s - s_off - vm * H) * 2 / (H * H), 0.0)   # per-grain acceleration bound
         vd, ag = self._vd_step, self._ag_step
+        s_isl = self._drift()[0]
         off_any = self._off_any()
         out = np.full(len(free), np.inf)
         used = np.zeros(self.N, bool)
@@ -1133,7 +1260,8 @@ class FullContactSim:
                 rsum = self.rad[jj] + self.rad[k]
                 rj = self.regime[jj]
                 if k_slv and (rj == ASLEEP or self._slv_of.get(int(jj)) == self._slv_of.get(int(k))):
-                    continue                      # checked exactly by the pre-run (static, or the same cluster)
+                    continue                      # checked exactly by the pre-run (an obstacle grown by its drift
+                                                  # allowance, _slv_obstacles, or the same cluster)
                 if rj == ACTIVE:                  # (it may roll on a wall later: its rocking offset too)
                     gap = float(np.linalg.norm(self.x[jj] - self.x[k])) - rsum - s_off[k] - off_any[jj]
                     tp = t_iso(gap, vm_e[k] + vd[jj], a_bound[k] + ag[jj])
@@ -1141,11 +1269,13 @@ class FullContactSim:
                 elif k_roll or k_slv or rj == ROLL or rj == SLAV:
                     gap = float(np.linalg.norm(self.x[jj] - self.x[k])) - rsum - s_off[k] - s_off[jj]
                     vj = 0.0 if rj == ASLEEP else vm_e[jj]
+                    if rj == ASLEEP:              # a sleeping cluster: anywhere within s_isl of its committed
+                        gap -= s_isl[jj]          # position (its a_bound, 2 s_isl / H^2, allows for it once more)
                     tp = t_iso(gap, vm_e[k] + vj, a_bound[k] + a_bound[jj])
                 elif rj == FREE:
                     tp = t_lin(self.x[jj] - self.x[k], self.v[jj] - self.v[k], rsum, a_bound[k] + a_bound[jj])
-                else:
-                    tp = t_lin(self.x[jj] - self.x[k], -self.v[k], rsum, a_bound[k])
+                else:                             # asleep: its drift allowance widens the capture shell
+                    tp = t_lin(self.x[jj] - self.x[k], -self.v[k], rsum + s_isl[jj], a_bound[k])
                 best = min(best, tp)
             out[q] = best
         return out, used
@@ -1153,7 +1283,13 @@ class FullContactSim:
     def _skip_asleep(self, t, t_out=None):
         """Everything is asleep: advance time without stepping while every sleeper's certificate holds, checked at
         the same sample points the stepping would use (every dt_s), up to the next load breakpoint or fast load.
-        Returns the new time (t if nothing can be skipped)."""
+        Single sleepers are tested at every sample (the sample loads as limits from the left, the loads' chord
+        deviation over the sample interval added, as in _step_once); sleeping clusters are advanced from sample to
+        sample in lockstep (_island_advance, the sample loads as limits from the left, each island's state committed
+        at once when its step holds; a tier-0 island keeps its linear test), all of them stopping at the first
+        sample any one fails, so that every island's committed state is at the time returned. The long-range forces
+        _F_lr are not updated during a skip: they stay those of the last step (their change is charged to the first
+        step after it, _island_advance). Returns the new time (t if nothing can be skipped)."""
         T = self.env.t0_flight + t
         dts = self.base.dt_base
         t_lim = min(self.duration, self.loads.next_breakpoint(T) - self.env.t0_flight, t + 2.0,
@@ -1167,17 +1303,36 @@ class FullContactSim:
         if len(asl):
             faces = np.array([self._sleep_face[k] for k in asl])
             for q, Tq in enumerate(Ts):
-                F, Tqq = self._body_force(asl, Tq)
-                if float(self._margins(asl, faces, F, Tqq)[0].max()) > 1 - self.margin:
+                F, Tqq = self._body_force(asl, Tq, "-")
+                dF = self._chord_force(asl, T if q == 0 else Ts[q - 1], Tq)
+                if float(self._margins(asl, faces, F, Tqq, dF)[0].max()) > 1 - self.margin:
                     ok_until = q
                     break
-        for iid, isl in self._islands.items():
-            for q in range(min(ok_until, n)):
-                if float(self._island_ratio(isl, Ts[q]).max()) > 1 - self.margin:
-                    ok_until = q
+        for iid in list(self._islands):
+            isl = self._islands[iid]
+            if self.cap_sleep and "tier" not in isl and "res" not in isl:
+                self._islands[iid] = self._island_upgrade(isl)
+        for q in range(min(ok_until, n)):
+            pend = {}
+            for iid, isl in self._islands.items():
+                if isl.get("tier", 0) == 0 or "res" in isl:
+                    if float(self._island_ratio(isl, Ts[q], "-").max()) > 1 - self.margin:
+                        pend = None
+                        break
+                    continue
+                ok, new, why = self._island_advance(isl, T if q == 0 else Ts[q - 1], Ts[q])
+                if not ok:
+                    pend = None
                     break
+                pend[iid] = new
+            if pend is None:
+                ok_until = q
+                break
+            for iid, new in pend.items():
+                self._island_commit(iid, new)
         if ok_until < 1:
             return t
+        self._island_report()
         return t + ok_until * dts
 
     def _wake(self, k, T):
@@ -1374,26 +1529,35 @@ class FullContactSim:
                 "dem_gs_touching_nothing": int((~wall & ~pair & mask).sum())}
 
     def _watch(self, ai, T, skin):
-        """Sleepers within 2 d_cap of a DEM grain join it (repeated: a joined grain may be that close to another).
-        Returns the DEM set and each DEM grain's movement allowance until the next list build."""
+        """Sleepers within 2 d_cap of a DEM grain join it (repeated: a joined grain may be that close to another); a
+        sleeping cluster joins whole, at its state for the load now (_wake_island, counted island_wake_approach).
+        A sleeping cluster may be anywhere within its drift allowance s_isl of its committed position (_step_once;
+        0 for a single sleeper), so every gap to it is shrunk by s_isl: a DEM grain joins it when gap - s_isl <=
+        2 d_cap and may move gap - s_isl - 2 d_cap until the next list build, so that no grain sits in a band where
+        it may move by nothing yet does not join (the DEM would take one step per list build across it). Returns
+        the DEM set and each DEM grain's movement allowance until the next list build."""
         d2 = 2 * self.d_cap
         rmax = float(self.rad.max())
+        s_isl, s_max = self._drift()
         while True:
             lim = np.full(len(ai), 0.5 * skin)
             sl = np.flatnonzero(self.regime == ASLEEP)
             if not len(sl):
                 return ai, lim
             xs = self.x[sl]
-            c = getattr(self, "_sl_tree", None)        # sleepers do not move: reuse the tree while the set is the same
+            # the committed positions change only at commits (step ends): the tree is reused while the set of
+            # sleepers and their positions are the same
+            c = getattr(self, "_sl_tree", None)
             if c is None or not (np.array_equal(c[0], sl) and np.array_equal(c[1], xs)):
                 c = self._sl_tree = (sl, xs.copy(), cKDTree(xs))
             tree = c[2]
             join = set()
-            for q, lst in enumerate(tree.query_ball_point(self.x[ai], 2 * rmax + skin)):
+            for q, lst in enumerate(tree.query_ball_point(self.x[ai], 2 * rmax + skin + s_max)):
                 if not lst:
                     continue
                 jj = sl[np.array(lst, np.int64)]
-                gap = np.linalg.norm(self.x[jj] - self.x[ai[q]], axis=1) - self.rad[jj] - self.rad[ai[q]]
+                gap = (np.linalg.norm(self.x[jj] - self.x[ai[q]], axis=1) - self.rad[jj] - self.rad[ai[q]]
+                       - s_isl[jj])
                 lim[q] = min(lim[q], float(gap.min()) - d2)
                 join.update(int(j) for j in jj[gap <= d2])
             if not join:
@@ -1405,6 +1569,7 @@ class FullContactSim:
                 if j in self._island_of:
                     mem = [int(g) for g in self._islands[self._island_of[j]]["members"]]
                     self._wake_island(self._island_of[j], T)
+                    self._count("island_wake_approach")
                     new += mem
                 else:
                     if j in self._sleep_face:
@@ -1435,10 +1600,11 @@ class FullContactSim:
             # the load test of _try_sleep for all rolling grains at once; only those that pass get the full test
             faces = np.array([self._roll_face[int(k)] for k in ro], np.int64)
             worst = np.zeros(len(ro))
-            for Ts in (T, T + Hn):
-                F, Tq = self._body_force(ro, Ts)
-                worst = np.maximum(worst, self._margins(ro, faces, F, Tq)[0])
-            for k in ro[worst <= 1 - 5 * self.margin]:
+            dF = self._chord_force(ro, T, T + Hn)
+            for Ts, side in ((T, None), (T + Hn, "-")):
+                F, Tq = self._body_force(ro, Ts, side)
+                worst = np.maximum(worst, self._margins(ro, faces, F, Tq, dF)[0])
+            for k in ro[worst <= 1 - self.margin]:
                 f = self._roll_face[int(k)]
                 if self._try_sleep(int(k), f, T, Hn):
                     self._roll_face.pop(int(k), None)
@@ -1508,20 +1674,32 @@ class FullContactSim:
                     self._try_roll(k, face_of[k], T, H)
 
     def _try_sleep(self, k, face, T, H):
-        """Sleep a grain on one wall if its residual motion cannot carry any contact load past its limit: with
-        E = kinetic energy + the energy of its deviation from static equilibrium, the largest extra spring force
-        sqrt(2 k_max E) must be below 1% of the smallest remaining margin."""
+        """Sleep a grain on one wall. Entry is the stay test of _step_once: every load ratio (pull-off, sliding,
+        rolling, twisting) <= 1 - margin at T and at T + H (the end load as the limit from the left) with the loads'
+        deviation from their chord inside the step added (_margins with _chord_force: exact at the samples plus the
+        deviation between them), so a grain that falls asleep holds its first step. Against chatter the ratios of
+        each kind are extrapolated linearly from their values at T and T + H over island_hyst_steps steps (to the
+        next breakpoint at most), and the grain stays awake, counted sleep_refused_drift, when that exceeds
+        1 - margin. Its residual motion must not carry any contact load past its limit: with E = kinetic energy +
+        the energy of its deviation from static equilibrium, the largest extra spring force sqrt(2 k_max E) must be
+        below 1% of the smallest remaining margin. A single contact at its cap is a mechanism (nothing else holds
+        the grain), so a grain above 1 - margin is left to _try_roll (ROLL)."""
         if H <= 0 or self.loads.fast_window(T, T + H) or self.loads.breakpoint_in(T - 1e-9, T + H):
             return False
         row = self._key[(int(k), -1 - face)]
         p, h = self._prm[row], self._hist[row]
-        idx = np.array([k])
-        worst = 0.0
-        for Ts in (T, T + H):
-            F, Tq = self._body_force(idx, Ts)
-            ratio, _, Fn, _, _, _ = self._margins(idx, np.array([face]), F, Tq)
-            worst = max(worst, float(ratio[0]))
-        if worst > 1 - 5 * self.margin:
+        idx, faces = np.array([k]), np.array([face])
+        dF = self._chord_force(idx, T, T + H)
+        F, Tq = self._body_force(idx, T)
+        r0, _, Fn, _, _, _, k0 = self._margins(idx, faces, F, Tq, dF)
+        F1, Tq1 = self._body_force(idx, T + H, "-")
+        r1, _, _, _, _, _, k1 = self._margins(idx, faces, F1, Tq1, dF)
+        worst = max(float(r0[0]), float(r1[0]))
+        if worst > 1 - self.margin:
+            return False
+        Tx = min(T + self.island_hyst_steps * H, self.loads.next_breakpoint(T))
+        if float((k0 + (k1 - k0) * ((Tx - T) / H)).max()) > 1 - self.margin:
+            self._count("sleep_refused_drift")
             return False
         Fc = p[dem.P_FC]
         Fncrit = abs(float(Fn[0]) + 2 * Fc)
@@ -1531,7 +1709,6 @@ class FullContactSim:
         kn = 1.2 * p[dem.P_ESTAR] * a
         kmax = max(kn, p[dem.P_KT] * a, p[dem.P_KR])
         Ek = 0.5 * self.m[k] * float(self.v[k] @ self.v[k]) + 0.5 * self.I[k] * float(self.w[k] @ self.w[k])
-        F, Tq = self._body_force(idx, T)
         # rest position at the current load vs actual: normal and tangential residuals via the springs
         saved = (self.x[k].copy(), h.copy())
         self._place_at_equilibrium(k, face, row, T, F, Tq)
@@ -1660,17 +1837,511 @@ class FullContactSim:
                 rows.append(self._key[(i, j)])
         return np.array(ci, np.int64), np.array(cj, np.int64), np.array(rows, np.int64)
 
-    def _island_load(self, mem, T):
-        F, Tq = self._body_force(mem, T)
+    def _island_load(self, mem, T, side=None):
+        """Load vector (6 per grain: force, torque) on the members at T; side "-" the limit from the left."""
+        F, Tq = self._body_force(mem, T, side)
         return np.hstack([F, Tq]).reshape(-1)
 
-    def _island_ratio(self, isl, T):
-        dF = self._island_load(isl["members"], T) - isl["F_ref"]
+    def _island_ratio(self, isl, T, side=None):
+        """The linear certificate of a tier-0 island (cap_sleep off, a tracked residual motion, or an island of the
+        previous code version): the worst load ratio of the linear response lam_ref + J K^-1 dF to the load at T."""
+        dF = self._island_load(isl["members"], T, side) - isl["F_ref"]
         du = self._island_lu(isl).solve(dF)
         lam = isl["lam"] + isl["J"] @ du
-        if "dl" in isl:                       # sleeping with a tracked residual motion: its largest effect included
-            return statics.margins_bounded(lam, isl["dl"], isl["prm"], isl["out"])
-        return statics.margins(lam, isl["prm"], isl["out"])
+        with np.errstate(divide="ignore", invalid="ignore"):      # an inactive near pair's 0/0 pull-off ratio (-> 0)
+            if "dl" in isl:                   # sleeping with a tracked residual motion: its largest effect included
+                return statics.margins_bounded(lam, isl["dl"], isl["prm"], isl["out"])
+            return statics.margins(lam, isl["prm"], isl["out"])
+
+    # ------------------------------------------------------------------ sleeping clusters at their caps
+    def _count(self, key, n=1):
+        self.n_events[key] = self.n_events.get(key, 0) + n
+
+    def _awake(self, why):
+        """A cluster stays in the full model; why it could not sleep is counted (cluster_awake_<why>)."""
+        self._count("cluster_awake_" + why)
+        return False
+
+    @staticmethod
+    def _island_bnd0():
+        """An island's bounds at zero (the metre entries per kind: sliding, rolling [m], twisting [rad])."""
+        return dict(newton_rel=0.0, dyn_rel=0.0, curv_rel=0.0, curv_m=np.zeros(3), flow_tol_m=np.zeros(3),
+                    ratchet_m=np.zeros(3), path_m=np.zeros(3), flow_m=np.zeros(3), snap_rel=0.0, snap_m=np.zeros(3),
+                    total_rel=0.0)
+
+    @staticmethod
+    def _island_flags(E):
+        """The wake reason a solve_equilibrium result carries; None if it converged with no contact transition."""
+        if E["broke"]:
+            return "break"
+        if E["formed"]:
+            return "newcontact"
+        if E["yielded"]:
+            return "yield"
+        if E["mechanism"]:
+            return "mechanism"
+        return None if E["ok"] else "newton"
+
+    @staticmethod
+    def _ratios(lam, D, prm, out, tm):
+        """statics.ratios_by_kind_bounded on the touching contacts tm (an inactive near pair has no cap and no
+        pull-off force): the pull-off ratios (n_t,) and the sliding, rolling and twisting ratios (n_t x 3); D None
+        for the plain ratios."""
+        nc = len(prm)
+        l8 = lam.reshape(nc, 8)[tm].reshape(-1)
+        d8 = np.zeros_like(l8) if D is None else D.reshape(nc, 8)[tm].reshape(-1)
+        rp, rs, rr, rt = statics.ratios_by_kind_bounded(l8, d8, prm[tm], out[tm])
+        return rp, np.column_stack([rs, rr, rt])
+
+    @staticmethod
+    def _fhat(lam):
+        """Unit directions (n_contacts x 3 x 3) of the sliding and rolling forces (the twist's drops out of
+        statics.released_stiffness)."""
+        L8 = lam.reshape(-1, 8)
+        fh = np.zeros((L8.shape[0], 3, 3))
+        fh[:, 0] = L8[:, 1:4] / np.maximum(np.linalg.norm(L8[:, 1:4], axis=1), 1e-300)[:, None]
+        fh[:, 1] = L8[:, 4:7] / np.maximum(np.linalg.norm(L8[:, 4:7], axis=1), 1e-300)[:, None]
+        return fh
+
+    @staticmethod
+    def _kind_norms(v8):
+        """A per-slot vector (8 per contact) reduced per kind: the norms over the sliding and rolling slots and the
+        absolute twist slot (n_contacts x 3)."""
+        V = v8.reshape(-1, 8)
+        return np.column_stack([np.linalg.norm(V[:, 1:4], axis=1), np.linalg.norm(V[:, 4:7], axis=1),
+                                np.abs(V[:, 7])])
+
+    @staticmethod
+    def _island_row_norms(lu, J, block=256):
+        """||K^-T J_k^T||_2 for every component row k of J over the translational and over the rotational degrees of
+        freedom separately (8 n_contacts x 2), by block transposed solves as statics.row_norms; then |(J K^-1 f)_k|
+        <= rn_t,k ||f_trans||_2 + rn_r,k ||f_rot||_2 (Cauchy-Schwarz on each part). The one norm over all degrees of
+        freedom (statics.row_norms) is a valid bound too but mixes units: the rotational entries, ~1/R per N m, are
+        1e4 times the translational ones per N, so a force residual of 1e-16 N would be charged as if it were a
+        torque of 1e-16 N m (measured: 3.7e-4 of a rolling cap for the pair on a floor, ~1e4 times too loose)."""
+        Jt = J.T.tocsc()
+        rn = np.empty((J.shape[0], 2))
+        rot = (np.arange(J.shape[1]) % 6) >= 3
+        for a in range(0, J.shape[0], block):
+            b = min(a + block, J.shape[0])
+            X = lu.solve(Jt[:, a:b].toarray(), trans='T')
+            rn[a:b, 0] = np.linalg.norm(X[~rot], axis=0)
+            rn[a:b, 1] = np.linalg.norm(X[rot], axis=0)
+        return rn
+
+    @staticmethod
+    def _island_dashpots(prm, hist):
+        """The kernel's dashpot coefficients per contact (n_contacts x 5): normal dpre (P_DAMPC sqrt(a) or P_DAMPC a
+        by the damping mode), tangential x_gt dpre, rolling g_r (force per rolling speed), g_r R^2 (torque per
+        angular speed) and the twisting g_tw."""
+        a = np.maximum(hist[:, dem.H_A], 0.0)
+        mode = prm[:, dem.P_DAMPMODE].astype(np.int64)
+        dpre = np.abs(np.where(mode == dem.DAMP_TSUJI_JKR, prm[:, dem.P_DAMPC] * np.sqrt(a),
+                               np.where(mode == dem.DAMP_VISCOELASTIC, prm[:, dem.P_DAMPC] * a, 0.0)))
+        gr = prm[:, dem.P_GR]
+        return np.column_stack([dpre, prm[:, dem.P_XGT] * dpre, gr, gr * prm[:, dem.P_REFF] ** 2, prm[:, dem.P_GTW]])
+
+    def _island_tols(self, capv, prm, tm):
+        """Per-DOF Newton tolerances: island_tol_rel of the smallest force cap (sliding, rolling) and of the smallest
+        torque cap (twisting, or the rolling cap times the contact radius) over the touching contacts tm."""
+        if not tm.any():
+            return 0.0, 0.0
+        c, tol = capv[tm], self.island_tol_rel
+        return tol * float(c[:, :2].min()), tol * float(min(c[:, 2].min(), (prm[tm, dem.P_REFF] * c[:, 1]).min()))
+
+    def _island_near(self, mem, ci, cj, rows):
+        """The island's contact system: the touching contacts given plus every member pair and member-wall pair with a
+        gap <= island_gap_m as an inactive contact (H_TOUCH = 0: the kernel gives it no force and no stiffness until
+        the gap closes, when solve_equilibrium's formed flag reports it). A static island cannot close a gap, a
+        creeping one can; the system is relisted at every refresh (_island_refresh), between which the drift stays
+        far below island_gap_m, so no contact can form unseen."""
+        have = set(zip(ci.tolist(), cj.tolist()))
+        ci, cj, rows = list(ci), list(cj), list(rows)
+        x, rad, gap = self.x[mem], self.rad[mem], self.island_gap_m
+        if len(mem) > 1:
+            pr = cKDTree(x).query_pairs(2 * float(rad.max()) + gap, output_type="ndarray")
+            for a, c in pr.tolist():
+                a, c = (a, c) if a < c else (c, a)          # members are sorted: a row's key is (smaller, larger)
+                if (a, c) in have or float(np.linalg.norm(x[a] - x[c])) - rad[a] - rad[c] > gap:
+                    continue
+                ci.append(a)
+                cj.append(c)
+                rows.append(self._row(int(mem[a]), int(mem[c])))
+        for f in range(6):
+            ax = f // 2
+            g = (x[:, ax] if f % 2 == 0 else self.L[ax] - x[:, ax]) - rad
+            for k in np.flatnonzero(g <= gap).tolist():
+                if (k, -1 - f) in have:
+                    continue
+                ci.append(k)
+                cj.append(-1 - f)
+                rows.append(self._row(int(mem[k]), -1 - f))
+        return np.array(ci, np.int64), np.array(cj, np.int64), np.array(rows, np.int64)
+
+    def _island_chord(self, mem, T0, T1):
+        """||dF||_2 of the loads' chord deviation over [T0, T1] on the island's grains (_chord_force per grain; the
+        rotational components deviate by nothing)."""
+        return float(np.linalg.norm(self._chord_force(mem, T0, T1)))
+
+    def _island_fdyn(self, isl, hist, du, l, T):
+        """(||f_dyn,trans||_2, ||f_dyn,rot||_2): the forces and torques the drift du over l would need were it dynamic
+        rather than quasi-static, per grain m |du| / l^2 plus the dashpot, Coriolis and drag terms (n_c g_max +
+        2 m Omega + m g_drag) |du| / l, g_max the largest translational dashpot coefficient of the island's contacts
+        (normal, tangential, rolling; _island_dashpots) and n_c the grain's number of contacts; the rotations
+        likewise with I, g_r R^2 and g_tw, and the gyroscopic I Omega."""
+        mem, ci, cj = isl["members"], isl["ci"], isl["cj"]
+        tm = hist[:, dem.H_TOUCH] > 0.5
+        if not tm.any():
+            return 0.0, 0.0
+        g = self._island_dashpots(isl["prm"][tm], hist[tm])
+        gt, gr = float(g[:, :3].max()), float(g[:, 3:].max())
+        nc = np.zeros(len(mem))
+        np.add.at(nc, ci[tm], 1.0)
+        pair = cj[tm] >= 0
+        np.add.at(nc, cj[tm][pair], 1.0)
+        Om = float(np.linalg.norm(self.loads.omega(np.array([T]))[0]))
+        m, I = self.m[mem], self.I[mem]
+        dU = np.abs(np.asarray(du).reshape(-1, 6))
+        ft = (m / l ** 2 + (nc * gt + 2 * m * Om + m * self.gdrag[mem]) / l)[:, None] * dU[:, :3]
+        fr = (I / l ** 2 + (nc * gr + I * Om) / l)[:, None] * dU[:, 3:]
+        return float(np.linalg.norm(ft)), float(np.linalg.norm(fr))
+
+    def _island_tangent(self, isl, count):
+        """A closure for solve_equilibrium's tangent argument (the creep solves): the released stiffness
+        (statics.released_stiffness) of the island's lifted tangents at every sliding, rolling or twisting component
+        whose ratio in the state reached is >= 1 - 1e-9 (the return-mapped components sit at their caps to rounding),
+        factorised anew only when that set changes (counted island_refactor); the island's own factor when nothing is
+        capped. A factorisation that fails raises RuntimeError, which solve_equilibrium reports as a mechanism (one
+        that succeeds on a round-off pivot gives an absurd step, caught there as a break or a non-contraction)."""
+        from scipy.sparse.linalg import splu
+        K, J, prm, lu = isl["K"], isl["J"], isl["prm"], self._island_lu(isl)
+        cache = {}
+
+        def tangent(xn, hn, lam, out):
+            tm = hn[:, dem.H_TOUCH] > 0.5
+            mask = np.zeros((len(prm), 3), bool)
+            mask[tm] = self._ratios(lam, None, prm, out, tm)[1] >= 1 - 1e-9
+            if not mask.any():
+                return lu
+            key = mask.tobytes()
+            if cache.get("key") != key:
+                cache["fac"] = splu(statics.released_stiffness(K, J, statics.kcomp(prm, hn), mask, self._fhat(lam)))
+                cache["key"] = key
+                if count:
+                    self._count("island_refactor")
+            return cache["fac"]
+        return tangent
+
+    def _island_adiabatic(self, K, mem, l):
+        """The fraction of the elastic energy of a step's quasi-static load change that can be left as an oscillation
+        of the island: a mode of angular frequency omega whose equilibrium is moved over a time l (a linear ramp,
+        then held) keeps an oscillation of amplitude at most 2 / (omega l) times the shift, so at most 4 / (omega l)^2
+        of the shift's elastic energy (exact for an undamped linear mode; damping only lowers it), and at most all
+        of it; omega the island's lowest undamped natural frequency from the symmetric part of the lifted stiffness
+        and the grains' masses and moments of inertia (dense for islands up to LINRES_MAX grains, else a
+        shift-invert Lanczos solve from a fixed start vector: deterministic either way); 1 when it cannot be found
+        or the stiffness is not positive definite (a mechanism keeps the whole energy)."""
+        from scipy.linalg import eigh
+        from scipy.sparse import diags
+        from scipy.sparse.linalg import eigsh
+        Md = np.column_stack([self.m[mem]] * 3 + [self.I[mem]] * 3).reshape(-1)
+        Ks = (0.5 * (K + K.T)).tocsc()
+        try:
+            if len(Md) <= 6 * LINRES_MAX:
+                w2 = float(eigh(Ks.toarray(), np.diag(Md), eigvals_only=True, subset_by_index=[0, 0])[0])
+            else:
+                w2 = float(eigsh(Ks, k=1, M=diags(Md).tocsc(), sigma=0.0, which="LM", v0=np.ones(len(Md)),
+                                 return_eigenvectors=False)[0])
+        except Exception:                        # (ARPACK and LAPACK failures: the conservative factor)
+            return 1.0
+        if not np.isfinite(w2) or w2 <= 0.0:
+            return 1.0
+        return min(1.0, 4.0 / (w2 * l * l))
+
+    def _island_ratchet(self, K, J, prm, hist, lam, out, kc, capv, E_res, mem):
+        """How far an entry residual of energy E_res (kinetic, elastic deviation from the equilibrium, and what the
+        step's load change can pump in) can slip any sliding, rolling or twisting component near its cap, bounded in
+        the RELEASED system (statics.released_stiffness over every such component): a capped spring holds its cap
+        while the rest of the structure restores with the released stiffness, so the residual's displacement
+        amplitude there, dl_rel = statics.energy_bounds(K_rel, J, E_res), is permanent slip (the load, not the
+        residual's energy, does the plastic work), plus the dashpot's shift of a clipped history at the residual's
+        speed, g v_E / k with v_E = sqrt(2 E_res / m_min) for sliding, R_max sqrt(2 E_res / I_min) for rolling and
+        sqrt(2 E_res / I_min) for the twist rate. A component is near its cap when its ratio plus the residual's
+        bound reaches 1 - sleep_margin (the margin standing in for the step's deviation bound, unknown at entry),
+        first with the elastic bounds, then with the released ones (one iteration); the others cannot flow. Returns
+        (dl_rel (8 n_contacts), slip (n_contacts x 3, 0 where not near), near (n_contacts x 3)), or None when the
+        released system is a mechanism: energy_bounds None, non-finite or above 1e3 times the elastic bounds
+        (statics.released_stiffness: the singularity holds only to rounding)."""
+        tm = hist[:, dem.H_TOUCH] > 0.5
+        dl = statics.energy_bounds(K, J, E_res)
+        if dl is None or not np.isfinite(dl).all():
+            return None
+        sds = self._ratios(lam, None, prm, out, tm)[1]
+
+        def near_of(d):
+            d3 = self._kind_norms(d)
+            nr = np.zeros((len(prm), 3), bool)
+            nr[tm] = sds + d3[tm] / np.maximum(capv[tm], 1e-300) >= 1 - self.margin
+            return nr, d3
+        near, d3 = near_of(dl)
+        dlr = dl
+        if near.any():
+            dlr = statics.energy_bounds(statics.released_stiffness(K, J, kc, near, self._fhat(lam)), J, E_res)
+            if dlr is None or not np.isfinite(dlr).all() or float(dlr.max()) > 1e3 * max(float(dl.max()), 1e-300):
+                return None
+            near2, d3 = near_of(dlr)
+            near = near | near2
+        g = self._island_dashpots(prm, hist)[:, [1, 2, 4]]
+        m_min, I_min, R_max = float(self.m[mem].min()), float(self.I[mem].min()), float(self.rad[mem].max())
+        vE = np.array([math.sqrt(2 * E_res / m_min), R_max * math.sqrt(2 * E_res / I_min),
+                       math.sqrt(2 * E_res / I_min)])
+        slip = (d3 + g * vE[None, :]) / np.maximum(kc, 1e-300)
+        slip[~near] = 0.0
+        return dlr, slip, near
+
+    def _island_advance(self, isl, T0, T1, count=True):
+        """Advance a sleeping cluster from its committed state (the exact equilibrium of F(T0): positions in
+        self.x[members], histories in self._hist[rows], or the candidate arrays x, hist of a pending dict) to the
+        load at T1 (its limit from the left) and certify the step. Pure: nothing of self is written; the end state
+        and the updated bookkeeping come back as a new island dict (x, hist the state to commit, refresh whether the
+        tangents are to be recomputed at the commit; _island_commit). Returns (ok, new_isl, why), why one of the
+        island_wake_* reasons when not ok.
+        Certificate (tier 1, static): a lifted-cap Newton solve (statics.solve_equilibrium) to F(T1) and one to
+        F(T_mid) give the exact end and mid-chord equilibria. Along the step the contact quantities deviate from the
+        secant between the exact ends (whose ratio to a cap is quasi-convex, so its largest value is at an end) by
+        at most D_k = rn_k (||dF_chord|| + ||r_1|| + ||r_0|| + ||f_dyn||) + 2 |lam_mid - (lam_0 + lam_1)/2|_k: the
+        loads' own deviation from their chord (_island_chord), the Newton residual at the end and at the start (the
+        committed residual plus the long-range forces' change since the commit), the forces the drift's dynamics
+        would need (_island_fdyn), all through the row norms rn of J K^-1 taken over the translational and the
+        rotational degrees of freedom separately (_island_row_norms, Cauchy-Schwarz on each part), and the path's
+        deviation from the secant measured at the mid-chord state and doubled (a quadratic path deviates most at
+        mid-chord); the rn terms are doubled while K, J are stale (n_since_refresh > 0). If every bounded sliding,
+        rolling and twisting ratio at both ends is <= 1 + island_tol_rel, the real kernel takes no clip branch
+        anywhere in the step: the plastic variables are exact and the end state is the elastic one. The pull-off
+        ratio must keep the sleep margin, no contact may break, form (the inactive near pairs of the system) or
+        yield, and the cumulative bound (below) must stay within island_budget_rel of the deflection at the cap.
+        Creep (tier 2, with creep_islands, when only sds caps are exceeded): the real kernel's one-shot return map
+        iterated to equilibrium with the released stiffness as tangent (_island_tangent) to F(T1), and the half-step
+        pair T0 -> T_mid -> T1 (the second half from the first half's state), which is the state committed; the
+        motion |du|_inf <= island_motion_m (rotations times the smallest radius), every plastic increment
+        (statics.flow_increments, the one-step solve) <= island_flow_max of the deflection at the cap, no twist
+        increment whose sign the kernel would take from a round-off rate (statics.twist_ambiguous; with cfg
+        twist_continuity such a twist is set to sign(h_ref) cap/k_tw instead, ASSUMED and counted
+        island_twist_continuity), the path error 2 |h_1step - h_2step| <= island_path_tol of the deflection at the
+        cap (Richardson, first order), pull-off, yield, break, formation and the budget as above.
+        Bounds (bnd; the metre entries per kind sliding, rolling [m], twisting [rad]): newton_rel, dyn_rel, curv_rel
+        (largest rn ||r|| / cap, rn ||f_dyn|| / cap, rn ||dF_chord|| / cap: the certificate's inputs), curv_m (in
+        tier 2 an in-step load excursion beyond the chord can flow a capped spring by rn ||dF_chord|| / k: summed over
+        creep steps), flow_tol_m (the tolerated excess over 1 times the deflection at the cap, summed; 0 when the
+        prediction is <= 1), path_m (summed), flow_m (the plastic increments, summed: a record, not an error),
+        snap_rel and snap_m (statics.snap_to_caps on the committed histories: the largest relative force change, and
+        its deflection summed), ratchet_m (the entry residual's slip bound, _try_sleep_island), total_rel = max over
+        kinds of (flow_tol + ratchet + path + curv + snap) / the smallest deflection at the cap, the budgeted
+        quantity. s_isl = |du|_inf + the step's curvature deflection + 1e-12 is the most any member is taken to move
+        inside the step (the motion bounds of every other grain). Counters when count (the entry certificate passes
+        False): island_static_steps, island_creep_steps, island_newton_iters, island_refactor."""
+        mem, ci, cj, prm, prm_el, L = isl["members"], isl["ci"], isl["cj"], isl["prm"], isl["prm_el"], self.L
+        x = np.ascontiguousarray(isl["x"] if "x" in isl else self.x[mem])
+        hist = np.ascontiguousarray(isl["hist"] if "hist" in isl else self._hist[isl["rows"]])
+        lu = self._island_lu(isl)
+        lam0, out0, rn, kc, capv = isl["lam"], isl["out"], isl["rn"], isl["kc"], isl["capv"]
+        tm = hist[:, dem.H_TOUCH] > 0.5
+        its = [0]
+
+        def ret(ok, new, why):
+            if count:
+                self._count("island_newton_iters", its[0])
+                if ok:
+                    self._count("island_creep_steps" if new["tier"] == 2 else "island_static_steps")
+            return ok, new, why
+
+        def solve(xs, hs, Fext, dus, real, tangent=None):
+            E = statics.solve_equilibrium(xs, ci, cj, prm if real else prm_el, prm_el, hs, L, lu, Fext, dus, tt, tr,
+                                          self.island_newton_max if real else 6, tangent=tangent)
+            its[0] += E["n_it"]
+            return E, self._island_flags(E)
+        if not tm.any():
+            return ret(False, None, "break")
+        l = T1 - T0
+        tt, tr = self._island_tols(capv, prm, tm)
+        xi_cap = capv / np.maximum(kc, 1e-300)
+        xi_min = xi_cap[tm].min(0)
+        F1 = self._island_load(mem, T1, "-")
+        Fm = self._island_load(mem, T0 + 0.5 * l, "-")
+        dFlr = np.zeros((len(mem), 6))
+        dFlr[:, :3] = self._F_lr[mem] - isl["F_lr_ref"]
+        r0 = isl["r_ref"] + dFlr.reshape(-1)       # the committed state's residual against this step's start load
+        du0 = lu.solve(F1 - isl["F_ref"])
+        E1, why = solve(x, hist, F1, du0, False)
+        if why:
+            return ret(False, None, why)
+        Em, why = solve(x, hist, Fm, 0.5 * du0, False)
+        if why:
+            return ret(False, None, why)
+        lam1, out1 = E1["lam"], E1["out"]
+        chord = self._island_chord(mem, T0, T1)
+        ft, frot = self._island_fdyn(isl, hist, E1["du"], l, T0)
+        r16, r06 = E1["r"].reshape(-1, 6), r0.reshape(-1, 6)
+        rres_t = float(np.linalg.norm(r16[:, :3])) + float(np.linalg.norm(r06[:, :3]))
+        rres_r = float(np.linalg.norm(r16[:, 3:])) + float(np.linalg.norm(r06[:, 3:]))
+        fac = 2.0 if isl["n_since_refresh"] > 0 else 1.0
+        D = (fac * (rn[:, 0] * (chord + rres_t + ft) + rn[:, 1] * (rres_r + frot))
+             + 2 * np.abs(Em["lam"] - 0.5 * (lam0 + lam1)))
+        p0, s0 = self._ratios(lam0, D, prm, out0, tm)
+        p1, s1 = self._ratios(lam1, D, prm, out1, tm)
+        sds = np.maximum(s0, s1)
+        b = {k: (v.copy() if isinstance(v, np.ndarray) else v) for k, v in isl["bnd"].items()}
+        rn3t, rn3r = self._kind_norms(rn[:, 0])[tm], self._kind_norms(rn[:, 1])[tm]
+        cap_t = np.maximum(capv[tm], 1e-300)
+        b["newton_rel"] = max(b["newton_rel"], float(((rn3t * rres_t + rn3r * rres_r) / cap_t).max()))
+        b["dyn_rel"] = max(b["dyn_rel"], float(((rn3t * ft + rn3r * frot) / cap_t).max()))
+        b["curv_rel"] = max(b["curv_rel"], float((rn3t * chord / cap_t).max()))
+        curv_step = (rn3t * chord / np.maximum(kc[tm], 1e-300)).max(0)
+        if float(max(p0.max(), p1.max())) > 1 - self.margin:
+            return ret(False, None, "pulloff")
+        n_it = max(E1["n_it"], Em["n_it"])
+        if (sds <= 1 + self.island_tol_rel).all():
+            tier = 1
+            xn, hn, lam_n, out_n, r_n = E1["xn"], E1["hn"], lam1, out1, E1["r"]
+            du_tot = E1["du"]
+            b["flow_tol_m"] = b["flow_tol_m"] + (np.maximum(sds - 1.0, 0.0) * xi_cap[tm]).max(0)
+        else:
+            if not self.creep_islands:
+                return ret(False, None, "loading")
+            tier = 2
+            tangent = self._island_tangent(isl, count)
+            C1, why = solve(x, hist, F1, E1["du"], True, tangent)
+            if why:
+                return ret(False, None, why)
+            Cm, why = solve(x, hist, Fm, Em["du"], True, tangent)
+            if why:
+                return ret(False, None, why)
+            C2, why = solve(Cm["xn"], Cm["hn"], F1, C1["du"] - Cm["du"], True, tangent)
+            if why:
+                return ret(False, None, why)
+            n_it = max(n_it, C1["n_it"], Cm["n_it"], C2["n_it"])
+            du_tot = Cm["du"] + C2["du"]
+            dU = np.abs(du_tot.reshape(-1, 6))
+            if max(float(dU[:, :3].max()), float(dU[:, 3:].max()) * float(self.rad[mem].min())) > self.island_motion_m:
+                return ret(False, None, "motion")
+            hn_el = statics.apply_displacement(x, ci, cj, prm_el, hist, L, C1["du"].reshape(-1, 6))[1]
+            dp = statics.flow_increments(hn_el, C1["hn"])
+            if (dp[tm] > self.island_flow_max * xi_cap[tm]).any():
+                return ret(False, None, "flow")
+            xn, hn, lam_n, out_n, r_n = C2["xn"], C2["hn"], C2["lam"], C2["out"], C2["r"]
+            amb = statics.twist_ambiguous(hist, hn_el, prm, statics.caps(C1["lam"], prm, C1["out"])) & tm
+            if amb.any():
+                if not self.twist_continuity:
+                    return ret(False, None, "twist")
+                hn = hn.copy()
+                hn[amb, dem.H_XTW] = np.sign(hist[amb, dem.H_XTW]) * statics.caps(lam_n, prm, out_n)[amb, 2] / kc[amb, 2]
+                lam_n, Fnet_n, out_n = statics.state(xn, ci, cj, prm_el, hn, L)
+                r_n = F1 + Fnet_n
+                if count:
+                    self._count("island_twist_continuity", int(amb.sum()))
+            d = C1["hn"] - hn
+            e = 2 * np.column_stack([np.linalg.norm(d[:, dem.H_XT:dem.H_XT + 3], axis=1),
+                                     np.linalg.norm(d[:, dem.H_XR:dem.H_XR + 3], axis=1), np.abs(d[:, dem.H_XTW])])
+            if (e[tm] > self.island_path_tol * xi_cap[tm]).any():
+                return ret(False, None, "path")
+            if float(self._ratios(lam_n, D, prm, out_n, tm)[0].max()) > 1 - self.margin:
+                return ret(False, None, "pulloff")
+            b["path_m"] = b["path_m"] + e[tm].max(0)
+            b["flow_m"] = b["flow_m"] + dp[tm].max(0)
+            b["curv_m"] = b["curv_m"] + curv_step
+        hs, srel = statics.snap_to_caps(hn, lam_n, prm, out_n)
+        if srel > 0.0:
+            hn = hs
+            lam_n, Fnet_n, out_n = statics.state(xn, ci, cj, prm_el, hn, L)
+            r_n = F1 + Fnet_n
+            b["snap_rel"] = max(b["snap_rel"], srel)
+            b["snap_m"] = b["snap_m"] + srel * xi_cap[tm].max(0)
+        du_inf = float(np.abs(du_tot.reshape(-1, 6)[:, :3]).max())
+        s_isl = du_inf + float(curv_step[:2].max()) + 1e-12
+        if (~tm).any() and (-statics.overlaps(xn, ci[~tm], cj[~tm], prm[~tm], L) <= s_isl).any():
+            return ret(False, None, "newcontact")
+        tot = (b["flow_tol_m"] + b["ratchet_m"] + b["path_m"] + b["curv_m"] + b["snap_m"]) / np.maximum(xi_min, 1e-300)
+        b["total_rel"] = float(tot.max())
+        if b["total_rel"] > self.island_budget_rel:
+            return ret(False, None, "budget")
+        refresh = isl["n_since_refresh"] + 1 >= 1000 or isl["du_since_refresh"] + du_inf > 1e-11 or n_it > 3
+        new = dict(isl)
+        new.update(x=xn, hist=hn, lam=lam_n, out=out_n, F_ref=F1, T_ref=T1, F_lr_ref=self._F_lr[mem].copy(),
+                   r_ref=r_n, kc=statics.kcomp(prm, hn), capv=statics.caps(lam_n, prm, out_n), tier=tier,
+                   du_max=du_inf, s_isl=s_isl, bnd=b, refresh=refresh)
+        return ret(True, new, None)
+
+    def _island_refresh(self, isl):
+        """Recompute an island's contact system at its committed state (the touching contacts plus the inactive near
+        pairs, _island_near) and there its lifted tangents K, J, their factor, the row norms, the contact state, spring
+        constants, caps and the residual against its reference load (in place: the dict is a new one, not yet
+        shared with any snapshot)."""
+        from scipy.sparse.linalg import splu
+        mem, rows = isl["members"], isl["rows"]
+        kij = self._kij[rows][self._hist[rows, dem.H_TOUCH] > 0.5]
+        ci, cj, rows = self._island_system(mem, [(int(a), int(c)) for a, c in kij.tolist()])
+        ci, cj, rows = self._island_near(mem, ci, cj, rows)
+        x = np.ascontiguousarray(self.x[mem])
+        prm = np.ascontiguousarray(self._prm[rows])
+        hist = np.ascontiguousarray(self._hist[rows])
+        prm_el = statics.lift_caps(prm)
+        K, J = statics.jacobians(x, self.rad[mem], ci, cj, prm_el, hist, self.L)
+        lu = splu(K)
+        lam, Fnet, out = statics.state(x, ci, cj, prm_el, hist, self.L)
+        isl.update(ci=ci, cj=cj, rows=rows, prm=prm, prm_el=prm_el, K=K, J=J, lu=lu, rn=self._island_row_norms(lu, J),
+                   lam=lam, out=out, kc=statics.kcomp(prm, hist), capv=statics.caps(lam, prm, out),
+                   r_ref=isl["F_ref"] + Fnet)
+
+    def _island_commit(self, iid, new):
+        """Make a pending island state (_island_advance) the committed one: positions and histories written to
+        self.x / self._hist, the dict replaced (never mutated: a redo's snapshot shares the old one); when the advance
+        flagged a refresh (1000 steps, 1e-11 m of drift or more than 3 Newton iterations since the last), the lifted
+        tangents, factor, row norms and the contact system's near pairs are recomputed at the committed state
+        (_island_refresh, counted island_refactor)."""
+        mem, rows = new["members"], new["rows"]
+        self.x[mem] = new.pop("x")
+        self._hist[rows] = new.pop("hist")
+        if new.pop("refresh", False):
+            self._island_refresh(new)
+            self._count("island_refactor")
+            new["n_since_refresh"], new["du_since_refresh"] = 0, 0.0
+        else:
+            new["n_since_refresh"] += 1
+            new["du_since_refresh"] += new["du_max"]
+        new["n_steps"] += 1
+        self._islands[iid] = new
+
+    def _island_upgrade(self, isl):
+        """An island dict of the previous code version (no tier: the linear certificate at the state one linear
+        placement left it in) in this version's format: the inactive near pairs added to its system, the lifted
+        tangents, row norms, spring constants and caps at its committed state (_island_refresh), tier 1, bounds zero
+        but for the ratchet bound, which is recomputed from that state's residual against its reference load (the
+        first Newton step's displacement du, at rest: E_res = du^T K du / 2, its slip bound in the released system as
+        at entry; infinite, so that the budget wakes the island, if that system is a mechanism). The first
+        _island_advance absorbs the residual itself."""
+        new = dict(isl)
+        new.update(tier=1, n_steps=0, n_since_refresh=0, du_since_refresh=0.0, du_max=0.0, s_isl=1e-12,
+                   F_lr_ref=self._F_lr[isl["members"]].copy(), bnd=self._island_bnd0())
+        self._island_refresh(new)
+        hist = self._hist[new["rows"]]
+        du = new["lu"].solve(new["r_ref"])
+        rb = self._island_ratchet(new["K"], new["J"], new["prm"], hist, new["lam"], new["out"], new["kc"],
+                                  new["capv"], max(0.5 * float(du @ (new["K"] @ du)), 0.0), new["members"])
+        new["bnd"]["ratchet_m"] = np.full(3, np.inf) if rb is None else rb[1].max(0)
+        return new
+
+    def _island_report(self):
+        """The sleeping clusters' bounds into n_events (running maxima): island_bound_xi, the largest cumulative bound
+        relative to the deflection at the cap (what the budget limits), island_flow_m (the plastic increments of
+        the creep steps, metres), island_snap_rel."""
+        ev = self.n_events
+        for isl in self._islands.values():
+            b = isl.get("bnd")
+            if b is None:
+                continue
+            ev["island_bound_xi"] = max(ev.get("island_bound_xi", 0.0), float(b["total_rel"]))
+            ev["island_flow_m"] = max(ev.get("island_flow_m", 0.0), float(b["flow_m"][:2].max()))
+            ev["island_snap_rel"] = max(ev.get("island_snap_rel", 0.0), float(b["snap_rel"]))
 
     def _linres(self, mem, x, ci, cj, prm, hist, K, J, du, lam_eq, lam_end, out, T):
         """The residual motion of a resting cluster about its equilibrium, as exact linear response (statics.
@@ -1795,13 +2466,15 @@ class FullContactSim:
         self.regime[c["members"]] = ACTIVE
 
     def _slv_obstacles(self, mem, reach):
-        """Static grains (asleep) near the cluster: centres and radii, for the pre-run's approach checks."""
+        """Static grains (asleep) near the cluster: centres and radii, for the pre-run's approach checks; a sleeping
+        cluster may drift by up to s_isl inside the step (_step_once), so the radii carry the largest allowance."""
         sl = np.flatnonzero(self.regime == ASLEEP)
         if not len(sl):
             return np.zeros((0, 3)), np.zeros(0)
+        s_max = self._drift()[1]
         d = np.linalg.norm(self.x[sl][:, None, :] - self.x[mem][None, :, :], axis=2).min(1)
-        near = sl[d <= 2 * float(self.rad.max()) + self.d_cap + reach]
-        return np.ascontiguousarray(self.x[near]), np.ascontiguousarray(self.rad[near])
+        near = sl[d <= 2 * float(self.rad.max()) + self.d_cap + reach + s_max]
+        return np.ascontiguousarray(self.x[near]), np.ascontiguousarray(self.rad[near] + s_max)
 
     def _slv_prerun(self, cid, t, H, T):
         """Run a slaved cluster over [t, t + H] (or until it must stop) and return its envelope: each member's
@@ -1903,12 +2576,158 @@ class FullContactSim:
             self.n_events[stop] = self.n_events.get(stop, 0) + 1
 
     def _try_sleep_island(self, mem, touch, T, H):
-        """Sleep an anchored cluster if (i) no fast load or breakpoint is in the next step, (ii) at its exact static
-        equilibrium every contact keeps 5x the sleep margin to its limits for the loads over the next step, and
-        (iii) its residual motion (kinetic energy + elastic energy of its deviation from equilibrium) could add at
-        most 1% of the smallest margin to any contact force."""
+        """Sleep an anchored cluster, at its sliding, rolling and twisting caps as well, on candidate arrays (self.x,
+        self._hist, self.v, self.w are written only on acceptance). (E0) No fast load or breakpoint in the next step;
+        the island system = the touching contacts plus the near pairs (_island_near); the lifted stiffness factorises.
+        (E1) The exact equilibrium of F(T) from the DEM state by the lifted-cap Newton solve (per-DOF tolerances,
+        _island_tols): if every sliding, rolling and twisting ratio there is <= 1 + island_tol_rel it is the placed
+        state (tier 1); else, with creep_islands, the real kernel's return map with the consistent tangent places it
+        (tier 2; the DEM state was flowing); a mechanism or no convergence refuses. (E2) Pull-off <= 1 - margin now
+        and at T + H (limit from the left, linear response) with the residual's released ellipsoid dl_rel included;
+        the solve broke, formed and yielded nothing. (E3) The residual E_res = E_kin + du^T K du / 2 + |dF_step| .
+        |K^-1 dF_step| x 4/(omega_min H)^2 (the lifted K over-estimates the stored energy: an upper bound; the last
+        term is the elastic work of the step's load change times the fraction of it a quasi-static ramp can leave
+        as an oscillation of the island's slowest mode, _island_adiabatic: without that factor the work done against
+        the stiff sliding springs would be charged to the soft rolling mode of a two-contact grain, refusing every
+        cluster under a changing load) may slip no component near its cap by more than island_ratchet_rel of its
+        deflection at the cap (_island_ratchet, the released system; a mechanism there refuses); and, as before, it
+        may perturb no contact's load by more than 1% of its remaining
+        margin, failing which the cluster sleeps with the residual tracked as exact linear response (_linres, tier 0)
+        when no component is near a cap, and with it dropped when one is (its slip is bounded). (E4) The first
+        certificate, _island_advance on the candidate over the next step, must pass (counted, not placed, otherwise);
+        and a tier-1 candidate must keep every sds ratio <= 1 + island_tol_rel and the pull-off ratio <= 1 - margin
+        on the linear extrapolation over island_hyst_steps steps (to the next breakpoint at most), else it is a tier-2
+        candidate (refused with creep_islands off: a sleep that would not hold is not worth the placement). Then
+        placed: snapped to (1 - 2^-40) of the caps, at rest, bounds zero but for the ratchet bound. Counters:
+        cluster_sleep, cluster_sleep_cap (a component at or within the margin of its cap), cluster_sleep_creep,
+        cluster_awake_{mechanism, newton, over_limit, ratchet, certificate, drift, transition} and _linres's. With
+        cfg contact.cap_sleep off the previous entry test runs unchanged (_try_sleep_island_linear)."""
         if H <= 0 or self.loads.fast_window(T, T + H) or self.loads.breakpoint_in(T - 1e-9, T + H):
             return False
+        if not self.cap_sleep:
+            return self._try_sleep_island_linear(mem, touch, T, H)
+        from scipy.sparse.linalg import splu
+        L = self.L
+        ci, cj, rows = self._island_system(mem, touch)
+        if not len(rows):
+            return False
+        ci, cj, rows = self._island_near(mem, ci, cj, rows)
+        x = np.ascontiguousarray(self.x[mem])
+        prm = np.ascontiguousarray(self._prm[rows])
+        hist = np.ascontiguousarray(self._hist[rows])
+        prm_el = statics.lift_caps(prm)
+        tm = hist[:, dem.H_TOUCH] > 0.5
+        K, J = statics.jacobians(x, self.rad[mem], ci, cj, prm_el, hist, L)
+        try:
+            lu = splu(K)
+        except RuntimeError:
+            return self._awake("mechanism")
+        lam0, Fnet0, out0 = statics.state(x, ci, cj, prm_el, hist, L)
+        tt, tr = self._island_tols(statics.caps(lam0, prm, out0), prm, tm)
+        Fext = self._island_load(mem, T)
+        C = statics.solve_equilibrium(x, ci, cj, prm_el, prm_el, hist, L, lu, Fext, lu.solve(Fext + Fnet0), tt, tr, 6)
+        why = self._island_flags(C)
+        if why:
+            return self._awake(why if why in ("mechanism", "newton") else "transition")
+        tier = 1
+        if (self._ratios(C["lam"], None, prm, C["out"], tm)[1] > 1 + self.island_tol_rel).any():
+            if not self.creep_islands:
+                return self._awake("over_limit")
+            tier = 2
+            C = statics.solve_equilibrium(x, ci, cj, prm, prm_el, hist, L, lu, Fext, C["du"], tt, tr,
+                                          self.island_newton_max,
+                                          tangent=self._island_tangent(dict(K=K, J=J, prm=prm, lu=lu), False))
+            why = self._island_flags(C)
+            if why:
+                return self._awake(why if why in ("mechanism", "newton") else "transition")
+        du, xc, hc, lam_c, out_c = C["du"], C["xn"], C["hn"], C["lam"], C["out"]
+        capv, kc = statics.caps(lam_c, prm, out_c), statics.kcomp(prm, hc)
+        xi_cap = capv / np.maximum(kc, 1e-300)
+        # (E3) the residual's energy and its released-system slip bound; (E2) pull-off with it, now and at the end
+        Ek = 0.5 * float((self.m[mem] * (self.v[mem] ** 2).sum(1)).sum() + (self.I[mem] * (self.w[mem] ** 2).sum(1)).sum())
+        dF = self._island_load(mem, T + H, "-") - Fext
+        E_pump = float(np.abs(dF) @ np.abs(lu.solve(dF))) * self._island_adiabatic(K, mem, H)
+        E_res = max(Ek + 0.5 * float(du @ (K @ du)) + E_pump, 0.0)
+        rb = self._island_ratchet(K, J, prm, hc, lam_c, out_c, kc, capv, E_res, mem)
+        if rb is None:
+            return self._awake("mechanism")
+        dl_rel, slip, near = rb
+        lam_end = lam_c + J @ lu.solve(dF)
+        if max(float(self._ratios(lam_c, dl_rel, prm, out_c, tm)[0].max()),
+               float(self._ratios(lam_end, dl_rel, prm, out_c, tm)[0].max())) > 1 - self.margin:
+            return self._awake("over_limit")
+        if (slip[near] > self.island_ratchet_rel * xi_cap[near]).any():
+            return self._awake("ratchet")
+        res = None
+        pt, ot = prm[tm], out_c[tm]
+
+        def sub(v):
+            return v.reshape(len(prm), 8)[tm].reshape(-1)
+        rr = np.maximum(statics.margins(sub(lam_c), pt, ot), statics.margins(sub(lam_end), pt, ot))
+        worst = np.maximum(statics.margins_bounded(sub(lam_c), sub(dl_rel), pt, ot),
+                           statics.margins_bounded(sub(lam_end), sub(dl_rel), pt, ot))
+        if not np.isfinite(worst).all() or ((worst - rr) > 0.01 * (1 - rr)).any():
+            if not near.any():
+                with np.errstate(divide="ignore", invalid="ignore"):   # the near pairs' 0/0 pull-off ratios (-> 0)
+                    res = self._linres(mem, x, ci, cj, prm, hist, K, J, du, lam_c, lam_end, out_c, T)
+                if res is None:
+                    return False                  # (_linres counts why)
+        # (E4) the candidate: snapped, its tangents at the placed state, the first certificate, the hysteresis
+        hc, srel = statics.snap_to_caps(hc, lam_c, prm, out_c)
+        r_c = C["r"]
+        if srel > 0.0:
+            lam_c, Fnet_c, out_c = statics.state(xc, ci, cj, prm_el, hc, L)
+            r_c = Fext + Fnet_c
+        K2, J2 = statics.jacobians(xc, self.rad[mem], ci, cj, prm_el, hc, L)
+        try:
+            lu2 = splu(K2)
+        except RuntimeError:
+            return self._awake("mechanism")
+        bnd = self._island_bnd0()
+        bnd["ratchet_m"] = slip.max(0)
+        cand = dict(members=mem, ci=ci, cj=cj, rows=rows, prm=prm, prm_el=prm_el, K=K2, J=J2, lu=lu2, lam=lam_c,
+                    out=out_c, F_ref=Fext, T_ref=T, F_lr_ref=self._F_lr[mem].copy(), r_ref=r_c,
+                    rn=self._island_row_norms(lu2, J2), kc=statics.kcomp(prm, hc), capv=statics.caps(lam_c, prm, out_c),
+                    tier=tier, n_steps=0, n_since_refresh=0, du_since_refresh=0.0, du_max=0.0, s_isl=1e-12, bnd=bnd,
+                    x=xc, hist=hc)
+        if res is not None:
+            cand.update(res=res, dl=res["dl"], tier=0)
+        else:
+            ok, _, why = self._island_advance(cand, T, T + H, count=False)
+            if not ok:
+                return self._awake("certificate")
+            if tier == 1:
+                Tx = min(T + self.island_hyst_steps * H, self.loads.next_breakpoint(T))
+                lam_x = lam_c + J2 @ lu2.solve(self._island_load(mem, Tx, "-") - Fext)
+                px, sx = self._ratios(lam_x, None, prm, out_c, tm)
+                if (sx > 1 + self.island_tol_rel).any() or float(px.max()) > 1 - self.margin:
+                    if not self.creep_islands:
+                        return self._awake("drift")
+                    tier = cand["tier"] = 2
+        self.x[mem] = cand.pop("x")
+        self._hist[rows] = cand.pop("hist")
+        self.v[mem] = 0.0
+        self.w[mem] = 0.0
+        iid = self._next_island
+        self._next_island += 1
+        self._islands[iid] = cand
+        for k in mem:
+            self._island_of[int(k)] = iid
+        self.regime[mem] = ASLEEP
+        self.n_events["sleep"] += len(mem)
+        self._count("cluster_sleep")
+        if (self._ratios(lam_c, None, prm, out_c, tm)[1] >= 1 - self.margin).any():
+            self._count("cluster_sleep_cap")
+        if tier == 2:
+            self._count("cluster_sleep_creep")
+        return True
+
+    def _try_sleep_island_linear(self, mem, touch, T, H):
+        """The entry test of v0.6 (cfg contact.cap_sleep off): sleep an anchored cluster if at its exact static
+        equilibrium every contact keeps 5x the sleep margin to its limits for the loads over the next step, and its
+        residual motion (kinetic energy + elastic energy of its deviation from equilibrium) could add at most 1% of
+        the smallest margin to any contact force (else tracked exactly, _linres). Islands so made carry tier 0: the
+        linear certificate (_island_ratio) and the linear-response placement at wake."""
         from scipy.sparse.linalg import splu
         res = None
         tag = "cluster_awake_"                    # counts of why clusters stay in the full model (diagnostics)
@@ -1969,7 +2788,7 @@ class FullContactSim:
         iid = self._next_island
         self._next_island += 1
         self._islands[iid] = dict(members=mem, ci=ci, cj=cj, rows=rows, prm=prm, out=out, lam=lam, J=J, K=K,
-                                  lu=splu(K), F_ref=self._island_load(mem, T), T_ref=T)
+                                  lu=splu(K), F_ref=self._island_load(mem, T), T_ref=T, tier=0)
         if res is not None:
             self._islands[iid]["res"] = res
             self._islands[iid]["dl"] = res["dl"]
@@ -1981,28 +2800,68 @@ class FullContactSim:
         return True
 
     def _wake_island(self, iid, T):
-        """Wake a sleeping cluster: move it to the exact static equilibrium of the current load (linear response
-        from the reference state; positions and spring histories), at rest."""
+        """Wake a sleeping cluster into the DEM at rest, at the exact static equilibrium of the load at T. A tier-0
+        island (the linear certificate: cap_sleep off, a tracked residual motion, or an island of the previous code
+        version): the linear response from its reference state, plus the residual motion evolved exactly since it
+        fell asleep (as before). Otherwise, at the step start (T = T_ref) the committed state itself, which at a load
+        breakpoint is the pre-jump equilibrium (the DEM resolves the jump); mid-step (a DEM grain approaching,
+        _watch) the lifted Newton solve from the committed state to F(T) (tier 2: the return-map solve when a cap is
+        exceeded), accepted only if it converges, breaks, forms and yields nothing and moves no grain by more than
+        s_isl (the allowance every bound used for the island); otherwise the committed state itself is handed over
+        at rest and island_wake_fallback counted: a history in which the kernel recorded a break is never committed
+        (its time stamp would be wrong; the DEM resolves the break itself). island_wake_transient_m, the DEM's own
+        measure of the woken members' motion over the rest of the step, is recorded by step()."""
         isl = self._islands.pop(iid)
         mem = isl["members"]
-        du = self._island_lu(isl).solve(self._island_load(mem, T) - isl["F_ref"]).reshape(-1, 6)
-        vr = np.zeros((len(mem), 6))
-        if "res" in isl:                      # the residual motion, evolved exactly since the cluster fell asleep
-            r = isl["res"]
-            ur, vrf = statics.residual_state(r["lam"], r["V"], r["c"], T - r["T"])
-            du = du + ur.reshape(-1, 6)
-            vr = vrf.reshape(-1, 6)
-        x = np.ascontiguousarray(self.x[mem])
-        hist = np.ascontiguousarray(self._hist[isl["rows"]])
-        xn, hn = statics.apply_displacement(x, isl["ci"], isl["cj"], isl["prm"], hist, self.L, du)
-        self.x[mem] = xn
-        self._hist[isl["rows"]] = hn
-        self.v[mem] = vr[:, :3]
-        self.w[mem] = vr[:, 3:]
         for k in mem:
             self._island_of.pop(int(k), None)
         self.regime[mem] = ACTIVE
         self.n_events["wake"] += len(mem)
+        if hasattr(self, "_woken_mem"):
+            self._woken_mem.append(np.asarray(mem, np.int64))
+        if isl.get("tier", 0) == 0 or "res" in isl:
+            du = self._island_lu(isl).solve(self._island_load(mem, T) - isl["F_ref"]).reshape(-1, 6)
+            vr = np.zeros((len(mem), 6))
+            if "res" in isl:                      # the residual motion, evolved exactly since the cluster fell asleep
+                r = isl["res"]
+                ur, vrf = statics.residual_state(r["lam"], r["V"], r["c"], T - r["T"])
+                du = du + ur.reshape(-1, 6)
+                vr = vrf.reshape(-1, 6)
+            x = np.ascontiguousarray(self.x[mem])
+            hist = np.ascontiguousarray(self._hist[isl["rows"]])
+            xn, hn = statics.apply_displacement(x, isl["ci"], isl["cj"], isl["prm"], hist, self.L, du)
+            if ((hn[:, dem.H_TOUCH] > 0.5) != (hist[:, dem.H_TOUCH] > 0.5)).any():
+                self._count("island_wake_fallback")   # a break or formation in the placement: the DEM resolves it
+                self.v[mem] = 0.0
+                self.w[mem] = 0.0
+                return
+            self.x[mem] = xn
+            self._hist[isl["rows"]] = hn
+            self.v[mem] = vr[:, :3]
+            self.w[mem] = vr[:, 3:]
+            return
+        self.v[mem] = 0.0
+        self.w[mem] = 0.0
+        if abs(T - isl["T_ref"]) <= 1e-12:
+            return                                # the committed state: snapped, at rest
+        ci, cj, rows, prm, prm_el, L = isl["ci"], isl["cj"], isl["rows"], isl["prm"], isl["prm_el"], self.L
+        x = np.ascontiguousarray(self.x[mem])
+        hist = np.ascontiguousarray(self._hist[rows])
+        tm = hist[:, dem.H_TOUCH] > 0.5
+        lu = self._island_lu(isl)
+        tt, tr = self._island_tols(isl["capv"], prm, tm)
+        F = self._island_load(mem, T)
+        E = statics.solve_equilibrium(x, ci, cj, prm_el, prm_el, hist, L, lu, F, lu.solve(F - isl["F_ref"]), tt, tr, 6)
+        ok = self._island_flags(E) is None
+        if ok and isl["tier"] == 2 and (self._ratios(E["lam"], None, prm, E["out"], tm)[1] > 1 + self.island_tol_rel).any():
+            E = statics.solve_equilibrium(x, ci, cj, prm, prm_el, hist, L, lu, F, E["du"], tt, tr,
+                                          self.island_newton_max, tangent=self._island_tangent(isl, False))
+            ok = self._island_flags(E) is None
+        if ok and float(np.abs(E["xn"] - x).max()) <= isl["s_isl"]:
+            self.x[mem] = E["xn"]
+            self._hist[rows] = statics.snap_to_caps(E["hn"], E["lam"], prm, E["out"])[0]
+        else:
+            self._count("island_wake_fallback")
 
     # ------------------------------------------------------------------ impact and detachment records
     def _log_events(self, t):
