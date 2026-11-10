@@ -9,7 +9,7 @@
     "criterion": "|e - 1| < 1e-3",
     "passed": true,
     "details": "",
-    "seconds": 1.37
+    "seconds": 0.12
    },
    {
     "id": "damping",
@@ -49,7 +49,7 @@
     "criterion": "< 1e-4",
     "passed": true,
     "details": "",
-    "seconds": 0.01
+    "seconds": 0.0
    },
    {
     "id": "threshold",
@@ -69,7 +69,7 @@
     "criterion": "< 10 nm",
     "passed": true,
     "details": "",
-    "seconds": 0.16
+    "seconds": 0.04
    },
    {
     "id": "rotating_frame",
@@ -79,7 +79,7 @@
     "criterion": "< 1 nm; ratio > 3.5",
     "passed": true,
     "details": "",
-    "seconds": 3.82
+    "seconds": 0.91
    },
    {
     "id": "rigid_body",
@@ -89,7 +89,7 @@
     "criterion": "max dE < 1e-3, drift < 1e-5, dL < 1e-10",
     "passed": true,
     "details": "",
-    "seconds": 2.02
+    "seconds": 0.43
    },
    {
     "id": "impulse",
@@ -99,7 +99,7 @@
     "criterion": "< 1e-9",
     "passed": true,
     "details": "",
-    "seconds": 0.03
+    "seconds": 0.01
    },
    {
     "id": "conservation",
@@ -119,7 +119,7 @@
     "criterion": "< 1 nm, no corrections",
     "passed": true,
     "details": "",
-    "seconds": 2.08
+    "seconds": 0.41
    },
    {
     "id": "no_overlap",
@@ -129,7 +129,7 @@
     "criterion": "< 1e-3 R",
     "passed": true,
     "details": "",
-    "seconds": 5.69
+    "seconds": 1.61
    },
    {
     "id": "space_charge",
@@ -139,7 +139,7 @@
     "criterion": "< 6%; image within 10%",
     "passed": true,
     "details": "1 mm: 0.987; 2 mm: 0.994; 3 mm: 1.009; 5 mm: 1.011",
-    "seconds": 0.19
+    "seconds": 0.06
    },
    {
     "id": "charging",
@@ -149,7 +149,7 @@
     "criterion": "within 0.1%",
     "passed": true,
     "details": "",
-    "seconds": 0.02
+    "seconds": 0.0
    },
    {
     "id": "threshold_fit",
@@ -159,7 +159,7 @@
     "criterion": "< 5%; coverage 40-95%",
     "passed": true,
     "details": "",
-    "seconds": 8.5
+    "seconds": 2.25
    },
    {
     "id": "spin_rotating_frame",
@@ -169,7 +169,7 @@
     "criterion": "< 1e-9",
     "passed": true,
     "details": "",
-    "seconds": 9.24
+    "seconds": 2.45
    },
    {
     "id": "fragmentation_energy",
@@ -179,7 +179,7 @@
     "criterion": "<= 1e-9, none, >= 20 fragmentations",
     "passed": true,
     "details": "",
-    "seconds": 4.62
+    "seconds": 1.39
    },
    {
     "id": "friction_energy",
@@ -189,7 +189,7 @@
     "criterion": "<= 0",
     "passed": true,
     "details": "",
-    "seconds": 0.35
+    "seconds": 0.09
    },
    {
     "id": "drag_limits",
@@ -219,7 +219,7 @@
     "criterion": "within 5%",
     "passed": true,
     "details": "",
-    "seconds": 0.87
+    "seconds": 0.27
    },
    {
     "id": "flight_frame",
@@ -229,7 +229,7 @@
     "criterion": "< 0.2%; ratio > 3.5; < 1e-8",
     "passed": true,
     "details": "",
-    "seconds": 35.13
+    "seconds": 10.58
    },
    {
     "id": "detachment",
@@ -239,7 +239,7 @@
     "criterion": "exact; < 1e-9 m/s",
     "passed": true,
     "details": "",
-    "seconds": 1.62
+    "seconds": 0.46
    },
    {
     "id": "settling",
@@ -249,7 +249,7 @@
     "criterion": "> 95%, > 90% aft, none outside",
     "passed": true,
     "details": "",
-    "seconds": 8.27
+    "seconds": 2.32
    },
    {
     "id": "reentry",
@@ -259,7 +259,7 @@
     "criterion": "< 1e-5; < 5 m; < 1e-5",
     "passed": true,
     "details": "",
-    "seconds": 3.55
+    "seconds": 1.03
    }
   ],
   "part2": [
@@ -272,7 +272,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 24.2
+    "seconds": 6.5
    },
    {
     "id": "dem_conservation",
@@ -294,7 +294,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 0.5
+    "seconds": 0.2
    },
    {
     "id": "cluster_statics",
@@ -305,7 +305,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 0.1
+    "seconds": 0.0
    },
    {
     "id": "random_vibration",
@@ -316,7 +316,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 10.0
+    "seconds": 2.4
    },
    {
     "id": "time_step",
@@ -327,7 +327,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 0.5
+    "seconds": 0.1
    },
    {
     "id": "roll1_vs_full",
@@ -338,7 +338,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 1.1
+    "seconds": 0.3
    },
    {
     "id": "sleep_exact",
@@ -349,7 +349,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 6.2
+    "seconds": 1.6
    },
    {
     "id": "engine_handoff",
@@ -360,7 +360,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 7.3
+    "seconds": 1.9
    },
    {
     "id": "engine_regimes",
@@ -371,18 +371,18 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 8.7
+    "seconds": 2.4
    },
    {
     "id": "linres",
     "name": "Sleeping with the residual motion (linear response)",
     "what": "Two touching 50 um silica grains on a glass floor under 1 g, the second nudged sideways at 0.2 mm/s, integrated 4 ms in the full model (still rocking and twisting). From that state: (a) 2 ms more of the full model; (b) the engine puts the pair to sleep with its residual motion as exact linear response (stiffness and dashpots from the kernel's tangent) and wakes it 2 ms later. (b) must match (a) to 5% of the residual itself (what dropping the residual would miss).",
-    "value": "engine vs full model: position 0.07 pm, spin 3.83e-05 rad/s; with the residual dropped: 936.61 pm, 1.89e-01 rad/s",
+    "value": "engine vs full model: position 0.07 pm, spin 3.84e-05 rad/s; with the residual dropped: 936.61 pm, 1.89e-01 rad/s",
     "criterion": "<= 5% of the dropped-residual error",
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 2.3
+    "seconds": 0.6
    },
    {
     "id": "slaved_vs_full",
@@ -393,7 +393,7 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 7.9
+    "seconds": 2.2
    },
    {
     "id": "engine_slaved",
@@ -404,7 +404,73 @@
     "passed": true,
     "details": "",
     "suite": "full-contact engine (desktop, numba)",
-    "seconds": 15.3
+    "seconds": 4.8
+   },
+   {
+    "id": "cap_sleep_vs_dem",
+    "name": "Clusters asleep at their rolling limits vs all-DEM",
+    "what": "A 50 um silica grain in the edge of a glass floor and wall and a 3-grain cluster in the same edge, under 2 g pressing and 8 g along the floor into the wall; every floor rolling spring set to (1 - 2^-40) of its limit and settled in the full model (smallest floor rolling ratio at the start 0.999586). Then 30 ms by the engine (the islands asleep at their limits: tier 1 static or tier 2 creep) and in the full model throughout at 50 and 100 steps per contact period, under (a) constant loads, (b) the pressing load falling linearly to 0.2 g (the rolling limits shrink: creep), (c) the sideways load turning by 30 degrees in the floor plane at constant size. The islands must be asleep >= 90% of the island-steps (the first step is in the full model before they are classified), the same contacts must touch at the end, and the positions and the sliding, rolling and twisting springs of every contact must match the full model within 3x its own step error (50 vs 100) plus the bound the engine reports for the island (flow tolerance + entry ratchet + path + load curvature + snap, summed over every sleep of it); in (a) every state the engine commits (histories and positions) at a load bit-identical to the one it was placed at must be bit-identical to the placed state (this found the kernel's round-off at zero displacement, now skipped in statics.solve_equilibrium); the long-range forces on the grains (1e-18 N), frozen while steps are skipped, are recomputed after a skip at the positions the placement moved by 4e-14 m, a load change the engine follows exactly, so those commits are counted apart and their change reported. Runtime 61 s.",
+    "value": "constant: asleep 97% of island-steps (static 58, creep 0, sleeps 2, wakes 0); same contacts True; engine vs full model: x 4.2e-15 (step error 4.3e-15, bound 3.0e-12); xt 3.1e-18 (step error 7.6e-18, bound 0.0e+00); xr 4.1e-15 (step error 3.8e-15, bound 3.0e-12); xtw 7.6e-11 (step error 7.4e-11, bound 0.0e+00); of 56 commits at a load bit-identical to the placement's, 0 not bit-identical to the placed state (histories and positions); 2 after the long-range forces were recomputed (change 5.9e-29 N, positions moved 0.0e+00 m); pressing 2 -> 0.2 g: asleep 97% of island-steps (static 19, creep 39, sleeps 2, wakes 0); same contacts True; engine vs full model: x 1.7e-14 (step error 1.3e-14, bound 3.0e-12); xt 5.0e-16 (step error 5.4e-15, bound 1.2e-20); xr 1.7e-14 (step error 6.8e-14, bound 3.0e-12); xtw 1.9e-10 (step error 1.2e-10, bound 4.4e-13); turning 30 deg: asleep 95% of island-steps (static 0, creep 57, sleeps 3, wakes 1); same contacts True; engine vs full model: x 7.9e-12 (step error 2.2e-14, bound 1.7e-10); xt 2.9e-15 (step error 1.6e-16, bound 6.2e-15); xr 2.1e-11 (step error 1.0e-14, bound 1.7e-10); xtw 1.6e-07 (step error 2.1e-10, bound 4.3e-07)",
+    "criterion": "start ratio >= 0.999; asleep >= 90%; same contacts; each <= 3x step error + reported bound; (a) bit-identical",
+    "passed": true,
+    "details": "",
+    "suite": "full-contact engine (desktop, numba)",
+    "seconds": 61.1
+   },
+   {
+    "id": "cap_twist_microgravity",
+    "name": "Locked-in twist in microgravity (sleeping)",
+    "what": "A 50 um silica grain pressed into the edge of a glass floor and wall (2 g and 8 g, 8 ms in the full model: the contact forces are locked in by the sliding springs, pull-off ratio 0.375, sliding 0.597), both twisting springs then set to an equal torque of 0.96 of the smaller twisting limit (the edge's statics needs them equal) and placed at the exact equilibrium (twisting ratios 0.9599, 0.9599), under 1e-4 g turning at the payload's residual spin of 1/60 Hz. 0.5 s by the engine (asleep, every step skipped while the certificate holds) and in the full model throughout at 50 and 100 steps per contact period. The grain must sleep at the first classification and stay asleep, steps must be skipped, each twisting spring must change by <= 1e-6 of its limit angle and keep >= 90% of its twist in both models (the kernel resets an over-limit twist at zero twist rate: it must not be lost), and the position must match the full model within 3x its step error + 1e-12 m. Runtime 108 s.",
+    "value": "asleep from the first classification: True (499 of 500 steps), skipped 0.499 s; twist change / limit angle: engine 1.5e-08, full model 1.4e-08; twist kept: engine 1.000000, full model 1.000000; position engine vs full model 1.2e-14 m (step error 0.0e+00 m)",
+    "criterion": "first classification; skipped > 0; <= 1e-6; >= 0.9; <= 3x step error + 1e-12 m",
+    "passed": true,
+    "details": "",
+    "suite": "full-contact engine (desktop, numba)",
+    "seconds": 107.6
+   },
+   {
+    "id": "creep_island_vs_dem",
+    "name": "Creeping clusters at their rolling limits vs all-DEM",
+    "what": "A 2-grain stack against a glass wall (one grain in the edge of floor and wall, one on top of it against the wall) and a 5-grain pile in a corner (four on the floor, one on top), 50 um silica, every floor rolling spring set to (1 - 2^-40) of its limit and settled in the full model, then set back to the limit at the exact equilibrium. Loads: the burn's (25 g pressing; sideways 3.8 g growing at the rate of the design's verification list, 3.8 -> 8 g over 0.2 s, ASSUMED burn-like; run for its first 30 ms for runtime, directed 30 degrees off the -x wall's normal towards -y so that it loads the springs along the wall: a sideways load straight into a wall is carried by its normal forces, and with it no step of the stack or pile crept in a first version of this check) and the coast's (8 g into the wall; pressing 2 -> 0.2 g over 30 ms). The engine (islands creeping: tier 2) vs the full model at 50 and 100 steps per contact period. Required: creep steps >= 90% of the sleeping island-steps and the islands asleep >= 90% of the steps; island_newton_iters / island_creep_steps <= 10 (every solve of every sleeping step counted: the two lifted solves and the three return-map solves of a creep step, and the static steps' solves too); the sliding, rolling and twisting springs within 3x the full model's step error + the reported path_m + curv_m; positions within 3x the step error + 1e-3 of the smallest deflection at the limit; the same contacts; island_bound_xi <= 1e-2. And a true mechanism (two grains stacked on the floor away from the walls, both rolling springs at the limit along the burn's sideways load): an entry attempt on it at rest must be refused as a mechanism (cluster_awake_mechanism), and the engine must never put it to sleep while the full model shows it rolling (> 0.1 um in 10 ms). Runtime 96 s.",
+    "value": "burn: start ratio 1.000000000; creep 58 of 58 sleeping island-steps (100.0%) of 60; Newton iterations per creep step 9.2 (island_newton_iters 533; return-map solves 180, mean 1.8, max 2 iterations); wakes {}; same contacts True; springs vs full model: xt 3.5e-15 (step error 1.1e-14, bound 9.7e-17); xr 5.9e-14 (step error 1.3e-13, bound 7.8e-14); xtw 3.4e-10 (step error 6.8e-10, bound 2.0e-10); positions 2.3e-14 m (step error 4.0e-14, 1e-3 xi_cap 1.0e-11); island_bound_xi 1.2e-04, flow 7.3e-11 m; coast: start ratio 1.000000000; creep 58 of 58 sleeping island-steps (100.0%) of 60; Newton iterations per creep step 8.9 (island_newton_iters 515; return-map solves 180, mean 1.7, max 2 iterations); wakes {}; same contacts True; springs vs full model: xt 6.0e-15 (step error 4.4e-15, bound 1.5e-22); xr 6.8e-14 (step error 9.5e-14, bound 9.0e-18); xtw 1.3e-10 (step error 2.2e-10, bound 7.6e-19); positions 2.3e-14 m (step error 1.9e-14, 1e-3 xi_cap 1.0e-11); island_bound_xi 2.1e-06, flow 1.8e-11 m; mechanism: 2 contacts, rolling ratios 1.000000, 1.000000; entry attempt at rest: slept False, refused as {'mechanism': 1}; engine run: cluster sleeps 0, island-steps asleep 0, refused or woken as a mechanism 0 times; the full model rolls it 449.47 um in 10 ms",
+    "criterion": "start ratio >= 0.999; creep >= 90%; asleep >= 90%; Newton iterations per creep step <= 10; springs <= 3x step error + path + curv; positions <= 3x step error + 1e-3 xi_cap; same contacts; bound <= 1e-2; mechanism refused as such, never asleep, rolling in the full model",
+    "passed": true,
+    "details": "",
+    "suite": "full-contact engine (desktop, numba)",
+    "seconds": 96.2
+   },
+   {
+    "id": "between_sample_bound",
+    "name": "The certificate's worst case between steps (flight loads)",
+    "what": "A resting row of three 50 um silica grains on a glass wall or in an edge, 5 cm off the spin axis, under the nominal flight profile (flight.py), put to sleep by the engine and advanced step by step by its certificate (_island_advance: the exact equilibria at the step's end and middle, the bound D on how far every contact quantity can stray from the secant between them). At 20 points inside every step the exact equilibrium (lifted-cap Newton to 1e-3 of the engine's tolerance) is solved and its pull-off, sliding, rolling and twisting ratios compared with the certificate's bounded worst ratios of that step: the drag decay after burnout (T+29.5 s; drag and 4.8 Hz spin), the splash half-sine (0.5 ms steps so that 100 cover it), the spin-up in the coast between burns (T+15 s), a point of the descent table (a slope jump inside one step) and the de-spin knot (a jump of the Euler load and a kink of the spin, straddled by one step with the knot at mid-step: the engine never certifies across it, but the bound is stated for any interval). Steps are the engine's outer steps (4 ms, 0.66 ms while the payload spins at 4.8 Hz). A violation is a grid point where an exact ratio exceeds the bounded one. Runtime 10 s.",
+    "value": "drag decay after burnout (T+29.500 s, 100 steps): violations 0 of 2000 grid points; worst exact ratio 0.5214; slack 9.8e-10 to 3.4e-07; splash (T+881.995 s, 110 steps): violations 0 of 2200 grid points; worst exact ratio 0.2874; slack 8.2e-11 to 8.0e-04; spin-up (coast between burns) (T+15.000 s, 100 steps): violations 0 of 2000 grid points; worst exact ratio 0.5218; slack 7.2e-10 to 1.5e-07; descent-table knot (T+399.881 s, 100 steps, one straddling the knot): violations 0 of 2000 grid points; worst exact ratio 0.2860; slack 2.9e-10 to 2.1e-07; de-spin knot (T+53.940 s, 180 steps, one straddling the knot): violations 0 of 3600 grid points; worst exact ratio 0.5219; slack 4.6e-10 to 9.2e-04; total violations 0 of 11800 grid points, smallest slack 8.2e-11",
+    "criterion": "0 violations; >= 100 steps each; the knots straddled",
+    "passed": true,
+    "details": "",
+    "suite": "full-contact engine (desktop, numba)",
+    "seconds": 9.8
+   },
+   {
+    "id": "ratchet_released_bound",
+    "name": "Left-over motion at a limit: the released-system slip bound",
+    "what": "A 50 um silica grain in the edge of a glass floor and wall (8 g into the wall, 2 g pressing), its floor rolling spring set to (1 - 2^-40) of its limit along the floor, settled 19 ms in the full model, set back to the limit and placed at the exact equilibrium (rolling ratio 0.999999999999; deflection at the limit 1.27e-08 m). (1) Left-over motion of prescribed energy E (1e-25 to 1e-18 J) given as a velocity along the mode of the released system (the capped spring removed, statics.released_stiffness) that moves the capped component most per unit energy, both signs, 5 ms in the full model: the permanent change of that spring against a run without it must stay within the engine's entry bound (_island_ratchet: the residual's displacement amplitude in the released system plus the dashpot shift) in every case, and must exceed the superseded bound E / limit in at least one (it treated the slip as the energy over the limit force; at a limit the load does the plastic work). (2) The same grain at rest at its limit under load ramps (H = 1 ms, the engine's step): (a) 4 g more into the wall and 1 g less pressing over one step, then held; (b) a fifth of that per step, continued; 5 ms in the full model each. The capped spring beyond the quasi-static answer (the kernel's return map solved to equilibrium at the final load) is the ramp's left-over slip; it is compared with the slip bounds (_island_ratchet) of the energy of the step's load change dF as charged by the implementer's former entry test, |dF| |K^-1 dF| min(1, 4 / (omega_min H)^2) with omega_min from the elastic and from the released stiffness (reported: whether the factor holds and whether the released omega_min is needed), by the modal sum 2 du^T M du / H^2 (du the shift of the equilibrium in the elastic or released system, the larger: the energy an undamped linear system keeps from the two kinks of a ramp over one step, derived here) and by the engine's present entry test (_island_drift: the kinetic energy relative to the drift of the equilibrium, du^T M du / (2 H^2) from rest, the larger of the elastic and released systems; a kink later in a sleep is the certificate's, through Loads.chord_dev). Required: (a) within the modal bound, (b) within the engine's bound. Runtime 6 s.",
+    "value": "(1) E 1e-25 J: slip 2.54e-14 m, released bound 2.21e-13 m, E/cap 9.27e-18 m; E 1e-23 J: slip 2.54e-13 m, released bound 2.21e-12 m, E/cap 9.27e-16 m; E 1e-21 J: slip 2.54e-12 m, released bound 2.21e-11 m, E/cap 9.27e-14 m; E 1e-19 J: slip 2.54e-11 m, released bound 2.21e-10 m, E/cap 9.27e-12 m; E 1e-18 J: slip 8.02e-11 m, released bound 6.98e-10 m, E/cap 9.27e-11 m; (2) (a) over one step, held: slip beyond quasi-static 6.22e-15 m, bounds factor, elastic omega_min 1.04e-11 m, factor, released omega_min 1.04e-11 m, modal 2 du^T M du / H^2 1.13e-13 m, engine (_island_drift) 5.67e-14 m; (b) a fifth per step, continued: slip beyond quasi-static 1.65e-15 m, bounds factor, elastic omega_min 2.07e-12 m, factor, released omega_min 2.07e-12 m, modal 2 du^T M du / H^2 2.27e-14 m, engine (_island_drift) 1.13e-14 m; factor elastic 1.69e-03, released 1.69e-03",
+    "criterion": "start ratio >= 0.999; (1) slip <= released bound in every case, > E/cap in at least one; (2a) slip <= the modal bound; (2b) slip <= the engine's bound",
+    "passed": true,
+    "details": "",
+    "suite": "full-contact engine (desktop, numba)",
+    "seconds": 6.1
+   },
+   {
+    "id": "island_across_breakpoint",
+    "name": "A cluster at its limits across a load jump (de-spin)",
+    "what": "Three 50 um silica grains in the edge of a glass wall and face, 5 cm off the spin axis under the nominal flight profile, pressed into the +x wall by the 4.8 Hz spin (4.6 g) and into the +z face by the coast's drag, every rolling spring on the wall set to (1 - 2^-40) of its limit (along the drag) and settled 10 ms in the full model, then set back to the limit at the exact equilibrium at rest (_cap_at_limit: the settling leaves a slowly decaying twisting oscillation of the pair contacts, 9e-8 rad at the knot, which the engine would refuse at entry (_try_sleep_island, E3, cluster_awake_ratchet: the code review's own run of this state without the reset) and which would otherwise dominate the comparison; smallest ratio 1.000000000), from T+53.99 s across the de-spin knot at T+54.0 s, where the load on the grains jumps by 0.17 g (the Euler load of the de-spin, flight.py). (a) The engine (asleep up to the knot, woken at it, the full model resolving the jump): the state committed by the step ending at the knot must be the equilibrium of the load just before it (a Newton solve from it moves nothing beyond 1e-15 m) and not of the load just after it (> 100x more); (b) the engine vs the full model across the knot at 50 and 100 steps per contact period: positions and sliding, rolling and twisting springs within 3x the full model's step error (the engine's reported bounds are listed, not added), the same contacts; (c) the jump's own transient: from that committed state, at rest, the loads held at their post-jump values for 5 ms in the full model; its permanent slip at the capped springs (against the kernel's return map solved to equilibrium at the post-jump load) must be within the released-system bound (_island_ratchet) of the jump's energy in the released system, dF^T K_rel^-1 dF / 2 (the critique's dF^2 / (2 k_rel)). Runtime 16 s.",
+    "value": "asleep island-steps 5, woken at the knot 1; (a) committed at the knot: Newton displacement to the pre-jump load 1.8e-16 m, to the post-jump load 6.2e-10 m; (b) x 1.7e-15 (step error 1.4e-15, bound 2.8e-14); xt 4.0e-17 (step error 7.6e-17, bound 0.0e+00); xr 7.4e-15 (step error 1.0e-14, bound 2.8e-14); xtw 3.4e-11 (step error 2.8e-11, bound 0.0e+00); same contacts True; (c) jump energy 5.4e-19 J, permanent slip 2.56e-11 m vs bound 6.38e-10 m (2.1e-03 of the deflection at the limit)",
+    "criterion": "(a) <= 1e-15 m and > 100x that; (b) each <= 3x step error, same contacts; (c) slip <= bound",
+    "passed": true,
+    "details": "",
+    "suite": "full-contact engine (desktop, numba)",
+    "seconds": 15.7
    }
   ]
  },
@@ -531,13 +597,13 @@
   ]
  },
  "unit_tests": {
-  "tests": 98,
+  "tests": 149,
   "failures": 0,
   "errors": 0,
   "skipped": 0
  },
  "summary": {
-  "passed": 58,
-  "total": 58
+  "passed": 64,
+  "total": 64
  }
 }

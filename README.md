@@ -164,7 +164,7 @@ python -m dolle_sim mission configs/mission_quarter_deck.json --jobs 4       # w
 python -m dolle_sim sizes --d10 80e-6 --d50 95e-6 --d90 114e-6 --weighting volume   # supplier percentiles -> number distribution
 python -m dolle_sim sizes --image micrograph.png --um-per-px 1.25                 # measure grain sizes from a photo
 python -m dolle_sim materials                                           # material database
-python -m dolle_sim verify                                              # 39 checks: 26 model + 13 full-contact engine
+python -m dolle_sim verify                                              # 45 checks: 26 model + 19 full-contact engine
 python -m dolle_sim sources                                             # where every component comes from
 python -m pytest -q                                                     # all tests (includes both verification suites)
 python tools/lammps_contact_check.py                                     # 3-D contact law vs LAMMPS, 7 set-ups (pip install lammps)
@@ -524,7 +524,7 @@ cannot drift from the runs:
 | group | how to run | what it covers |
 |---|---|---|
 | Part 1: 26 model checks | `python -m dolle_sim verify` (also in the browser) | analytic solutions, conservation laws, limits and published data for every model component (table below) |
-| Part 2: 13 full-contact engine checks | `python -m dolle_sim verify` | the 3-D contact dynamics against the 1-D model; momentum, angular momentum and energy; rolling on a wall against the rigid-plastic solution; cluster statics; the vibration synthesis against its spectrum; time-step convergence; slaved rolling (with spin) and slaved clusters (a stuck pair, a grain on another, a single grain) against the full model; sleeping grains against the full model; free-flight hand-off; sleeping with the residual motion against the full model; **the whole regime machinery, and slaved clusters among other moving grains, against runs with every grain in the full model** |
+| Part 2: 19 full-contact engine checks | `python -m dolle_sim verify` | the 3-D contact dynamics against the 1-D model; momentum, angular momentum and energy; rolling on a wall against the rigid-plastic solution; cluster statics; the vibration synthesis against its spectrum; time-step convergence; slaved rolling (with spin) and slaved clusters (a stuck pair, a grain on another, a single grain) against the full model; sleeping grains against the full model; free-flight hand-off; sleeping with the residual motion against the full model; **the whole regime machinery, and slaved clusters among other moving grains, against runs with every grain in the full model**; clusters asleep at their rolling and twisting limits (constant, shrinking and turning loads, microgravity, creep under the burn and coast loads, a true mechanism, the certificate between steps on the flight loads, the slip of left-over motion at a limit, a load jump), each against the full model (checks 14-19) |
 | LAMMPS, 7 set-ups | `python tools/lammps_contact_check.py` | the same contact law term by term: oblique spinning impacts at 3, 30, 300 mm/s, rolling under a ramp, rocking, twisting, 20 grains dropped on a floor (≤ 1e-5; measured ≤ 2.2e-6) |
 | LAMMPS, 6 comparisons | `python -m dolle_sim lammps-check` | sticking thresholds, restitution, pull-off (table below) |
 | REBOUND, 6 comparisons | `python -m dolle_sim rebound-check ...` | trajectories and collision statistics of a flying cloud (below) |
