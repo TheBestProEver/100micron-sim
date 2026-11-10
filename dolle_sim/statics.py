@@ -501,8 +501,15 @@ def solve_equilibrium(x, ci, cj, prm_apply, prm_el, hist, L, lu, Fext, du0, tol_
     (ok False) when the tangent is singular, its step is not finite, or the scaled residual max(|r_trans| /
     tol_trans, |r_rot| / tol_rot) fails to fall below 0.9 of its previous value on two consecutive iterations (the
     released components leave a motion no stiffness resists). Returns dict(ok, du, xn, hn, lam, out, Fnet, r, n_it,
-    broke, formed, yielded, mechanism) for the last state evaluated (n_it kernel evaluations)."""
+    broke, formed, yielded, mechanism) for the last state evaluated (n_it kernel evaluations). With the lifted
+    parameters (prm_apply is prm_el) an iterate whose du is exactly 0 is the reference state itself, not the kernel
+    applied to it: the kernel at zero displacement is the identity in exact arithmetic, but in floating point its
+    projection of every spring onto the tangent plane is not idempotent, so a cluster asleep under a constant load
+    would have its histories changed by round-off at every step (found by check 14, cap_sleep_vs_dem: 2.7e-15
+    relative per step). The real kernel at zero displacement is still applied: there it clips a spring over its cap,
+    which is not round-off."""
     du = np.array(du0, dtype=float).copy()
+    lifted = prm_apply is prm_el
     touch0 = hist[:, dem.H_TOUCH] > 0.5
     yld0 = hist[:, dem.H_YLD] > 0.5
     dmax0 = np.maximum(prm_apply[:, dem.P_DY], hist[:, dem.H_DMAX]) * (1.0 + 1e-12)
@@ -511,7 +518,10 @@ def solve_equilibrium(x, ci, cj, prm_apply, prm_el, hist, L, lu, Fext, du0, tol_
     stalls = 0
     res = None
     for it in range(n_max):
-        xn, hn, _ = apply_displacement(x, ci, cj, prm_apply, hist, L, du.reshape(-1, 6), with_out=True)
+        if lifted and not du.any():
+            xn, hn = x.copy(), hist.copy()
+        else:
+            xn, hn = apply_displacement(x, ci, cj, prm_apply, hist, L, du.reshape(-1, 6))
         lam, Fnet, out = state(xn, ci, cj, prm_el, hn, L)
         r = Fext + Fnet
         touch1 = hn[:, dem.H_TOUCH] > 0.5
