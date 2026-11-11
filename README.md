@@ -12,6 +12,14 @@ on one deck, from lift-off through both motor burns, spin, de-spin, the
 microgravity window, re-entry and the parachute to splashdown, on one clock (see
 [Mission runs](#mission-runs-the-whole-flight-in-one-sweep)).
 
+**Start here to understand the physics:** [notebooks/](notebooks/README.md) explain every part step by step,
+with the derivations and the reason behind each modelling choice: two grains colliding (why slow ones stick and fast
+ones bounce), momentum conservation, silica vs carbon (which property makes the difference), a grain on a wall, and
+the flight in brief. They run locally in Jupyter or in the browser from GitHub (an "Open in Colab" badge on each).
+They use [dolle_core/](dolle_core/__init__.py), a small readable package (plain numpy) with the same contact physics
+and material values as the full simulator, checked against it by `tests/test_dolle_core.py`; [examples/](examples/)
+has the same calculations as plain Python scripts (`python examples/sticking_threshold.py`).
+
 It was written from scratch for DOLL-E and has two engines:
 
 * **The full-contact engine (v0.6; every mission run).** Every grain is a sphere with six degrees of freedom and

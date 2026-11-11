@@ -21,7 +21,7 @@ test = ["pytest>=7"]
 dolle-sim = "dolle_sim.__main__:main"
 
 [tool.setuptools]
-packages = ["dolle_sim"]
+packages = ["dolle_sim", "dolle_core"]
 
 [tool.setuptools.package-data]
 dolle_sim = ["viewer_template.html"]
