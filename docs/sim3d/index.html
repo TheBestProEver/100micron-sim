@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DOLL-E · 3-D: silica and graphite dust in microgravity</title>
+<meta name="description" content="A 3-D simulation of 100 micron dust grains in two tubules in microgravity: grains that hit slowly stick and form rigid clumps. Recorded replays and a live run in your browser.">
+<link rel="stylesheet" href="style.css">
+<!-- Libraries from a CDN, pinned versions; nothing to install, no build step. -->
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+<script type="module" src="sim3d.js"></script>
+</head>
+<body>
+<header class="top"><div class="in">
+  <a class="brand" href="../">DOLL-E</a>
+  <nav>
+    <a href="../app/">Simulator</a>
+    <a href="../replays/mission.html">Replay</a>
+    <a class="on" href="./">3-D</a>
+    <a href="#about">About this page</a>
+    <a href="https://github.com/TheBestProEver/100micron-sim">Code</a>
+  </nav>
+</div></header>
+
+<main>
+<section class="hero">
+  <h1>Silica or graphite: which dust clumps?</h1>
+  <p class="lead">Two tubules side by side in microgravity, one with silica grains and one with graphite grains,
+    both started from exactly the same grains, positions and speeds. Grains that hit slowly stick and from then on
+    move together as one rigid clump; faster ones bounce. Everything here was computed by the python code in this
+    repository (<code>dolle_core</code>), either earlier (the recorded replays) or right now in your browser (the
+    live run).</p>
+</section>
+
+<!-- ======================================================== the 3-D viewer -->
+<section id="viewer" aria-label="3-D viewer">
+  <div class="srcbar" role="tablist" aria-label="What the viewer shows">
+    <button id="src-replay" class="tab on" role="tab" aria-selected="true">Recorded replay: two tubules, 100 grains each</button>
+    <button id="src-sandbox" class="tab" role="tab" aria-selected="false" disabled>Your live run</button>
+    <span id="src-note" class="muted small"></span>
+  </div>
+
+  <div class="stage" id="stage">
+    <canvas id="c3d" aria-label="3-D view of the two tubules; drag to rotate, scroll or pinch to zoom"></canvas>
+    <div id="labels"></div>
+    <div class="legend small">
+      <span><i class="dot" style="background:#a9cfe8"></i>single silica grain</span>
+      <span><i class="dot" style="background:#9a9a9a"></i>single graphite grain</span>
+      <span><i class="dot multi"></i>clump (one colour per clump)</span>
+      <span><i class="ring" style="border-color:#41d18b"></i>stick</span>
+      <span><i class="ring" style="border-color:#ff8a3d"></i>bounce</span>
+      <span><i class="ring" style="border-color:#ff6b77"></i>break-up</span>
+      <span class="muted">dim: on a wall</span>
+    </div>
+    <div id="loading" class="overlay">Loading the replay...</div>
+  </div>
+
+  <div class="controls">
+    <button id="play" class="btn" aria-label="Play or pause">Play</button>
+    <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Time">
+    <span id="tread" class="mono">t = 0.000 s</span>
+  </div>
+  <div class="controls small">
+    <label>Speed
+      <select id="speed">
+        <option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option><option value="2">2×</option><option value="5">5×</option>
+      </select></label>
+    <label title="The cloud phase (first 0.5 s) is where the grains meet each other"><input id="slowmo" type="checkbox" checked> slow motion ×10 in the first 0.5 s</label>
+    <label>Grains drawn
+      <select id="mag">
+        <option value="1">true size</option><option value="3">3× larger</option>
+        <option value="5" selected>5× larger</option><option value="10">10× larger</option>
+      </select></label>
+    <label><input id="walls" type="checkbox" checked> mark wall impacts</label>
+    <button id="view-all" class="btn ghost">Whole tubules</button>
+    <button id="view-cloud" class="btn ghost">Zoom to the cloud</button>
+  </div>
+  <p class="muted small"><span id="magnote">Grains are about 0.1 mm across in tubules 12.7 mm wide, so they are drawn
+    5× larger than true size to be visible (choose "true size" and zoom in to see them as they are).</span> Drag to
+    rotate, scroll or pinch to zoom. Between saved frames (every 4 ms in the first 0.5 s, then 30 per second) positions
+    are drawn by straight-line interpolation.</p>
+
+  <div class="cards" id="cards"></div>
+  <p class="muted small" id="momnote"><b>Why the total momentum stays constant:</b> every impact pushes the two bodies
+    with equal and opposite impulses (Newton's third law), and the code books exactly what the walls receive and what
+    the residual acceleration gives, so the total (grains flying + walls received − acceleration gave) can change only
+    by floating-point rounding, about 10<sup>−16</sup> per impact.</p>
+</section>
+
+<!-- ======================================================== the live sandbox -->
+<section id="sandbox">
+  <h2>Try it: a live run in your browser</h2>
+  <p class="muted">Choose the start; the same python files run here in your browser (Pyodide, a python for web
+    pages) and stream their frames into the viewer above. The first run downloads python and numpy (about 15 MB,
+    then cached); nothing is installed.</p>
+  <form id="sbform" class="sbform" onsubmit="return false">
+    <label>Material
+      <select name="materials">
+        <option value="silica,graphite" selected>silica and graphite, side by side</option>
+        <option value="silica">silica only</option><option value="graphite">graphite only</option>
+      </select></label>
+    <label>Grains per tubule <output id="o-n">30</output>
+      <input name="n" type="range" min="20" max="40" step="1" value="30"></label>
+    <label>Grain diameters (sieve cut)
+      <select name="dband">
+        <option value="63,75">63–75 µm</option>
+        <option value="90,106" selected>90–106 µm (DOLL-E's)</option>
+        <option value="125,150">125–150 µm</option>
+      </select></label>
+    <label>Mean speed <output id="o-speed">15</output> mm/s
+      <input name="speed_mm_s" type="range" min="2" max="60" step="1" value="15"></label>
+    <label>Speed spread (σ) <output id="o-sigma">7.5</output> mm/s
+      <input name="sigma_mm_s" type="range" min="0" max="30" step="0.5" value="7.5"></label>
+    <label>Start
+      <select name="preset">
+        <option value="cloud" selected>compact cloud at the centre</option>
+        <option value="spread">spread through the whole tubule</option>
+      </select></label>
+    <label>Cloud size <output id="o-box">1.2</output> mm
+      <input name="box_mm" type="range" min="0.8" max="3" step="0.1" value="1.2"></label>
+    <label>Duration
+      <select name="t_end">
+        <option value="1">1 s</option><option value="2" selected>2 s</option>
+        <option value="4">4 s</option><option value="8">8 s</option>
+      </select></label>
+    <label>Random seed <input name="seed" type="number" min="1" max="9999" value="1"></label>
+    <div class="sbbtns">
+      <button id="sb-run" class="btn">Run</button>
+      <button id="sb-stop" class="btn ghost" disabled>Stop</button>
+    </div>
+  </form>
+  <div id="sb-status" class="status" aria-live="polite">Python is not loaded yet; it starts when you press Run.</div>
+  <div class="bar"><div id="sb-bar"></div></div>
+  <p class="muted small">Directions are random, speeds |N(mean, σ)|; the adhesion of each grain scatters by a factor
+    e<sup>0.6 N(0,1)</sup>; residual acceleration 10<sup>−4</sup> g along the tubule. These settings and the compact
+    cloud start are ASSUMED (the release of DOLL-E's dust is not decided); the sizes, materials and tubule are DOLL-E's
+    (<a href="https://github.com/TheBestProEver/100micron-sim/blob/main/dolle_core/scenes.py">scenes.py</a>
+    lists the source of every input).</p>
+</section>
+
+<!-- ======================================================== one impact up close -->
+<section id="closeup">
+  <h2>One impact up close</h2>
+  <p class="muted">Two grains of 50 µm radius meet head-on, seen from their centre of mass (each moves at half the
+    approach speed). At touch the sticky JKR contact snaps on, the grains squash by 2 to 20 nanometres, push apart, and
+    either the neck between them breaks (bounce) or too little energy is left to break it (stick). The speeds are 0.8
+    and 1.5 times each pair's sticking speed.</p>
+  <div class="cases" id="cases" role="group" aria-label="Choose an impact"></div>
+  <div class="closegrid">
+    <div class="stage small-stage">
+      <canvas id="cclose" aria-label="Two grains colliding, in slow motion"></canvas>
+      <div id="c-phase" class="phase"></div>
+      <div id="c-outcome" class="outcome"></div>
+    </div>
+    <div>
+      <canvas id="cplot" class="plot" aria-label="Contact force and overlap against time"></canvas>
+      <div id="c-read" class="readout"></div>
+    </div>
+  </div>
+  <div class="controls">
+    <button id="c-play" class="btn">Pause</button>
+    <input id="c-scrub" type="range" min="0" max="1000" value="0" aria-label="Animation time">
+    <span id="c-tread" class="mono small"></span>
+  </div>
+  <p class="muted small" id="c-note"></p>
+</section>
+
+<!-- ======================================================== about -->
+<section id="about">
+  <h2>About this page</h2>
+  <div class="about">
+    <div>
+      <h3>What it shows</h3>
+      <p>The DOLL-E experiment measures the speed below which dust grains of about 100 µm stick when they collide,
+        for carbon and for silicates. For two 50 µm-radius grains the contact model gives a sticking speed of
+        6.2 mm/s for silica and 38 mm/s for graphite (computed by <code>dolle_core.sticking_threshold</code>; notebook
+        03 explains the factor of about 6). The recorded replay starts both tubules from one compact cloud moving at
+        about 15 mm/s (ASSUMED), between the two thresholds: in silica most impacts bounce, in graphite they all
+        stick, so graphite forms far more clumps (12 clumps holding 28 grains against silica's 2 holding 4).</p>
+      <p>Each tubule is DOLL-E's 0.5 × 0.5 × 1.5 inch (12.7 × 12.7 × 38.1 mm) borosilicate tubule; the long axis
+        points up the rocket. Grains that stick to a wall stay there. Every impact is resolved by the same contact
+        physics as the full simulator (JKR adhesion, damping, yield, friction; the materials' values are sourced in
+        <a href="https://github.com/TheBestProEver/100micron-sim/blob/main/dolle_core/materials.py">materials.py</a>).</p>
+    </div>
+    <div>
+      <h3>What rigid clumps leave out</h3>
+      <p>Once grains stick here, they never roll, slide or twist over each other: a clump is a rigid body, and an
+        impact on it is decided at the single contact point by the same head-on contact model, with friction for the
+        sideways part. A clump can still lose grains (erosion) or shatter when hit hard; the thresholds for that
+        (Dominik &amp; Tielens 1997) were derived for large aggregates and are extrapolated to these small clumps, and
+        the energy the fragments fly apart with is ASSUMED (here all of what the impact dissipated beyond the bonds;
+        giving none back instead turns silica's 4 sticks into 6). Each impact is treated as an instant (a contact
+        lasts about 1 µs). Left out are rolling and restructuring inside clumps (impacts here
+        carry about 3 % (silica) and 0.5 % (graphite) of the energy needed to start rolling, but the rolling
+        resistance is uncertain by about 50 times, so for silica this is not settled), gas drag (speeds change by
+        under 0.1 % in 12 s), the payload's slow roll, contact charging, and the forces the full simulator switches
+        off as negligible. <a href="https://github.com/TheBestProEver/100micron-sim/blob/main/notebooks/06_the_3d_simulation.ipynb">Notebook
+        06</a> derives every step and gives the size of each left-out effect and the check that shows it is small.</p>
+    </div>
+    <div>
+      <h3>The code</h3>
+      <ul class="links">
+        <li><a href="https://github.com/TheBestProEver/100micron-sim/blob/main/dolle_core/sim3d.py">dolle_core/sim3d.py</a>: the tubule and the event loop</li>
+        <li><a href="https://github.com/TheBestProEver/100micron-sim/blob/main/dolle_core/clumps.py">clumps.py</a> and <a href="https://github.com/TheBestProEver/100micron-sim/blob/main/dolle_core/impacts.py">impacts.py</a>: rigid clumps; one impact in 3-D</li>
+        <li><a href="https://github.com/TheBestProEver/100micron-sim/blob/main/dolle_core/scenes.py">scenes.py</a>: this page's scenes, every input with its source</li>
+        <li><a href="https://github.com/TheBestProEver/100micron-sim/tree/main/notebooks">The notebooks</a> (00–06, with derivations; <a href="https://colab.research.google.com/github/TheBestProEver/100micron-sim/blob/main/notebooks/06_the_3d_simulation.ipynb">open notebook 06 in Colab</a>)</li>
+        <li><a href="https://github.com/TheBestProEver/100micron-sim/tree/main/docs/sim3d">This page's code</a>; the replays are written by <code>python tools/make_sim3d_replays.py</code></li>
+        <li><a href="https://thebestproever.github.io/100micron-sim/">The main DOLL-E simulator site</a></li>
+      </ul>
+      <p class="muted small" id="provenance"></p>
+    </div>
+  </div>
+</section>
+</main>
+<noscript><p class="nojs">This page needs JavaScript and WebGL.</p></noscript>
+</body>
+</html>

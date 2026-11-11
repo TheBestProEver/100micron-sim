@@ -20,11 +20,23 @@ Read it in this order:
   wall.py        wall_limits, rolling_acceleration                                a grain resting on a wall
   many.py        line_collision                                                   grains on a line: momentum
 
+The 3-D simulation (notebook 06; the page docs/sim3d/):
+
+  clumps.py      Clumps, make_clumps, merge, detach, rotate, drift, momentum      rigid clumps of stuck grains
+  impacts.py     collision_matrix, normal_impact, bounce_impulse, grain_grain,    one impact in 3-D: stick or
+                 grain_wall, fragment                                             bounce, friction, break-up
+  sim3d.py       Tubule, Sim, make_sim, step, run, next_contact, summary          the tubule and the event loop
+  scenes.py      two_tubule_start, run_two_tubules, impact_closeup,               the page's scenes and the
+                 sandbox_start, sandbox_advance                                   browser sandbox
+
 Quick start:
     >>> from dolle_core import collide, make_pair, sticking_threshold
     >>> r = collide("silica", 50e-6, "silica", 50e-6, u1=0.01)        # 1 cm/s into a resting grain
     >>> r.outcome, r.e
     >>> sticking_threshold(make_pair("graphite", 50e-6, "graphite", 50e-6))   # m/s
+    >>> from dolle_core import scenes, sim3d
+    >>> sims = scenes.run_two_tubules(scenes.two_tubule_start())             # silica and graphite, ~5 s
+    >>> sim3d.summary(sims["graphite"])["clump_sizes_at_end"]
 """
 from .materials import G0, FRICTION, MATERIALS, Material, friction_coefficient, get_material, sphere_mass
 from .pair import Pair, make_pair, reduced_mass, reduced_modulus, reduced_radius, work_of_adhesion
@@ -40,5 +52,7 @@ from .scaling import (chokshi_dominik_tielens_speed, damping_factor, equal_spher
                       scaling_law_speed, undamped_sticking_speed, wall_prefactor)
 from .wall import WallLimits, rolling_acceleration, wall_limits
 from .many import LineResult, line_collision
+from .sim3d import Sim, Tubule, make_sim
+from .scenes import impact_closeup, run_two_tubules, two_tubule_start
 
 __all__ = [n for n in dir() if not n.startswith("_")]

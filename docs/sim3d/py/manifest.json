@@ -1,0 +1,21 @@
+{
+ "made_by": "python tools/build_sim3d.py",
+ "package": "dolle_core",
+ "files": [
+  "__init__.py",
+  "clumps.py",
+  "collide.py",
+  "damping.py",
+  "impacts.py",
+  "jkr.py",
+  "many.py",
+  "materials.py",
+  "pair.py",
+  "plastic.py",
+  "scaling.py",
+  "scenes.py",
+  "sim3d.py",
+  "wall.py"
+ ],
+ "note": "byte-for-byte copies of dolle_core/*.py (without the notebook helpers nb_*.py)"
+}

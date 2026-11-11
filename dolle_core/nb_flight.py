@@ -152,18 +152,22 @@ def plot_limits_vs_diameter(cases, loads, d_range=(45e-6, 106e-6), ax=None, slid
 
 
 def dem_rolling_ramp(t_end=2e-3, n_out=100):
-    """Run the full simulator's 3-D contact model (dolle_sim/dem.py DEMSystem) with exactly the set-up of its
+    """Run the full simulator's 3-D contact model (extras/dolle_extras/dem.py DEMSystem) with exactly the set-up of its
     check verify_full.check_rolling_on_wall: a 50 um radius silica grain resting on a borosilicate wall (z = 0),
     pressed on it by 1 g, under a sideways body acceleration ramped linearly from 0 to 3x its rolling limit in t_end
     [s], dt = 1e-8 s.  The run is split into n_out pieces to record the grain's speed v [m/s] and omega R [m/s] (the
     pieces continue one run: same steps, same forces).  Returns a dict with t, v, omega_R, ramp [m/s^2], a_roll_sim
-    (the check's rolling limit, from dem.make_params at zero load) [m/s^2]; or None if numba is missing (the
+    (the check's rolling limit, from dem.make_params at zero load) [m/s^2]; or None if numba or extras/ is missing (the
     pure-python fallback would take many minutes)."""
     import importlib.util
     if importlib.util.find_spec("numba") is None:
         print("numba is not installed: skipping the 3-D run (pip install numba to run it).")
         return None
-    from dolle_sim import dem
+    try:
+        from dolle_extras import dem              # the optional v0.6 engine (extras/; the notebooks put it on the path)
+    except ImportError:
+        print("the optional extras/ folder is not in this copy: skipping the 3-D run (use a clone of the repository).")
+        return None
     from dolle_sim.materials import get_material, sphere_mass
     s, g = get_material("silica"), get_material("glass_borosilicate")
     R = 50e-6
@@ -339,13 +343,13 @@ def phase_effects(prof, tubules, h=0.5):
 
 # ---------------------------------------------------------------------------------------------------- v0.5 results
 V05_STATUS = ("v0.5 event-driven engine: rigid aggregates; wall grains held in place until pulled off, so no rolling "
-              "or sliding along the walls; 800 grains per tubule; README.md 'Mission runs' table (commit f133c3e). "
+              "or sliding along the walls; 800 grains per tubule; docs/MISSION_RUNS.md (the README's 'Mission runs' table at commit f133c3e). "
               "The v0.6 full-contact re-runs were stopped before they finished: there are no v0.6 scenario results.")
 
 V05_SCENARIOS = [
     # (scenario, what it changes, T1, T2, T3, T4): each cell "grains released · grain-grain impacts in the
     # microgravity window (single-grain impacts that stuck / all single-grain impacts, their median speed)",
-    # copied verbatim from README.md (v0.5 engine).
+    # copied verbatim from docs/MISSION_RUNS.md (the README's table until v0.7; v0.5 engine).
     ("nominal", "50 g / 200 Hz shaker, 10 s at T+90 s (vacuum, standing)", "0 · 0", "0 · 0", "0 · 0", "0 · 0"),
     ("no_release", "no release mechanism", "0 · 0", "0 · 0", "0 · 0", "0 · 0"),
     ("no_drag", "nominal, no drag in the coasts", "0 · 0", "0 · 0", "0 · 0", "0 · 0"),
@@ -413,9 +417,9 @@ def plot_thresholds_and_impacts(tubules, scenarios=("kick", "kick+lying"), d_ran
 
 
 def v05_table_matches_readme(readme_path=None):
-    """True if every row of V05_SCENARIOS appears verbatim in README.md's scenario table; None if README.md is
-    not on disk (Colab)."""
-    path = Path(readme_path) if readme_path else Path(__file__).resolve().parents[1] / "README.md"
+    """True if every row of V05_SCENARIOS appears verbatim in the scenario table of docs/MISSION_RUNS.md (or of the
+    file readme_path); None if that file is not on disk (Colab).  (The table was in README.md until v0.7.)"""
+    path = Path(readme_path) if readme_path else Path(__file__).resolve().parents[1] / "docs" / "MISSION_RUNS.md"
     if not path.exists():
         return None
     text = path.read_text(encoding="utf-8")

@@ -49,7 +49,7 @@ the step, and the shorter estimate is the safer one.  For the 50 um radius silic
 Because this loop does the same arithmetic as contact.py, it gives the simulator's restitutions and sticking
 speeds to rounding error (tests/test_dolle_core.py).  What it does NOT cover: oblique impacts, spin, gas drag,
 charging, and more than two bodies (many.py does a line of grains).  In an oblique impact the sliding, rolling and
-twisting springs act during the contact; the full simulator's 3-D model dolle_sim/dem.py has them.  For HEAD-ON
+twisting springs act during the contact; the full simulator's 3-D model extras/dolle_extras/dem.py has them.  For HEAD-ON
 impacts its sticking speed equals this 1-D model's to 1.6e-3 (check dem_vs_1d; 5e-4 at half its step).  That
 oblique impacts stick at the same NORMAL speed is an assumption of the simulator's v0.5 chamber model
 (PROVENANCE.md); notebooks/01, section 12, tests it with the 3-D model at two impact offsets (it holds to 1e-4).

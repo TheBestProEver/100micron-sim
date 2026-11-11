@@ -27,7 +27,7 @@ Chokshi, Tielens & Hollenbach 1993, Table 3); "amorphous_carbon" is an ASSUMED p
 examples/silica_vs_carbon.py for how the sticking speed moves with each property.
 
 Friction coefficients (FRICTION) are not material properties but properties of a PAIR of surfaces; they are the
-simulator's table dolle_sim/engine.py: MU_DEFAULT.
+simulator's table extras/dolle_extras/engine.py: MU_DEFAULT.
 """
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ FRICTION: dict[tuple[str, str], float] = {
     ("silica", "wall"): 0.4, ("silica", "silica"): 0.6, ("graphite", "wall"): 0.5,
     ("graphite", "graphite"): 0.5, ("graphite", "silica"): 0.5}
 """Sliding friction coefficient mu (no unit) for (grain, other) pairs, "wall" meaning any wall.  Same table as
-dolle_sim/engine.py: MU_DEFAULT.  Sources as engine.py gives them: silica on glass 0.4 (Meyer, Fuchs, Staedler &
+extras/dolle_extras/engine.py: MU_DEFAULT.  Sources as that file gives them: silica on glass 0.4 (Meyer, Fuchs, Staedler &
 Jiang 2014, Friction 2, 255); silica on silica 0.6 (Liu et al. 2017, Nat. Commun. 8, 14029, its uncoated-silica
 reference; not re-checked here); graphite 0.5 (Buckley 1971, 1973: graphite in dry gas or vacuum).  Liu et al.'s
 headline result is ~0.003 for graphene-coated contacts (superlubricity), so a carbon's mu is uncertain by more
@@ -129,7 +129,7 @@ def get_material(name_or_material) -> Material:
 
 def friction_coefficient(grain: str, other: str) -> float:
     """Sliding friction mu between `grain` and `other` ("wall" for any wall), looked up in either order;
-    0.4 (ASSUMED) when the pair is not in FRICTION (the simulator's default, dolle_sim/engine.py)."""
+    0.4 (ASSUMED) when the pair is not in FRICTION (the v0.6 engine's default, extras/dolle_extras/engine.py: MU_DEFAULT)."""
     return FRICTION.get((grain, other), FRICTION.get((other, grain), 0.4))
 
 

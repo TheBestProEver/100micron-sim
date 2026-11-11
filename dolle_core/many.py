@@ -16,7 +16,7 @@ What is left out on purpose.  Plastic yield: line_collision refuses inputs where
 speed (plastic.py yield_speed; it checks the largest relative speed the energy in the system allows: the
 centre-of-mass kinetic energy plus every well depth |U(a0)| = 1.54 F_c |delta_c|), so the
 contact law is exactly the elastic JKR + damping one of collide.py.  Motion off the line (oblique contacts, spin,
-sliding, rolling): that is the full simulator's 3-D model, dolle_sim/dem.py, which conserves linear and angular
+sliding, rolling): that is the full simulator's 3-D model, extras/dolle_extras/dem.py, which conserves linear and angular
 momentum to 1e-14 (PROVENANCE.md; verify check dem_conservation).
 
 Time step: dt = min over pairs of min(t_Hz, t_osc)/n_sub (collide.py time_step) at the largest possible relative

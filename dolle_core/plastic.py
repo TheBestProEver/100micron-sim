@@ -1,7 +1,7 @@
 """Plastic yield (Thornton & Ning 1998): what happens when an impact is hard enough to dent the grains.
 
 Source: Thornton & Ning (1998), "A theoretical model for the stick/bounce behaviour of adhesive, elastic-plastic
-spheres", Powder Technol. 99, 154.  Code: dolle_sim/contact.py _resolve_core (plastic branch), dolle_sim/dem.py.
+spheres", Powder Technol. 99, 154.  Code: dolle_sim/contact.py _resolve_core (plastic branch), extras/dolle_extras/dem.py.
 
 In a Hertz contact the pressure is highest at the centre of the patch, p_max = 2 E* a / (pi R*) (Johnson 1985,
 "Contact Mechanics").  A real solid cannot carry more than a limiting pressure p_y [Pa].  Setting p_max = p_y with

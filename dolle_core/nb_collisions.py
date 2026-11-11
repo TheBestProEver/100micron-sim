@@ -361,9 +361,13 @@ def show_source(target, pattern: str, before: int = 0, after: int = 0) -> None:
 
 
 def simulator_file(name: str) -> Path:
-    """Path of a source file of the full simulator, e.g. simulator_file("dem.py") (dolle_sim sits next to
-    dolle_core, in the repository and in an installed copy alike)."""
-    return Path(__file__).resolve().parents[1] / "dolle_sim" / name
+    """Path of a source file of the full simulator, e.g. simulator_file("simulation.py"): in dolle_sim (next to
+    dolle_core), or else in the optional extras/dolle_extras (the v0.6 engine, e.g. "dem.py")."""
+    root = Path(__file__).resolve().parents[1]
+    for folder in (root / "dolle_sim", root / "extras" / "dolle_extras"):
+        if (folder / name).exists():
+            return folder / name
+    return root / "dolle_sim" / name
 
 
 def aggregates(line, row: int = -1) -> list:
@@ -395,14 +399,14 @@ def last_contact_time(line, pair_index: int) -> float:
 
 
 def dem_threshold(material: str = "silica", r: float = 50e-6, offset: float = 0.0, dt_factor: float = 1.0) -> float:
-    """Sticking threshold [m/s] of two equal grains in the full simulator's 3-D contact model (dolle_sim/dem.py,
+    """Sticking threshold [m/s] of two equal grains in the full simulator's 3-D contact model (extras/dolle_extras/dem.py,
     needs numba), as a NORMAL impact speed: the set-up of verify_full.check_dem_vs_1d (damping on, no spin, step
     t_osc/400, 16 bisection steps between 0.5 and 2 times the 1-D reference), except that the second grain can be
     displaced sideways by `offset` [m] (impact parameter; 0 = head-on, 2r would be grazing) and the step multiplied by
     dt_factor.  With an offset the grains also slide and roll during the contact (tangential springs loaded)."""
-    from dolle_sim import dem
+    from dolle_extras import dem                  # the optional v0.6 engine (extras/; the notebooks put it on the path)
+    from dolle_extras.verify_full import _pair_system
     from dolle_sim.materials import get_material as sim_material, pair_props, sphere_mass
-    from dolle_sim.verify_full import _pair_system
     from dolle_sim.contact import JKRContact
     mat = sim_material(material)
     p, m_eff = pair_props(mat, r, mat, r), sphere_mass(mat, r) / 2

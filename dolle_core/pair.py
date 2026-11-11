@@ -20,7 +20,7 @@ ASSUMED knob, default 1).  The pair's dry restitution is sqrt(e1 e2) (ASSUMED ru
 smaller of the two (rule ASSUMED: the simulator's choice, dolle_sim materials.pair_props; Thornton & Ning 1998
 treat a contact with a single limiting pressure p_y and supply only the yield law itself).
 
-Source of every formula: dolle_sim/materials.py: pair_props (and dolle_sim/dem.py: make_params, identical).
+Source of every formula: dolle_sim/materials.py: pair_props (and extras/dolle_extras/dem.py: make_params, identical).
 """
 from __future__ import annotations
 

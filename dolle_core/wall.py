@@ -5,7 +5,7 @@ A grain stuck on a wall sits at the JKR equilibrium (zero load: patch radius a0,
 until its force or torque reaches a limit.  Pull-off happens at F_c plus any pressing load; the sliding, rolling and
 twisting limits are of the "Coulomb with adhesion" form, proportional to |F_ne + 2 F_c|, where F_ne [N] is the
 elastic normal force (> 0 when the grain is pressed on the wall; zero load: F_ne = 0, the bracket is 2 F_c).  This form is Thornton & Yin (1991, Powder Technol. 65, 153) and Marshall (2009,
-J. Comput. Phys. 228, 1541, eq. 43), as in LAMMPS; the simulator's code is dolle_sim/dem.py make_params and
+J. Comput. Phys. 228, 1541, eq. 43), as in LAMMPS; the simulator's code is extras/dolle_extras/dem.py make_params and
 contact_force.  Symbols: m grain mass [kg], R its radius [m] (R* = R on a wall), g0 = 9.80665 m/s^2.
 
   Pull-off (normal).  The contact holds a steady pull up to F_c = 1.5 pi w R (jkr.py).  A body acceleration a
@@ -97,7 +97,7 @@ def wall_limits(grain, r: float, wall, f_adh: float = 1.0, mu: float | None = No
     """Limits of a grain (material `grain`, radius r [m]) resting on a flat wall of material `wall`.  f_adh scales
     w (ASSUMED coating/roughness knob); mu defaults to FRICTION[(grain, "wall")]; h rolling hysteresis (ASSUMED
     0.5); press_g a load pressing the grain on the wall, in g (raises F_ne to m g0 press_g).  Formulas of the
-    module docstring, as dolle_sim/dem.py make_params."""
+    module docstring, as extras/dolle_extras/dem.py make_params."""
     g, wl = get_material(grain), get_material(wall)
     p = make_pair(g, r, wl, None, f_adh=f_adh)
     mu = friction_coefficient(g.name, "wall") if mu is None else mu

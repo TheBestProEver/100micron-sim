@@ -42,7 +42,7 @@ then depends on speed); the viscoelastic law of Brilliantov, Spahn, Hertzsch & P
 5382), whose restitution falls with speed and which needs dissipative constants not known for these grains.
 
 Clamping: the 1-D impact model clamps e_dry to [1e-4, 0.9999] (dolle_sim/contact.py JKRContact.__init__), so it
-can never be exactly undamped there.  The 3-D model (dolle_sim/dem.py make_params) clamps to [1e-4, 1] and uses
+can never be exactly undamped there.  The 3-D model (extras/dolle_extras/dem.py make_params) clamps to [1e-4, 1] and uses
 beta = 0 at e = 1.  This core follows the 1-D clamp, except that e_dry >= 1 means "no damping" (beta = 0), as in
 the 3-D model, so the elastic limit can be shown exactly.
 """
