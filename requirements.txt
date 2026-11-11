@@ -1,8 +1,10 @@
 numpy>=1.24
 scipy>=1.10
 matplotlib>=3.7
-numba>=0.58        # optional but ~100x faster contact integration
-rebound>=4.0       # optional: only for `python -m dolle_sim rebound-check`
-lammps>=2025.7.22  # optional: only for `python -m dolle_sim lammps-check` (Windows: also MS-MPI)
-scikit-image>=0.21 # optional: only for measuring grain sizes from images (`sizes --image`)
+numba>=0.58        # optional but ~100x faster contact integration (the 3-D cells of the notebooks need it)
 pytest>=7          # tests
+# optional, only for the extras in extras/ (python -m dolle_extras ...):
+#   rebound>=4.0       rebound-check (cross-check against REBOUND)
+#   lammps>=2025.7.22  lammps-check (cross-check against LAMMPS; Windows: also MS-MPI)
+#   scikit-image>=0.21 sizes-image (grain sizes from microscope images)
+#   psutil>=5          extras/tools/run_campaign.py

@@ -1,6 +1,6 @@
 """Measure grain diameters from microscope images (optional: needs scikit-image).
 
-    python -m dolle_sim sizes --image photo.png --um-per-px 1.25 [--dark-on-light] [--out sizes.csv]
+    python -m dolle_extras sizes-image photo.png --um-per-px 1.25 [--dark-on-light] [--out sizes.csv]
 
 Pipeline (the standard scikit-image recipe for particle sizing):
   1. grey-scale image, global Otsu threshold (grains are assumed to be the minority phase unless the
@@ -13,7 +13,7 @@ Pipeline (the standard scikit-image recipe for particle sizing):
      analysis by ISO 13322-1), scaled by the calibration (um per pixel, e.g. from a stage micrometer).
 
 Accuracy: with >= ~20 px across a grain the diameter of an isolated circle is recovered to ~1-2%
-(tests/test_sizes.py checks this on synthetic images with known sizes). Imaging needs enough contrast,
+(extras/tests/test_sizing_image.py checks this on synthetic images with known sizes). Imaging needs enough contrast,
 grains in one focal plane, and few overlaps; count several hundred grains for a stable D50.
 
 Provenance: scikit-image (van der Walt et al. 2014, PeerJ 2, e453) functions threshold_otsu (Otsu 1979,

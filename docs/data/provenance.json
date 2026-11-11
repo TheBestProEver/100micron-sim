@@ -1,138 +1,12 @@
 {
  "summary": [
   "<b>None of the DOLL-E physics comes from REBOUND or LAMMPS.</b> No code from either is copied, translated or called by the simulator, and it runs with both unavailable (tested).",
-  "REBOUND is used in one optional file, <b>dolle_sim/rebound_check.py</b> (417 of 15489 lines). That file re-runs a simplified chamber inside REBOUND as an outside check of our trajectory integration and collision bookkeeping; it does not check the sticking physics. Two of our methods are standard ones REBOUND also uses (second-order leapfrog / velocity Verlet and direct-sum gravity), and our collision detection is related to its 'line' mode, all written independently.",
-  "LAMMPS, a widely used open-source particle code, is likewise used only in one optional file, <b>dolle_sim/lammps_check.py</b> (195 lines). That file compares the JKR contact with LAMMPS's own implementation. With the same rule for when a contact breaks, the undamped sticking speeds agree to 0.1-0.3%, the restitution to within 0.011 and the pull-off force from a wall to 0.14%. With DOLL-E's default rule (the one all simulations use) the undamped sticking speeds are 1.42x higher.",
-  "The physics comes from published contact-mechanics and aerosol papers, textbook mechanics and electrostatics, and some derivations and choices of our own. Of the 61 components listed: 17 published, 19 standard, 16 derived or adapted here, 9 assumed. Each lists how it is checked: 45 automated verification checks (python -m dolle_sim verify, also part of the test suite); the 26 model checks also run in your browser on the Verify tab, the full-contact engine checks need the desktop. CHECKS.md lists every check and comparison with its pass criterion and measured value. Some components have no automated check, and say so.",
+  "REBOUND is used in one optional file, <b>extras/dolle_extras/rebound_check.py</b>. That file re-runs a simplified chamber inside REBOUND as an outside check of our trajectory integration and collision bookkeeping; it does not check the sticking physics. Two of our methods are standard ones REBOUND also uses (second-order leapfrog / velocity Verlet and direct-sum gravity), and our collision detection is related to its 'line' mode, all written independently.",
+  "LAMMPS, a widely used open-source particle code, is likewise used only in one optional file, <b>extras/dolle_extras/lammps_check.py</b>. That file compares the JKR contact with LAMMPS's own implementation. With the same rule for when a contact breaks, the undamped sticking speeds agree to 0.1-0.3%, the restitution to within 0.011 and the pull-off force from a wall to 0.14%. With DOLL-E's default rule (the one all simulations use) the undamped sticking speeds are 1.42x higher.",
+  "The physics comes from published contact-mechanics and aerosol papers, textbook mechanics and electrostatics, and some derivations and choices of our own. Of the 51 components listed: 12 published, 17 standard, 13 derived or adapted here, 9 assumed. Each lists how it is checked: 26 automated model checks (python -m dolle_sim verify, also part of the test suite), which also run in your browser on the Verify tab; the optional v0.6 engine in extras/ has its own checks (python -m dolle_extras verify). CHECKS.md lists every check and comparison with its pass criterion and measured value. Some components have no automated check, and say so.",
   "<b>What is not certain is the material data, and it matters a lot.</b> With the commonly used values, carbon (graphite) is predicted to stick below 38 mm/s and silica below 6.2 mm/s. Of that 6.2x ratio, 2.5x comes from the published surface energies, 1.7x from the published elastic constants and 1.5x from our assumed restitution values. The assumed damping also sets most of each threshold: without it graphite would stick only below 16 mm/s. Published estimates for dry silica in vacuum are up to ten times the commonly used surface energy, which would make silica about as sticky as graphite. Measuring this is what DOLL-E is for."
  ],
  "sections": [
-  {
-   "title": "Full-contact engine (v0.6; all mission runs)",
-   "items": [
-    {
-     "component": "Every grain a body, every contact resolved",
-     "code": "dem.py: make_params, contact_force, run_steps",
-     "origin": "published",
-     "rebound": "none",
-     "basis": "Each grain is a sphere with 6 degrees of freedom; no rigid aggregates, no frozen wall grains, no outcome rules. Every grain-grain and grain-wall contact carries the adhesive contact model used for dust aggregates (Wada et al. 2007; Dominik & Tielens 1995, 1997), written in the form of the LAMMPS GRANULAR package so that the two can be compared term by term: JKR normal force with hysteresis (contact forms at delta = 0, breaks at the end of the stable branch), the Tsuji-type damping of contact.py, Thornton-Ning plastic flattening; sliding, rolling and twisting springs with their limits (next items). Velocity Verlet at 1/50 of the fastest contact period (the sliding mode, 0.3-1.1 us), shorter inside fast impacts (1/50 of the Hertz contact time).",
-     "refs": "Wada, Tanaka, Suyama, Kimura & Yamamoto (2007) ApJ 661, 320; Dominik & Tielens (1997) ApJ 480, 647; Thompson et al. (2022) Comput. Phys. Commun. 271, 108171 (LAMMPS); Luding (2008) Granular Matter 10, 235",
-     "checks": [
-      "dem_vs_1d",
-      "dem_conservation",
-      "time_step"
-     ],
-     "checked": "The same contact law in LAMMPS (pair_style granular jkr ... tangential linear_history ... rolling sds ... twisting sds, fix wall/gran, nve/sphere), with the same coefficients and step, gives the same velocities, spins and positions to <= 2.2e-6 in 7 set-ups: oblique spinning impacts at 3, 30 and 300 mm/s, rolling on a wall under a ramped load, rocking under a step load, twisting, 20 grains dropped on a floor (tools/lammps_contact_check.py; LAMMPS breaks contacts at maximum tension, so these runs use that rule). Head-on sticking speeds agree with the independent 1-D integrator of contact.py to 1.4e-3. In an undamped oblique impact linear and angular momentum are conserved to 1e-14 and the total energy (kinetic + JKR + springs) to 6.6e-7 while the contact holds.",
-     "limits": "Spheres with smooth surfaces; material inputs as in the Material properties section. JKR is the large-Tabor-parameter limit (see the JKR item below; silica is in the JKR-DMT transition). Halving the step changes an oblique impact's outcome by ~1e-3 (the 'engine_handoff' check reports it)."
-    },
-    {
-     "component": "Sliding",
-     "code": "dem.py: contact_force",
-     "origin": "published",
-     "rebound": "none",
-     "basis": "Tangential spring k_s = 8 G* a0 on the relative tangential displacement (Wada et al. 2007 eq. 12; a0 rather than the current contact radius keeps the spring energy conservative), history rotated into the tangent plane every step (Luding 2008 eq. 17), dashpot equal to the normal one. It slips when the force reaches mu (F_ne + 2 F_c) (Thornton & Yin 1991; the LAMMPS form). mu: silica on glass 0.4, silica on silica 0.6, graphite 0.5 (measured: Meyer et al. 2014; Liu et al. 2017; Buckley 1971, 1973). The zero-load sliding force 2 mu F_c = 0.8-1.2 F_c lies inside the 0.24-2.7 F_c measured for glass microspheres (Meyer et al. 2014).",
-     "refs": "Thornton & Yin (1991) Powder Technol. 65, 153; Meyer, Fuchs, Staedler & Jiang (2014) Friction 2, 255; Liu et al. (2017) Nat. Commun. 8, 14029; Buckley (1973) NASA TN D-7529",
-     "checks": [
-      "dem_conservation"
-     ],
-     "checked": "Identical to LAMMPS 'linear_history' with the same k (lammps_contact_check). Energy conserved to 6.6e-7 while it holds (dem_conservation).",
-     "limits": "mu for graphite on glass and the tangential dashpot ratio (1) are assumed. Sliding needs ~500-8000 g of load at rest, so it matters only inside impacts."
-    },
-    {
-     "component": "Rolling",
-     "code": "dem.py: make_params, contact_force",
-     "origin": "published",
-     "rebound": "none",
-     "basis": "Rolling spring k_r = 4 F_c / R on the rolling displacement int R (w_i - w_j) x n dt (Wada et al. 2007 eq. 22, the Dominik & Tielens 1995 rolling resistance; LAMMPS 'rolling sds'), held at its limit beyond the critical rolling displacement xi_crit = h a0 / 12 (Krijt, Dominik & Tielens 2014 eq. 16), h the adhesion hysteresis. A grain on a wall starts to roll at a sideways acceleration 4 F_c xi_crit / (m R): 1.3 g for 100 um silica on clean borosilicate (0.6 g silanised), 6.5 g for 50 um silica, 3.6 g for 100 um graphite. These are below the spin and ascent loads (up to ~8-14 g sideways), so grains roll along the walls during the boost: v0.5 could not show this. Rolling and rocking are damped with an assumed quality factor Q = 100.",
-     "refs": "Krijt, Dominik & Tielens (2014) J. Phys. D 47, 175302; Dominik & Tielens (1995) Phil. Mag. A 72, 783; Heim, Blum, Preuss & Butt (1999) PRL 83, 3328; Ibrahim, Dunn & Brach (2003) J. Aerosol Sci. 34, 765",
-     "checks": [
-      "rolling_on_wall"
-     ],
-     "checked": "A grain under a ramped sideways load starts to roll at the limit and then rolls without slip (slip 2.3e-8) at the speed of the rigid-plastic solution (m + I/R^2) dv/dt = m (a - a_roll) to 3.2e-3 (the rest is elastic pre-roll); identical to LAMMPS (B and C set-ups).",
-     "limits": "h is ASSUMED: nominal 0.5 is the fit to silicate data by Krijt et al. (2014), from rolling of ~1 um silica (Heim et al. 1999); at DOLL-E sizes the only measurement (70 um glass beads in a wind tunnel, Ibrahim et al. 2003) gives 0.05-0.6. The threshold is uncertain by ~50x (0.02-1.3 g for 100 um silica across the published models). Q (100) is assumed (polystyrene rocking: Q ~ 30). Humidity raises the rolling moment up to ~10x (Ibrahim et al. 2004). No graphite measurement exists."
-    },
-    {
-     "component": "Twisting",
-     "code": "dem.py: make_params, contact_force",
-     "origin": "published",
-     "rebound": "none",
-     "basis": "Twisting spring k_t = (16/3) G a0^3 on int (w_i - w_j).n dt, held at G a0^3 / (3 pi) at zero load (Wada et al. 2007 eqs. 26, 37; LAMMPS 'twisting sds', scaled with |F_ne + 2 F_c|). Damped with the same assumed Q.",
-     "refs": "Wada et al. (2007) ApJ 661, 320; Marshall (2009) J. Comput. Phys. 228, 1541",
-     "checks": [],
-     "checked": "Identical to LAMMPS (D set-up: a grain spinning on a wall).",
-     "limits": "Q assumed. LAMMPS's 'twisting marshall' with Mindlin sliding has a units regression in the current source and is not used."
-    },
-    {
-     "component": "Regimes: free flight, contact dynamics, rest, rolling",
-     "code": "engine.py: FullContactSim",
-     "origin": "derived",
-     "rebound": "none",
-     "basis": "The full model at nanosecond steps for 900 s would take ~10^4 core-days. The engine uses it wherever something can happen and exact or bounded treatments elsewhere: (1) a grain touching nothing flies on the exact free-flight integrator until the earliest time it could come within 0.1 um of anything (straight-line relative motion plus bounds on every acceleration), then joins the contact dynamics; once it touches nothing again it leaves (exact free flight, or slaved rolling on its wall) up to the earliest time it could come within 0.1 um of anything, with the same time-resolved bounds, and joins again then. (2) A grain resting on a wall, or a resting cluster anchored to a wall, is held static while a certificate shows that every contact stays inside all of its elastic limits (pull-off, sliding, rolling, twisting) with a 2% margin for the loads over the step: inside the limits nothing plastic can change, so the grain cannot move (clusters: linear statics from the contact kernel's own tangent, statics.py). It wakes at every load breakpoint, during kHz loads (releases, vibration) or when the certificate fails, and joins the contact dynamics the moment a moving grain comes within 0.2 um of it (between contact-list builds no grain in the dynamics may move further than its clearance to the nearest sleeper); on waking it is placed at the exact static equilibrium of the current load (elastic deflection included). A grain or cluster goes to sleep when its residual motion (kinetic plus elastic energy) could change no contact load by more than 1% of that contact's margin (for clusters, the exact bound over the energy ellipsoid, sqrt(2 E J K^-1 J^T)); a cluster still rocking sleeps with its residual motion kept as exact linear response (modes of M u'' + C u' + K u = 0 with the kernel's own stiffness and dashpots and the rotating-frame terms) if every mode decays, the residual moves no grain by more than a tenth of the capture distance, and every contact keeps 5x the margin with the most the residual can add; the certificate includes that bound, and on waking the residual is added back, evolved to that time. (3) A wall-anchored cluster that keeps moving (a stuck pair rolling across the floor) is integrated with the stiff normal and sliding modes of every contact held on their quasi-static values (Lagrange multipliers; slaved.py) and the rolling and twisting springs of the kernel resolved at 1/400 of their period; each slaved cluster is first run over the whole step, and the path it takes is its envelope for everyone else. (3b) A grain on one wall that rolls or rocks is integrated with its stiff normal and sliding modes held on their quasi-static values (roll1.py) at 1/200 of the rocking period, and goes back to the full model near pull-off or the sliding limit, or when it could reach anything. (4) Every step is verified after it is taken: the speed of every grain in the contact dynamics against the speed bound other grains' capture times assumed for it, every rolling grain's path against its rolling envelope, and every grain that entered the contact dynamics during the step (from the time it entered) against every grain advanced outside it at the same time. If any check fails the step is redone from its start with those grains in the full model from the start, so no interaction can be missed.",
-     "refs": "numerical method written for DOLL-E; quasi-static bounds: standard single-degree-of-freedom dynamics (e.g. Chopra, Dynamics of Structures)",
-     "checks": [
-      "engine_regimes",
-      "engine_handoff",
-      "sleep_exact",
-      "cluster_statics",
-      "roll1_vs_full",
-      "linres",
-      "slaved_vs_full"
-     ],
-     "checked": "Regimes against the full model: a struck row of resting grains, a rolling grain beside it and a grain landing on it, run by the engine and with every grain in the contact dynamics throughout, give the same contacts and outcomes and agree within the contact dynamics' own step error (engine_regimes; the run uses on-approach joins and step redos). Hand-off: two grains flown, captured, collided and released by the engine match the DEM alone on the engine's own time grid to round-off, and a fine DEM reference within the DEM's own grid-phase spread (engine_handoff). Rest: a grain under a slowly rising load in the full model deflects exactly by the static amount the engine applies on waking (0.05 nm of 15 nm) and rolls only after the certificate fails (sleep_exact). Cluster statics: the kernel's stiffness by central differences matches the analytic normal and tangential stiffness to 2e-8 and the static response to a 1 g load to 1e-12 (cluster_statics). Slaved rolling: matches the full model to 1.1e-5 of the rolled path under 0.7-3 kHz loads and 25 rad/s of spin (roll1_vs_full). Residual motion: a rocking pair slept with it and woken 2 ms later matches the full model to 0.07 pm and 4e-5 rad/s, against 937 pm and 0.19 rad/s with the residual dropped (linres). Each mission summary reports the number of verified steps, redone steps and on-approach joins.",
-     "limits": "Clusters that touch no wall (aggregates in flight) are always integrated in the full model. The slaved-rolling error is ~(rocking / stiff frequency)^2, ~1e-5 for these grains. The certificate assumes the loads are smooth between the listed breakpoints (true for the flight profile). When a grain is put to sleep its residual motion (below 1% of every contact's margin) is dropped."
-    },
-    {
-     "component": "Slaved clusters",
-     "code": "slaved.py: run, enter, settle, project_velocity, condition",
-     "origin": "derived",
-     "rebound": "none",
-     "basis": "For a wall-anchored cluster of up to 8 grains whose contacts are all inside their pull-off and sliding limits: each contact gives three rows g_k = v_i - v_j + n_k x (r_i w_i + r_j w_j) = 0 (no approach, no slip; the slip velocity of dem.contact_force), and the contact forces are the multipliers lam of G M^-1 W lam = -(G M^-1 f + Gdot u), with f the body forces (uniform acceleration, centrifugal, Coriolis, Euler, drag) plus the rolling and twisting springs of the kernel, whose caps depend on lam (a fixed point), and W the kernel's force map (torque lever r - delta/2 at grain pairs). Velocity Verlet in the order of dem.run_steps; after each drift the normal overlaps are projected onto their quasi-static JKR values, after each step the velocities onto G u = 0; sliding springs at -f_t / k_s, so a cluster handed back starts on the slow manifold. Only non-redundant clusters (independent, well-conditioned rows); it hands back near pull-off or the sliding limit, on plastic loading, when a contact normal turns more than 2e-4 rad in a step, when anything static comes within the capture distance, and at load breakpoints. The single-grain rolling model (roll1.py) now also holds its normal overlap on the quasi-static value for the current load and hands back on plastic loading.",
-     "refs": "numerical method written for DOLL-E; constrained dynamics as in RATTLE (Andersen 1983, J. Comput. Phys. 52, 24)",
-     "checks": [
-      "slaved_vs_full",
-      "engine_slaved",
-      "roll1_vs_full"
-     ],
-     "checked": "A stuck pair, a grain on top of another and a single grain, each rolled past its limit by a ramped load with 0.7-3 kHz components under 25 rad/s of spin, match the full model at 5 ns to 7.4e-6, 1.7e-5 and 7.7e-6 of the rolled path (slaved_vs_full). In the engine, a slaved pair rolling under 10 g and hit by a grain rolling after it gives the same contacts and outcomes as an all-DEM run and agrees to 6e-6 of a radius (engine_slaved). A cluster is accepted only if the shift of its soft frequencies from slaving (the indicator) is <= 2e-4, <= 1e-3 weighted by the loads' frequencies.",
-     "limits": "The error of slaving is of order (soft / stiff frequency)^2 (~1e-5 here); redundant contact sets (a grain in an edge or corner, closed loops) and near-mechanisms stay in the full model. Designed with an independent design panel (three designs, three judges) whose prototype it reproduces."
-    },
-    {
-     "component": "Scenario branches from checkpoints",
-     "code": "engine.py: save_checkpoint, branch",
-     "origin": "derived",
-     "rebound": "none",
-     "basis": "Scenarios that share the same flight up to some time (the release options all start at T+90 s; the 1 Hz residual spin starts with the de-spin; the hanging and shock options start at the parachute) continue from a checkpoint of one run instead of repeating it (tools/run_campaign.py sets this up). The branch is allowed only if a fresh run of the target scenario differs from a fresh run of the saved one in nothing but the release schedule and the flight-profile options (every attribute of both is hashed and compared), and every load (apparent acceleration, spin and its rate, releases, vibration, breakpoints, fast windows) is identical up to the checkpoint, sampled every millisecond; otherwise the scenario runs from lift-off.",
-     "refs": "",
-     "checks": [],
-     "checked": "A run continued from another scenario's checkpoint is bit-for-bit (positions, velocities, spins, impacts, releases) the same as that scenario run from lift-off, and branches into scenarios that differ earlier are refused (tests/test_full_engine.py::test_branch_from_checkpoint_is_exact).",
-     "limits": "None for the physics; it saves repeating identical computation. Each branched run records where it started from in its summary (events: branched_from, branched_at_T)."
-    },
-    {
-     "component": "Loads in the tubule frame",
-     "code": "loads.py: Loads",
-     "origin": "standard",
-     "rebound": "none",
-     "basis": "The tubule is rigid, so its walls are fixed in its own frame and every load on the grains is a uniform acceleration (minus the tubule's) plus the rotating-frame terms: the flight profile (thrust, drag, parachute, splash, attitude), the spin and its rate (exact, piecewise), release mechanisms and vibration. A shaker or kick is defined by the tubule's acceleration -a sin(2 pi f tau) over whole cycles, so it starts and ends at rest (v0.5 began the motion with a jump to A omega). Breakpoints (load jumps and kinks) are listed so that no step straddles one.",
-     "refs": "",
-     "checks": [],
-     "checked": "Tested: a kick integrates to zero velocity and starts at zero acceleration (tests/test_full_engine.py).",
-     "limits": "The tubule's own structural modes (deck, holder, glass panels) are not modelled: walls move rigidly."
-    },
-    {
-     "component": "Random vibration",
-     "code": "vibration.py: synthesize_random, VibrationHistory",
-     "origin": "published",
-     "rebound": "none",
-     "basis": "The RockSat User Guide 2026 test spectra (thrust 0.051 g^2/Hz, lateral 0.029 g^2/Hz, flat 20-2000 Hz, 20 s per axis; the handbook's Level 2 as a sensitivity case) synthesised as stationary Gaussian processes (Shinozuka & Jan 1972; Smallwood & Paez 1993) and applied as deck accelerations through a cubic spline at 65,536 Hz with exact velocity and displacement.",
-     "refs": "RockSat User Guide 2026 (NASA WFF, Rev-A DRAFT) App. B; NASA Sounding Rockets User Handbook (2023) Table 6.3.4-1; Shinozuka & Jan (1972) J. Sound Vib. 25, 111; Smallwood & Paez (1993) Shock Vib. 1, 45; Kaufman & Worth, NTRS 20000114846",
-     "checks": [
-      "random_vibration"
-     ],
-     "checked": "Welch PSD within 0.73 dB of the spec, Grms within 0.2%, kurtosis 2.993, skewness 0.005, spline vs exact band-limited signal 2.4e-6 sigma (random_vibration).",
-     "limits": "No measured flight PSD of this vehicle is public: the guide's level is a ground acceptance test, ~11-12 dB above the one public flight measurement on a related rocket. The flight runs therefore do not include burn vibration; the vibration scenario applies the test level as an upper bound."
-    }
-   ]
-  },
   {
    "title": "Contact physics (decides stick or bounce)",
    "items": [
@@ -234,14 +108,14 @@
      "code": "simulation.py: _fragment, _separate, _detach, _split_disconnected",
      "origin": "derived",
      "rebound": "none",
-     "basis": "The only energy available is what the bounce actually removed from the rigid bodies, E_diss = P.v_rel - P.K.P/2 (exact for any impact geometry). Each broken contact costs E_break. If E_diss cannot pay for a shatter, the struck grain is eroded instead; if it cannot pay for that either, nothing breaks. Fragments separate radially with the rest, solved so their kinetic energy rises by exactly that amount (momentum and angular momentum conserved). Grains left without a contact become separate bodies.",
+     "basis": "The only energy available is what the bounce actually removed from the rigid bodies, E_diss = P.v_rel - P.K.P/2 (exact for any impact geometry). Each broken contact costs E_break. If E_diss cannot pay for a shatter, the struck grain is eroded instead; if it cannot pay for that either, nothing breaks. Fragments separate radially with the fraction contact.fragment_separation of the rest (default 1, ASSUMED), solved so their kinetic energy rises by exactly that amount (momentum and angular momentum conserved). The contacts are the bonds stored when grains stuck (a grain that sticks to a spinning body is placed up to 1.25e-3 of its distance from the centre of mass from touching, which a distance test would miss); grains left without a bond become separate bodies.",
      "refs": "",
      "checks": [
       "fragmentation_energy",
       "conservation"
      ],
-     "checked": "Every impact is measured just before and after it is resolved. The cases are grains hitting spinning chains and L-shaped aggregates at 0.02-3 m/s from random directions and offsets, spinning aggregates hitting a wall, and a closed box of 300 spinning graphite grains: ~1200 impacts, ~95 with fragmentation. Kinetic plus bond energy never increases (max 1e-13 of the impact energy), and no aggregate keeps grains that no longer touch. Momentum is conserved to 1e-16.",
-     "limits": "How a real impact splits its dissipated energy between heat and breaking contacts is unknown. Here all of it may go into breaking contacts."
+     "checked": "Every impact is measured just before and after it is resolved. The cases are grains hitting spinning chains and L-shaped aggregates at 0.02-3 m/s from random directions and offsets, spinning aggregates hitting a wall, and a closed box of 300 spinning graphite grains: ~1200 impacts, ~95 with fragmentation. Kinetic plus bond energy never increases (max 1e-13 of the impact energy), and no aggregate keeps grains its bonds do not hold. Momentum is conserved to 1e-16.",
+     "limits": "How a real impact splits its dissipated energy between heat, breaking contacts and the fragments' motion is unknown. The 1-D contact model counts all of E_diss as heat; giving the rest back as separation energy is ASSUMED. Its size on the 3-D page's two-tubule start: 1-6 E_break, 3-10 mm/s per fragment. The opposite bound (fragment_separation 0) changes the grain-grain impacts / sticks of 6 seeds x 100 grains from 97/21 to 98/22 (silica) and 87/82 to 88/83 (graphite) (tests/test_dolle_core_sim3d.py test_separation_bound_in_both_engines)."
     },
     {
      "component": "Wall contacts and coatings",
@@ -410,7 +284,7 @@
       "brownian"
      ],
      "checked": "2000 grains settle to <m v^2> = kT within 0.7%.",
-     "limits": "Negligible for 100 um grains (~2 um/s)."
+     "limits": "Negligible for 100 um grains (~2 um/s, 3e-4 of silica's 6.2 mm/s sticking speed (python -m dolle_sim preflight, flight demo config)). Off by default since v0.7; switch on with forces.brownian (pre-flight warns above 1% of the sticking speed)."
     },
     {
      "component": "Thermophoresis",
@@ -434,7 +308,7 @@
      "refs": "Rohatschek (1995) J. Aerosol Sci. 26, 717 (general theory)",
      "checks": [],
      "checked": "No independent check. A unit test confirms that the code evaluates this formula.",
-     "limits": "Free-molecular limit only (Kn >> 1, below ~10 Pa for 100 um grains). The code applies it at any pressure and overestimates the force above ~10-100 Pa (pre-flight warns below Kn = 10). J1 = absorptivity/2 assumes absorption at the lit surface; transparent grains can be pushed either way (not modelled). No shadowing. Bulk conductivity."
+     "limits": "Free-molecular limit only (Kn >> 1, below ~10 Pa for 100 um grains). The code applies it at any pressure and overestimates the force above ~10-100 Pa (pre-flight warns below Kn = 10). J1 = absorptivity/2 assumes absorption at the lit surface; transparent grains can be pushed either way (not modelled). No shadowing. Bulk conductivity. Off by default since v0.7: 1.8e-7 g (graphite) and 7.8e-7 g (silica), 0.18% and 0.78% of the 1e-4 g residual acceleration (python -m dolle_sim preflight, flight demo config); switch on with forces.photophoresis (pre-flight warns above 5%)."
     },
     {
      "component": "Radiation pressure",
@@ -445,7 +319,7 @@
      "refs": "",
      "checks": [],
      "checked": "No check. The effect is tiny (~1e-6 g).",
-     "limits": "Q_pr between 1 (black) and 0.3 (transparent) is a heuristic, not computed from Mie theory."
+     "limits": "Q_pr between 1 (black) and 0.3 (transparent) is a heuristic, not computed from Mie theory. Off by default since v0.7: 2.2e-6 g (graphite) and 8.5e-7 g (silica), 2.2% and 0.85% of the 1e-4 g residual acceleration (python -m dolle_sim preflight, flight demo config); switch on with forces.radiation_pressure (pre-flight warns above 5%)."
     },
     {
      "component": "Gravity gradient (tidal)",
@@ -456,7 +330,7 @@
      "refs": "",
      "checks": [],
      "checked": "No automated check. Negligible: at most ~3e-8 g per 10 cm from the rocket's centre of mass.",
-     "limits": "Point-mass Earth, fixed altitude. The payload's own gravity is not modelled (~1e-8 g, our estimate)."
+     "limits": "Point-mass Earth, fixed altitude. The payload's own gravity is not modelled (~1e-8 g, our estimate). Off by default since v0.7: 9.5e-8 g at the far corner of the chamber, 0.1% of the 1e-4 g residual acceleration (python -m dolle_sim preflight, flight demo config); switch on with environment.gravity_gradient (pre-flight warns above 5%)."
     },
     {
      "component": "Mutual gravity",
@@ -467,7 +341,7 @@
      "refs": "",
      "checks": [],
      "checked": "Included in the REBOUND comparison. Negligible (~1e-12 g).",
-     "limits": "Truncated at the pair cutoff (negligible)."
+     "limits": "Truncated at the pair cutoff (negligible). Off by default since v0.7: 7.8e-13 g at contact, 8e-9 of the 1e-4 g residual acceleration (python -m dolle_sim preflight, flight demo config); switch on with forces.self_gravity."
     }
    ]
   },
@@ -516,7 +390,7 @@
      "code": "atmosphere.py: density",
      "origin": "published",
      "rebound": "none",
-     "basis": "Air density from the ground to 250 km from NRLMSIS 2.1, the U.S. Naval Research Laboratory's empirical atmosphere model. It was evaluated once with pymsis (MIT licence) for the launch site (37.9 N, 75.5 W) in June at moderate solar activity (F10.7 = 150, Ap = 4) and stored as a 1 km table (tools/make_atmosphere.py regenerates it). Values: 1.19 kg/m^3 at sea level, 4.2e-7 at 100 km.",
+     "basis": "Air density from the ground to 250 km from NRLMSIS 2.1, the U.S. Naval Research Laboratory's empirical atmosphere model. It was evaluated once with pymsis (MIT licence) for the launch site (37.9 N, 75.5 W) in June at moderate solar activity (F10.7 = 150, Ap = 4) and stored as a 1 km table (extras/tools/make_atmosphere.py regenerates it). Values: 1.19 kg/m^3 at sea level, 4.2e-7 at 100 km.",
      "refs": "Emmert et al. (2021) Earth Space Sci. 8, e2020EA001321; Emmert et al. (2022) JGR Space Phys. 127, e2022JA030896; pymsis (G. Lucas, LASP/SWx TREC)",
      "checks": [],
      "checked": "The table matches the model output by construction. Sea-level and 100 km values are within ~3% and ~25% of the US Standard Atmosphere 1976.",
@@ -677,7 +551,7 @@
      "refs": "",
      "checks": [],
      "checked": "No automated check. Negligible (< 1e-12 g).",
-     "limits": "The velocity-dependent Lorentz term is treated explicitly. The motional field from the rocket's own speed is not included."
+     "limits": "The velocity-dependent Lorentz term is treated explicitly. The motional field from the rocket's own speed is not included. Both off by default since v0.7: Lorentz 4.9e-13 g (graphite), 5e-9 of the 1e-4 g residual acceleration, and no config sets an E field (python -m dolle_sim preflight, flight demo config); switch on with forces.lorentz and forces.external_e_field."
     },
     {
      "component": "Pair-force limiter",
@@ -758,17 +632,6 @@
      "checks": [],
      "checked": "tests/test_sizes.py: percentile fits recover the log-normal exactly; 200,000 samples reproduce the volume percentiles to 0.5%; a sieve range with a stated fraction inside it gives that fraction.",
      "limits": "A sieve range alone does not fix the shape inside the band. With a stated fraction the code assumes a log-normal centred on the band; without one, a distribution uniform in ln d. Both are assumptions, and the pre-flight report warns about them (and about truncation, which changes the stated percentiles). Suppliers rarely say whether 'x% in range' is by number or by mass. Real powders may not be log-normal; the fit reports its misfit. Grains are spheres."
-    },
-    {
-     "component": "Measuring grain sizes from micrographs",
-     "code": "sizing.py: measure_image, segment, synthetic_image",
-     "origin": "standard",
-     "rebound": "none",
-     "basis": "Uses the standard scikit-image recipe. It applies an Otsu threshold, fills holes, removes specks and grains cut by the image border, and splits touching grains by a watershed seeded with the extended maxima of the distance transform (so isolated elongated grains are not cut up). Each grain's size is its area-equivalent circle diameter (ISO 13322-1), scaled by a stage-micrometer calibration. Run it with python -m dolle_sim sizes --image.",
-     "refs": "van der Walt et al. (2014) PeerJ 2, e453 (scikit-image); Otsu (1979) IEEE Trans. SMC 9, 62; ISO 13322-1:2014; Soille (2003) Morphological Image Analysis, 2nd ed. (extended maxima)",
-     "checks": [],
-     "checked": "tests/test_sizes.py: on synthetic images of 120 grains of known size (~40 px, with and without touching pairs) and of 150 grains of ~20 px, the count is within 2 and the median diameter within 1%. Isolated rods, ellipses and irregular flakes are kept whole, and touching pairs up to a 2.5:1 size ratio are split.",
-     "limits": "Not yet tested on real micrographs. Validate it on a certified reference powder (e.g. NIST SRM 1004b glass beads) and count several hundred grains. It needs grains in one focal plane, few overlaps and about 20 px or more across each grain. Non-spherical grains (graphite flakes) are reported as area-equivalent spheres. Clusters of touching flakes may be split wrongly (use --no-split to check)."
     }
    ]
   },
@@ -827,7 +690,7 @@
    "items": [
     {
      "component": "REBOUND comparison",
-     "code": "rebound_check.py (optional)",
+     "code": "extras/dolle_extras/rebound_check.py (optional)",
      "origin": "standard",
      "rebound": "uses REBOUND",
      "basis": "Re-runs a simplified chamber in REBOUND, a widely used N-body code: point-mass grains, residual gravity, payload spin, drag, mutual gravity, stick/bounce, static walls. Part 1 integrates every grain that has no collision during the first 0.2 s with REBOUND's IAS15. It uses the same equations of motion: we type the residual-acceleration, centrifugal, Coriolis and drag terms into REBOUND, and REBOUND computes mutual gravity. Part 2 runs 60 s with REBOUND's leapfrog and its 'line' collision detection.",
@@ -838,7 +701,7 @@
     },
     {
      "component": "LAMMPS comparison",
-     "code": "lammps_check.py (optional)",
+     "code": "extras/dolle_extras/lammps_check.py (optional)",
      "origin": "standard",
      "rebound": "none",
      "basis": "Re-runs two contact tests in LAMMPS, a widely used open-source particle code with its own JKR implementation (GRANULAR package; its source uses the same force law, overlap-radius relation and modulus mixing as DOLL-E). Test 1: undamped head-on collisions of equal spheres, giving the sticking threshold and the restitution. Test 2: a grain resting on a flat wall under a slowly increasing body force, giving the detachment force.",
@@ -849,13 +712,13 @@
     },
     {
      "component": "Why not build on REBOUND or LAMMPS",
-     "code": "lammps_check.py (optional); rebound_check.py (optional)",
+     "code": "extras/dolle_extras/lammps_check.py (optional); extras/dolle_extras/rebound_check.py (optional)",
      "origin": "standard",
      "rebound": "none",
      "basis": "Both were checked against their source code and documentation (October 2026). REBOUND 5.2 (GPL-3.0) has only open, periodic and shear boundaries (no walls), no grain spin or inertia, no aggregates (stuck grains merge into one sphere), no gas drag, electrostatics or adhesive contact. Its collision hook runs at the end of a step with no contact time; the default IAS15 integrator adapts its step, but to gravitational accuracy. LAMMPS (GRANULAR) has hysteretic JKR, friction, rolling resistance, JKR walls that can vibrate, breakable bonds, rotating-frame forces through standard fixes and linear drag (Epstein drag is scriptable with variables but unvalidated). It moves every grain with one global step. A plugin could add a new integrator, but every existing granular pair style and fix assumes that step. It also has no sticking-driven merging into rigid aggregates and no contact charging.",
      "refs": "REBOUND github.com/hannorein/rebound (v5.2.2); Rein & Liu (2012) A&A 537, A128; LAMMPS docs (pair_style granular, run_style, plugin, Howto_bpm); Thornton & Ning (1998); Chokshi et al. (1993); Haervig et al. (2017) Powder Technol.; Chen et al. (2019); Washino et al. (2024)",
      "checks": [],
-     "checked": "tools/lammps_benchmark.py: 2.3e7 grain-steps per second per core with the grains in flight (no contacts) and 6.1e6 with the settled layer (every grain in a JKR wall contact). At 20% of the Rayleigh time (10 ns) that is 13-49 core-days per tubule from lift-off to power-off, 35-130 to splashdown, 1-4 hours per tubule-second. DOLL-E takes 3 minutes to 10 hours for a whole mission (four tubules, lift-off to splashdown, 4 cores; the slow end is the 500 g shaker). Softening the grains raises the JKR sticking speed as E^-1/3. The standard correction gamma x (E_soft/E)^(2/5) keeps it, but cuts the wall pull-off force by the same factor (16x at E/1000), and pull-off decides launch and release.",
+     "checked": "extras/tools/lammps_benchmark.py: 2.3e7 grain-steps per second per core with the grains in flight (no contacts) and 6.1e6 with the settled layer (every grain in a JKR wall contact). At 20% of the Rayleigh time (10 ns) that is 13-49 core-days per tubule from lift-off to power-off, 35-130 to splashdown, 1-4 hours per tubule-second. DOLL-E takes 3 minutes to 10 hours for a whole mission (four tubules, lift-off to splashdown, 4 cores; the slow end is the 500 g shaker). Softening the grains raises the JKR sticking speed as E^-1/3. The standard correction gamma x (E_soft/E)^(2/5) keeps it, but cuts the wall pull-off force by the same factor (16x at E/1000), and pull-off decides launch and release.",
      "limits": "Measured on one laptop core while other work ran; LAMMPS parallelises with MPI, which divides the wall time but not the core-days. DOLL-E's event-driven design trades two approximations for speed: rigid aggregates and the Dominik & Tielens fragmentation thresholds. A full-stiffness LAMMPS run of the seconds after a release is affordable (1-4 hours per tubule-second) and would test them."
     }
    ]

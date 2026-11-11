@@ -1,13 +1,13 @@
 # How the v0.6 engine decides: every decision, its test, its reason, and the check that verifies it
 
-This is a map of the full-contact flight engine (`dolle_sim/engine.py`, class `FullContactSim`) for readers who want to
+This is a map of the full-contact flight engine (`extras/dolle_extras/engine.py`, class `FullContactSim`) for readers who want to
 follow or audit its logic without reading 3000 lines of code. For every decision the engine makes it gives the test
 as the code applies it, the function that applies it, why it is there, whether the result is **exact** (the full
 contact model would do the same) or **bounded** (any difference is limited by a stated, computed quantity), and the
 check or test that verifies it. Function names are written `module.function`; the test
-`tests/test_engine_logic_doc.py` fails if any function or check named here stops existing, so this page cannot
+`extras/tests/test_engine_logic_doc.py` fails if any function or check named here stops existing, so this page cannot
 silently go out of date. Checks are named `check:<id>` (their results, criteria and measured values are in
-[CHECKS.md](../CHECKS.md)); checks still being written are marked `planned:<id>`.
+[CHECKS.md](../../CHECKS.md)); checks still being written are marked `planned:<id>`.
 
 The design history of the newest part (clusters that sleep at their contact limits) is in
 [design/at-limit-sleep/](design/at-limit-sleep/README.md). Where every model and number comes from (papers, data,
@@ -133,14 +133,14 @@ Full description, flowchart, and the finding-by-finding derivation: [design/at-l
 | # | decision | test, as applied | function | why | exact / bounded | verified by |
 |---|---|---|---|---|---|---|
 | E0 | may this cluster sleep at all | no fast load or breakpoint in the next step; contact system = touching contacts + every member pair or member-wall pair within 2 d_cap (inactive); the elastic stiffness factorises | `engine.FullContactSim._try_sleep_island`, `engine.FullContactSim._island_near` | the inactive pairs reveal a contact about to form | exact | `check:cap_sleep_vs_dem` |
-| E1 | where to place it | exact equilibrium of the current load from the full model's state by Newton with the limits lifted (per-degree-of-freedom tolerances 1e-6 of the force and torque limits); tier 1 if every sliding, rolling, twisting ratio there is <= 1 + 1e-6, else the real contact law's return map with its consistent tangent (tier 2); a mechanism or no convergence refuses | `statics.solve_equilibrium`, `statics.lift_caps`, `statics.released_stiffness`, `engine.FullContactSim._island_tangent`, `engine.FullContactSim._island_tols` | the placed state must be the contact law's own equilibrium | exact to 1e-6 of the limits | `test_solve_equilibrium_creeps_with_the_released_tangent_and_reports_mechanisms_and_transitions` and the other tests in `tests/test_statics_caps.py` |
+| E1 | where to place it | exact equilibrium of the current load from the full model's state by Newton with the limits lifted (per-degree-of-freedom tolerances 1e-6 of the force and torque limits); tier 1 if every sliding, rolling, twisting ratio there is <= 1 + 1e-6, else the real contact law's return map with its consistent tangent (tier 2); a mechanism or no convergence refuses | `statics.solve_equilibrium`, `statics.lift_caps`, `statics.released_stiffness`, `engine.FullContactSim._island_tangent`, `engine.FullContactSim._island_tols` | the placed state must be the contact law's own equilibrium | exact to 1e-6 of the limits | `test_solve_equilibrium_creeps_with_the_released_tangent_and_reports_mechanisms_and_transitions` and the other tests in `extras/tests/test_statics_caps.py` |
 | E2 | pull-off | pull-off ratio <= 0.98 now and at the step end with the residual's largest effect; no contact broke, formed or yielded in the solve | `engine.FullContactSim._try_sleep_island` | a contact near pull-off is a real instability | exact | `check:cap_sleep_vs_dem` |
 | E3 | can the left-over motion ratchet a contact at its limit | left-over energy = kinetic energy of the motion relative to the drift of the equilibrium under the step's load change (the larger of the elastic and the released system; the kinetic energy itself under a constant load) + the elastic deviation from the equilibrium; for every component near its limit, its slip bound in the released system (springs at their limits removed, iterated until every component it brings near its limit is released) + dashpot shift <= 1e-3 of its deflection at the limit; the contacts with no component near a limit keep the 1%-of-remaining-margin test (the motion is dropped) | `engine.FullContactSim._island_ratchet`, `engine.FullContactSim._island_drift`, `statics.energy_bounds` | at a limit the load, not the left-over energy, does the plastic work | bounded, one-time per entry, counted in the budget | `check:ratchet_released_bound`, `test_entry_ratchet_releases_every_component_it_finds_near_its_cap`, `test_entry_dropping_a_residual_keeps_the_one_percent_test_for_contacts_far_from_their_caps` |
 | E4 | will it hold | the first step's certificate passes on the candidate; tier 1 also holds when extrapolated over 20 steps, else tier 2; no other sleeper within that step's reach | `engine.FullContactSim._island_advance`, `engine.FullContactSim._sleepers_near` | do not place a cluster that would wake at once; only accepted candidates are written | exact | `check:cap_sleep_vs_dem` |
 | S1 | tier 1 each step | exact elastic equilibria at the end and middle of the step; every bounded sliding, rolling, twisting ratio <= 1 + 1e-6 with D = row norms x (chord deviation + 2 x the Newton residuals at end, start and mid-step + long-range change + drift dynamics) + 2 x mid-step nonlinearity; pull-off <= 0.98; nothing breaks, forms or yields; budget not spent | `engine.FullContactSim._island_advance`, `loads.Loads.chord_dev`, `loads.Loads.spin_chord`, `engine.FullContactSim._island_row_norms`, `engine.FullContactSim._island_fdyn` | the real law never reaches a limit in the step, so no plastic variable changes | exact (to 1e-6 of the limits) | `check:between_sample_bound`, `check:cap_sleep_vs_dem` |
 | S2 | tier 2 each step | real law's return map solved to equilibrium, once whole and as two half steps; motion <= 1e-9 m, flow <= 5% and half-step difference <= 1e-3 of the deflection at the limit per step; no twist resolved from a round-off rate; every tolerated term summed, with the excursion beyond the chord (released structure and the limit's change with the normal force) and the Newton residuals through the released structure, and the dynamics' lag as its running maximum (ASSUMED not to accumulate: design record, deviation 5); wake when the total reaches 1e-2 of the deflection at the limit | `engine.FullContactSim._island_advance`, `statics.flow_increments`, `statics.twist_ambiguous` | a growing load makes a pile creep; the creep is resolved, not frozen | bounded and budgeted; reported as `island_bound_xi`, `island_newton_rel`, `island_dyn_rel` | `check:creep_island_vs_dem`, `test_creep_step_charges_an_excursion_beyond_the_chord_through_the_released_structure_and_the_caps` |
 | S3 | step-end loads | taken just before any breakpoint | `loads.Loads.accel`, `loads.Loads.omega_dot`, `engine.FullContactSim._island_load` | a cluster certified up to a jump is committed at the pre-jump equilibrium; the full model resolves the jump | exact | `check:island_across_breakpoint` |
-| S4 | commit | an island's end state is written only after the whole step has been verified (D2); a redo discards it | `engine.FullContactSim._island_commit`, `engine.FullContactSim.step` | redo discipline | exact | tests in `tests/test_full_engine.py` |
+| S4 | commit | an island's end state is written only after the whole step has been verified (D2); a redo discards it | `engine.FullContactSim._island_commit`, `engine.FullContactSim.step` | redo discipline | exact | tests in `extras/tests/test_full_engine.py` |
 | S5 | two sleepers | every step and every skip sample, two sleepers of different groups (islands, single grains) whose gap could close within the step (gap <= the sum of their drift allowances s_isl, which covers out-and-back loads and the chain of deflections down a stack) both wake | `engine.FullContactSim._sleeper_contacts`, `engine.FullContactSim._island_advance` | an island's own system lists only its members and walls; a drifting island could otherwise close a gap to its neighbour unseen | exact (any positive gap left: the full model resolves the approach) | `test_sleeping_island_wakes_when_it_could_touch_another_sleeper`, `test_drift_allowance_covers_an_out_and_back_load_through_a_stack` |
 | W1 | wake | reasons counted as `island_wake_<reason>`: fast, loading, pulloff, break, yield, newcontact, mechanism, newton, motion, flow, twist, path, budget, approach, neighbour; placed at the committed state (step start) or by the same solve to the current load (mid-step, accepted if it moves no member by more than this step's drift allowance), at rest; a tier-0 island at a breakpoint by its linear response to the load just before it; a placement that would break a contact is not used (`island_wake_fallback`) | `engine.FullContactSim._wake_island` | the full model takes over from an exact equilibrium | exact | `check:cap_sleep_vs_dem`, `test_mid_step_wake_tests_its_placement_against_this_steps_allowance` |
 
@@ -164,7 +164,7 @@ twisting) term by term. The comparison table is in CHECKS.md; the sources of eac
 |---|---|---|---|---|---|
 | M1 | continue a run under another scenario | allowed only if a fresh run of the target differs from a fresh run of the saved one in the release schedule and flight-profile options alone, and every load is identical up to the checkpoint (sampled every ms and at every breakpoint) | `engine.branch` | scenarios share their common start exactly | `test_branch_from_checkpoint_is_exact` |
 | M2 | resume after a crash | every 30 min a tubule job saves its whole state; a rerun of the same configuration continues from it, bit-for-bit the uninterrupted run (within one code version) | `engine.FullContactSim.save_autosave`, `mission.run_tubule` | multi-day runs on a laptop | `test_killed_tubule_run_continues_from_its_autosave` |
-| M3 | dust amount | 100 grains per tubule in every scenario | `tools/run_campaign.py` (GRAINS) | the team has not decided the amount; 800 would cost weeks; equal amounts keep scenarios comparable | stated in README |
+| M3 | dust amount | 100 grains per tubule in every scenario | `extras/tools/run_campaign.py` (GRAINS) | the team has not decided the amount; 800 would cost weeks; equal amounts keep scenarios comparable | stated in extras/docs/CAMPAIGN.md |
 
 ## 4. Constants and why they have their values
 
@@ -194,7 +194,7 @@ twisting) term by term. The comparison table is in CHECKS.md; the sources of eac
    and finds it within the bound of both versions, and finds no difference between the lowest frequency of the
    elastic and of the released stiffness for a grain in an edge; the derivation is verified only for the scenes of
    checks 14, 16 and 18.
-3. **Checks 14-19** pass (`python -m pytest tests/test_full_engine.py -k full_engine_check`). They found three faults,
+3. **Checks 14-19** pass (`python -m pytest extras/tests/test_full_engine.py -k full_engine_check`). They found three faults,
    fixed: the lifted contact law applied at zero displacement changed a sleeping cluster's springs by
    round-off every step (`statics.solve_equilibrium` now returns the reference state itself there); `_skip_asleep`
    skipped from a load breakpoint; and the entry energy of item 2. A unit test found a fourth: `_skip_asleep`
@@ -204,10 +204,10 @@ twisting) term by term. The comparison table is in CHECKS.md; the sources of eac
 ## 6. How to check any of this yourself
 
 ```bash
-python -m pytest tests -q
-python -m dolle_sim verify --json results/verify_all.json
+python -m pytest extras/tests -q
+python -m dolle_extras verify --json results/verify_extras.json
 python tools/checks_table.py
 ```
 
-The first runs every unit test and every engine check; the second writes every check's measured value; the third
+The first runs every unit test of the engine and every engine check; the second writes every check's measured value; the third
 turns those values into CHECKS.md. A decision above whose check fails is wrong until it is fixed.

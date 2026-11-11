@@ -5,9 +5,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dolle_sim import verify_full as V
+from dolle_extras import verify_full as V
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.parametrize("check", V.CHECKS, ids=lambda f: f.__name__)
@@ -17,7 +17,7 @@ def test_full_engine_check(check):
 
 
 def test_jkr_closed_form_matches_newton():
-    from dolle_sim import dem
+    from dolle_extras import dem
     from dolle_sim.contact import JKRContact
     from dolle_sim.materials import get_material, pair_props
     s = get_material("silica")
@@ -29,7 +29,7 @@ def test_jkr_closed_form_matches_newton():
 
 def test_loads_release_waveform_is_whole_cycles_from_rest():
     """A kick is one full cycle of tubule acceleration: no velocity left over, no jump at the start."""
-    from dolle_sim.engine import FullContactSim
+    from dolle_extras.engine import FullContactSim
     m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
     from dolle_sim.mission import apply_scenario, mission_cfg, tubule_chamber
     m = apply_scenario(m, "kick")
@@ -50,12 +50,15 @@ def test_full_engine_mission_smoke(tmp_path):
     accounted for, nothing comes off while the 25 g boost presses the dust down (burn 1, T+0-5.2 s), the summary is
     written. (In the coast a grain rolling outward can knock a resting one off the floor: that is physics.)"""
     from dolle_sim.mission import run_mission
+    from dolle_extras.full_mission import run_args
     m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
+    m["engine"] = "full"                       # (dolle_sim runs only the v0.5 engine; the runner is the v0.6 one)
     m["tubules"] = m["tubules"][:1]
     m["tubules"][0]["dust"]["count"] = 20
     m["simulate_to_s"] = 6.0
-    summary, sims = run_mission(m, tmp_path, jobs=1)
+    summary, sims = run_mission(m, tmp_path, jobs=1, runner=run_args)
     t = summary["tubules"][0]
+    assert "dem_steps" in t["events"]          # it ran the full-contact engine
     assert t["n_grains"] == 20
     assert sum(t["wall_bound_by_face"].values()) + t["free_at_end"] == 20
     assert t["detachments_by_phase"]["first-stage burn"] == 0
@@ -66,7 +69,7 @@ def test_full_engine_mission_smoke(tmp_path):
 def test_cluster_sleeps_and_wakes_whole():
     """Two touching grains on a floor settle in the full model, go to sleep as one cluster (the exact energy-ellipsoid
     bound), and a forced wake of one member wakes both at the cluster's static equilibrium, at rest."""
-    from dolle_sim.engine import FullContactSim, ACTIVE, ASLEEP
+    from dolle_extras.engine import FullContactSim, ACTIVE, ASLEEP
     cfg = {"dt_s": 1e-3, "duration_s": 0.3, "output_fps": 100,
            "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": [0.0, 0.0, -1.0]},
            "contact": {"contact_charging": False}, "forces": {}}
@@ -93,7 +96,7 @@ def test_checkpoint_with_sleeping_cluster_is_exact():
     """A state holding a sleeping cluster (its factorised stiffness is not picklable and is rebuilt on loading)
     saves, loads and continues bit-for-bit as the run kept in memory."""
     import pickle
-    from dolle_sim.engine import FullContactSim, ACTIVE, ASLEEP
+    from dolle_extras.engine import FullContactSim, ACTIVE, ASLEEP
     cfg = {"dt_s": 1e-3, "duration_s": 0.3, "output_fps": 100,
            "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": [0.0, 0.0, -1.0]},
            "contact": {"contact_charging": False}, "forces": {}}
@@ -121,7 +124,7 @@ def test_checkpoint_with_sleeping_cluster_is_exact():
 def test_branch_from_checkpoint_is_exact(tmp_path):
     """A run continued from another scenario's checkpoint (identical up to it) is bit-for-bit the run of its own
     scenario from lift-off; a branch into a scenario that differs earlier is refused."""
-    from dolle_sim.engine import FullContactSim, branch
+    from dolle_extras.engine import FullContactSim, branch
     from dolle_sim.mission import apply_scenario, mission_cfg, tubule_chamber
     base = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
     kick = [{"type": "kick", "start_s": 4.0, "cycles": 1, "frequency_hz": 5000, "peak_g": 2000.0, "axis": "z"}]
@@ -152,7 +155,7 @@ def test_branch_from_checkpoint_is_exact(tmp_path):
 
 
 def _scene(n, size=0.002, g=(0.0, 0.0, -1.0)):
-    from dolle_sim.engine import FullContactSim
+    from dolle_extras.engine import FullContactSim
     cfg = {"dt_s": 1e-3, "duration_s": 0.3, "output_fps": 100,
            "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": list(g)},
            "contact": {"contact_charging": False}, "forces": {}}
@@ -169,7 +172,7 @@ def test_rolling_grain_wall_bound_assumes_no_direction():
     """A rolling grain's envelope bounds how far it rolls, not in which direction (Coriolis, the rolling resistance
     and the load along the wall turn it): rolling parallel to a side wall 10 um away at 10 mm/s, its capture time
     for that wall is at most (gap - d_cap) / |v|."""
-    from dolle_sim.engine import ROLL
+    from dolle_extras.engine import ROLL
     S = _scene(1)
     R, T0 = 50e-6, float(S.env.t0_flight)
     S.x[0] = [S.L[0] - R - 10e-6, 1e-3, R]
@@ -190,7 +193,7 @@ def test_rolling_grain_wall_bound_assumes_no_direction():
 def test_grains_leaving_together_have_their_speed_bounds_checked():
     """Grains that leave the DEM in one call (each relying on the others' speed bounds) and rejoin later are in the
     speed record of that call, so their speed after rejoining is checked against what the others assumed."""
-    from dolle_sim.engine import ACTIVE
+    from dolle_extras.engine import ACTIVE
     S = _scene(4, g=(0.0, 0.0, 0.0))
     R, c = 50e-6, 1e-3
     S.x[0] = [c, c, c]
@@ -224,7 +227,7 @@ def test_contact_formed_outside_the_dem_is_redone():
 def test_vibration_window_ends_are_one_sided_and_bounded():
     """A step that starts where the vibration ends feels none of it, a step that ends there feels its last value, and
     the bound over an interval touching a window end includes the end value."""
-    from dolle_sim.vibration import VibrationHistory
+    from dolle_extras.vibration import VibrationHistory
     h = VibrationHistory(1.0, 20000.0, np.random.default_rng(0).normal(size=(3, 201)))
     end = np.array([h.t0 + h.T])
     assert np.all(h.accel(end, "+") == 0.0) and np.any(h.accel(end, "-") != 0.0)
@@ -234,7 +237,7 @@ def test_vibration_window_ends_are_one_sided_and_bounded():
 
 def test_engine_refuses_loads_it_cannot_bound():
     """g-jitter is random with no bound, so the full-contact engine refuses it rather than ignoring it."""
-    from dolle_sim.engine import FullContactSim
+    from dolle_extras.engine import FullContactSim
     cfg = {"dt_s": 1e-3, "duration_s": 1e-3, "output_fps": 100,
            "environment": {"preset": "ideal", "pressure_pa": 0.0, "jitter_rms_g": 1e-3},
            "contact": {"contact_charging": False}, "forces": {}}
@@ -249,25 +252,29 @@ def test_tubule_by_tubule_run_is_the_mission_run(tmp_path):
     """A campaign may run a scenario's tubules one by one (run_tubule) and assemble the outputs: the result is
     exactly run_mission's (same configurations and seeds)."""
     from dolle_sim.mission import run_mission, run_tubule, assemble_mission
+    from dolle_extras.full_mission import run_args
     m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
+    m["engine"] = "full"
     m["tubules"] = m["tubules"][:2]
     for t in m["tubules"]:
         t["dust"]["count"] = 12
     m["simulate_to_s"] = 2.0
-    s1, sims1 = run_mission(m, tmp_path / "a", jobs=1, write_outputs=False)
+    s1, sims1 = run_mission(m, tmp_path / "a", jobs=1, write_outputs=False, runner=run_args)
     for i in range(2):
-        run_tubule(m, tmp_path / "b", None, i)
+        run_tubule(m, tmp_path / "b", None, i, runner=run_args)
     s2, sims2 = assemble_mission(m, tmp_path / "b", write_outputs=False)
     for s in (s1, s2):                                          # computing time differs, of course
         for t in s["tubules"]:
             t.pop("wall_time_s", None)
     assert json.dumps(s1, sort_keys=True, default=str) == json.dumps(s2, sort_keys=True, default=str)
+    assert "dem_steps" in s1["tubules"][0]["events"]
     for a, b in zip(sims1, sims2):
         assert all(np.array_equal(getattr(a, k), getattr(b, k)) for k in ("x", "v", "w", "regime"))
 
 
 def test_campaign_cli_tubule_jobs_and_assemble(tmp_path):
-    """The command lines the campaign runs: one tubule at a time (`mission --tubule i`), then `mission --assemble`."""
+    """The command lines the campaign runs: one tubule at a time (`python -m dolle_extras mission --tubule i`), then
+    `mission --assemble`. dolle_extras runs the full-contact engine unless the config names another."""
     import subprocess
     import sys
     m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
@@ -279,26 +286,29 @@ def test_campaign_cli_tubule_jobs_and_assemble(tmp_path):
     cfg.write_text(json.dumps(m))
     out = tmp_path / "out"
     for arg in (["--tubule", "0"], ["--tubule", "1"], ["--assemble"]):
-        r = subprocess.run([sys.executable, "-m", "dolle_sim", "mission", str(cfg), "--out", str(out), *arg],
-                           cwd=ROOT, capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-m", "dolle_extras", "mission", str(cfg), "--out", str(out), *arg],
+                           cwd=ROOT, capture_output=True, text=True)       # (conftest.py sets PYTHONPATH)
         assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     s = json.loads((out / "mission_summary.json").read_text())
     assert [t["n_grains"] for t in s["tubules"]] == [8, 8]
+    assert "dem_steps" in s["tubules"][0]["events"]
 
 
 def test_killed_tubule_run_continues_from_its_autosave(tmp_path):
     """A tubule run killed part-way (out of memory, reboot) and started again continues from its last autosave; the
     result is bit-for-bit the uninterrupted run, and an autosave of another configuration is not used."""
     import pickle
-    from dolle_sim import engine
-    from dolle_sim.mission import _tubule_args, _run_one, autosave_path, run_tubule
+    from dolle_extras import engine
+    from dolle_extras.full_mission import run_args
+    from dolle_sim.mission import _tubule_args, autosave_path, run_tubule
     m = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())
+    m["engine"] = "full"
     m["tubules"] = m["tubules"][:1]
     m["tubules"][0]["dust"]["count"] = 40
     m["simulate_to_s"] = 6.0                     # through burnout (grains wake, roll and collide)
     m["autosave_s"] = 0.0                        # save at every outer step
     _, _, args = _tubule_args(m, tmp_path / "a", None)
-    A = _run_one(args[0])                        # uninterrupted
+    A = run_args(args[0])                        # uninterrupted
     assert A.n_events["active_grain_steps"] > 0
     run = engine.FullContactSim.run
     calls = {"n": 0}
@@ -312,14 +322,14 @@ def test_killed_tubule_run_continues_from_its_autosave(tmp_path):
     engine.FullContactSim.run = killed
     try:
         with pytest.raises(MemoryError):
-            run_tubule(m, tmp_path / "b", None, 0)
+            run_tubule(m, tmp_path / "b", None, 0, runner=run_args)
     finally:
         engine.FullContactSim.run = run
     auto = autosave_path(tmp_path / "b", A.name)
     with open(auto, "rb") as f:
         mid = pickle.load(f)
     assert 0.5 * A.duration < mid.t < A.duration
-    path = run_tubule(m, tmp_path / "b", None, 0)    # started again: continues from the autosave
+    path = run_tubule(m, tmp_path / "b", None, 0, runner=run_args)    # started again: continues from the autosave
     assert not auto.exists()
     with open(path, "rb") as f:
         B = pickle.load(f)
@@ -332,7 +342,7 @@ def test_killed_tubule_run_continues_from_its_autosave(tmp_path):
     with open(auto, "wb") as f:
         pickle.dump(mid, f)
     _, _, args2 = _tubule_args(m2, tmp_path / "b", None)
-    C = _run_one(args2[0])
+    C = run_args(args2[0])
     assert C.N == 41 and abs(C.t - 0.5) < 1e-9
 
 
@@ -353,8 +363,8 @@ def _rows_on_floor(groups, g=(0.0, 0.0, -1.0), roll=None, extra=0, env=None, **c
     stay free, at rest, in the upper corner. Returns the sim (the rows ACTIVE, at rest, neighbour lists built), the
     members of each row and the contact rows."""
     from scipy.sparse.linalg import splu
-    from dolle_sim import dem, statics
-    from dolle_sim.engine import FullContactSim, ACTIVE
+    from dolle_extras import dem, statics
+    from dolle_extras.engine import FullContactSim, ACTIVE
     n = sum(c for _, c in groups)
     cfg = {"dt_s": 1e-3, "duration_s": 0.3, "output_fps": 100,
            "environment": dict({"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": list(g)}, **(env or {})),
@@ -408,7 +418,7 @@ def _floor_rolling(S, isl):
     """For a sleeping island at its committed state: the floor contacts (mask), |k_r xi_r| over their rolling
     caps, the caps [N] (statics.caps: mu_r |F_ne + 2 F_pull| from the state's own normal forces) and the elastic
     normal forces [N]."""
-    from dolle_sim import dem, statics
+    from dolle_extras import dem, statics
     x = np.ascontiguousarray(S.x[isl["members"]])
     h = np.ascontiguousarray(S._hist[isl["rows"]])
     lam, _, out = statics.state(x, isl["ci"], isl["cj"], isl["prm_el"], h, S.L)
@@ -421,7 +431,7 @@ def _floor_rolling(S, isl):
 def _spring_change(isl, h_a, h_b):
     """The largest change of any sliding, rolling or twisting spring force of an island's touching contacts between
     the histories h_a and h_b, |k (xi_a - xi_b)| (statics.kcomp), relative to that spring's cap (the island's capv)."""
-    from dolle_sim import dem, statics
+    from dolle_extras import dem, statics
     d = h_a - h_b
     dd = np.column_stack([np.linalg.norm(d[:, dem.H_XT:dem.H_XT + 3], axis=1),
                           np.linalg.norm(d[:, dem.H_XR:dem.H_XR + 3], axis=1), np.abs(d[:, dem.H_XTW])])
@@ -470,7 +480,7 @@ def test_island_at_its_rolling_cap_sleeps_exactly_under_constant_load():
     normal (~5e-24 m) by one ulp; in these two commits every spring force moves by <= island_tol_rel of its cap (the
     Newton tolerance; measured ~1e-15). From then on 50 steps leave the committed histories bit-identical, the
     positions stay within 1e-15 m of the placement, and every step is tier 1."""
-    from dolle_sim.engine import ASLEEP
+    from dolle_extras.engine import ASLEEP
     S, (mem,), rows = _rows_on_floor([(0.45e-3, 2)], g=(-2.0, 0.0, -1.0), roll=1.001)
     S._classify(0.0)
     assert (S.regime[mem] == ASLEEP).all() and S.n_events["cluster_sleep_cap"] == 1
@@ -506,8 +516,8 @@ def test_creep_island_follows_its_shrinking_cap_and_reports_its_bounds():
     are reported (island_newton_rel, island_dyn_rel). With island_flow_max made tiny the next creep step wakes the
     island (island_wake_flow), and its re-entry at the end of that step is refused by the same test
     (cluster_awake_certificate)."""
-    from dolle_sim import dem
-    from dolle_sim.engine import ASLEEP
+    from dolle_extras import dem
+    from dolle_extras.engine import ASLEEP
     S, (mem,), rows = _rows_on_floor([(0.45e-3, 2)], g=(-2.0, 0.0, -1.0), roll=1.001)
     _ramp(S, (0.0, 0.0, 0.8), 0.02)
     S._classify(0.0)
@@ -553,8 +563,8 @@ def test_island_wakes_when_a_near_pair_closes():
     allowance s_isl, as a creeping island's drift would leave it, the next step wakes the island into the DEM with
     island_wake_newcontact (a contact could form within the step), and its re-entry at the end of that step is
     refused for the same reason (cluster_awake_certificate)."""
-    from dolle_sim import dem
-    from dolle_sim.engine import ASLEEP
+    from dolle_extras import dem
+    from dolle_extras.engine import ASLEEP
     S, (mem,), rows = _rows_on_floor([(R50 + 1.5e-7, 2)], g=(-2.0, 0.0, -1.0), roll=1.001)
     S._classify(0.0)
     iid = S._island_of[0]
@@ -576,7 +586,7 @@ def test_watch_joins_a_grain_within_the_drift_allowance():
     may move by nothing yet does not join); at 2 d_cap + 0.5 s_isl it would not have joined a static sleeper (its
     allowance is 0.5 s_isl then), but with the drift it joins and wakes the island (island_wake_approach), the
     island handed over at its committed state at rest."""
-    from dolle_sim.engine import ACTIVE, ASLEEP
+    from dolle_extras.engine import ACTIVE, ASLEEP
     S, (mem,), rows = _rows_on_floor([(0.45e-3, 2)], g=(-2.0, 0.0, -1.0), roll=1.001, extra=1)
     S._classify(0.0)
     iid = S._island_of[0]
@@ -631,8 +641,8 @@ def test_island_at_a_load_breakpoint_is_committed_at_the_pre_jump_equilibrium():
     left-limit load, against which its residual is within the Newton tolerance, while against the post-jump load it
     is that of the whole jump. The next step starts at the breakpoint: the island wakes (island_wake_fast) and the
     DEM starts from the committed state."""
-    from dolle_sim import dem, statics
-    from dolle_sim.engine import ASLEEP
+    from dolle_extras import dem, statics
+    from dolle_extras.engine import ASLEEP
     prof = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())["flight_profile"]
     S, (mem,), rows = _rows_on_floor([(0.45e-3, 2)], roll=1.02, env={"flight_profile": prof, "start_time_s": 5.19})
     bp = S.loads.next_breakpoint(S.env.t0_flight)
@@ -666,7 +676,7 @@ def test_refused_island_entry_leaves_the_state_untouched():
     0, a residual speed of 1 nm/s) or by the first step's certificate after the candidate was placed and advanced
     (island_budget_rel = 0), the cluster's positions, velocities, spins and histories are bit-identical to what they
     were, it stays in the full model and the reason is counted."""
-    from dolle_sim.engine import ACTIVE
+    from dolle_extras.engine import ACTIVE
     for cc, why in (({"island_ratchet_rel": 0.0}, "ratchet"), ({"island_budget_rel": 0.0}, "certificate")):
         S, (mem,), rows = _rows_on_floor([(0.45e-3, 2)], g=(-2.0, 0.0, -1.0), roll=1.001, **cc)
         S.v[0] = [1e-9, 0.0, 0.0]
@@ -698,7 +708,7 @@ def test_forced_redo_leaves_the_island_as_it_was():
     shares the island dict (replaced at commits, never mutated): after an ordinary attempt and after an attempt with a
     member forced into the DEM (the island woken), _restore leaves the island dict the same object with the same
     contents, the positions and histories bit-identical and nothing pending; the step then commits once."""
-    from dolle_sim.engine import ACTIVE, ASLEEP
+    from dolle_extras.engine import ACTIVE, ASLEEP
     S, (mem,), rows = _rows_on_floor([(0.45e-3, 2)], g=(-2.0, 0.0, -1.0), roll=1.001)
     S._classify(0.0)
     _steps(S, 1)
@@ -755,8 +765,8 @@ def test_island_of_the_previous_format_is_upgraded_and_advances():
     near pairs) is upgraded at its first step: the near pair with the wall is back in its system, it is tier 1 with
     a finite ratchet bound, and it advances, static at its caps (positions within 1e-15 m; the first Newton solve
     absorbs the old placement's residual, every spring force within island_tol_rel of its cap)."""
-    from dolle_sim import dem, statics
-    from dolle_sim.engine import ASLEEP
+    from dolle_extras import dem, statics
+    from dolle_extras.engine import ASLEEP
     S, (mem,), rows = _rows_on_floor([(R50 + 1.5e-7, 2)], g=(-2.0, 0.0, -1.0), roll=1.001)
     S._classify(0.0)
     iid = S._island_of[0]
@@ -842,7 +852,7 @@ def test_margins_chord_term_raises_the_ratios():
     force raised by dF, the twisting and rolling torques by dF R, so every ratio rises, by exactly those amounts; on
     a constant load the chord deviation is 0 and nothing changes."""
     import math
-    from dolle_sim import dem
+    from dolle_extras import dem
     S = _scene(1, size=0.001)
     S.x[0] = [0.5e-3, 0.5e-3, R50]
     row = S._row(0, -5)
@@ -868,8 +878,8 @@ def test_single_grain_sleeps_within_the_margin_and_rolls_at_its_cap():
     """A grain on one wall: its entry is its stay test (ratios <= 1 - margin with the chord term), no longer
     1 - 5 margin. At 0.95 of its rolling cap (constant lateral load) it falls asleep after one step and does not
     move; at 1.01 a single contact at its cap is a mechanism and it rolls (ROLL)."""
-    from dolle_sim import dem
-    from dolle_sim.engine import ACTIVE, ASLEEP, ROLL
+    from dolle_extras import dem
+    from dolle_extras.engine import ACTIVE, ASLEEP, ROLL
     from dolle_sim.environment import G0
     for ratio, regime in ((0.95, ASLEEP), (1.01, ROLL)):
         S0 = _scene(1, size=0.001)
@@ -900,8 +910,8 @@ def test_cap_sleep_off_is_the_previous_entry_test():
     island_static_steps); a pair whose floor rolling springs carry 0.95 of their caps is refused within 5 margins of
     a limit (cluster_awake_near_limit), where cap_sleep on puts it to sleep."""
     from scipy.sparse.linalg import splu
-    from dolle_sim import statics
-    from dolle_sim.engine import ASLEEP
+    from dolle_extras import statics
+    from dolle_extras.engine import ASLEEP
     S, (mem,), rows = _rows_on_floor([(0.45e-3, 2)], cap_sleep=False)
     ci, cj, rw = S._island_system(mem, S._touching())
     x, prm, hist = np.ascontiguousarray(S.x[mem]), np.ascontiguousarray(S._prm[rw]), np.ascontiguousarray(S._hist[rw])
@@ -934,7 +944,7 @@ def test_sleeping_island_wakes_when_it_could_touch_another_sleeper():
     still, as a creeping island's drift would leave it), the next step wakes both sides (island_wake_neighbour) and
     the full model takes the step from the committed state; at its end the one put to sleep first keeps the other
     awake (cluster_awake_neighbour or sleep_refused_neighbour) while they are that close."""
-    from dolle_sim.engine import ASLEEP
+    from dolle_extras.engine import ASLEEP
     for groups, single in (([2, 2], False), ([2, 1], True)):
         S0, _, _ = _rows_on_floor([(0.25e-3, 2)])
         dp = 2 * R50 - float(S0.x[1, 0] - S0.x[0, 0])
@@ -969,8 +979,8 @@ def test_single_sleeper_and_tier0_island_woken_at_a_breakpoint_start_from_the_pr
     the linear response to the left-limit load from its reference state, bit-identical; at the run's start (placed
     there, nothing before it) a wake uses the load at T itself."""
     import copy
-    from dolle_sim import statics
-    from dolle_sim.engine import ASLEEP
+    from dolle_extras import statics
+    from dolle_extras.engine import ASLEEP
     prof = json.loads((ROOT / "configs" / "mission_quarter_deck.json").read_text())["flight_profile"]
     env = {"flight_profile": prof, "start_time_s": 5.19}
     S, _, rows = _rows_on_floor([(0.45e-3, 1), (0.75e-3, 1)], env=env)
@@ -1018,8 +1028,8 @@ def test_entry_ratchet_releases_every_component_it_finds_near_its_cap():
     one-pass bound (5.0e-4) let it sleep. The bound returned equals statics.energy_bounds in the system with both
     released, to rounding."""
     from scipy.sparse import csc_matrix, csr_matrix
-    from dolle_sim import dem, statics
-    from dolle_sim.engine import FullContactSim as F
+    from dolle_extras import dem, statics
+    from dolle_extras.engine import FullContactSim as F
 
     class Stub:
         margin = 0.02
@@ -1064,8 +1074,8 @@ def test_creep_step_charges_an_excursion_beyond_the_chord_through_the_released_s
     exceeded by the excursion that lowers the pressing load (6.9x, review)."""
     import copy
     from scipy.sparse.linalg import splu
-    from dolle_sim import dem, statics
-    from dolle_sim import verify_full as V
+    from dolle_extras import dem, statics
+    from dolle_extras import verify_full as V
     G0 = 9.80665
     P, _ = V._cap_pile_prep("coast", (-8.0, 0.0, -2.0))
     S = copy.deepcopy(P)
@@ -1118,7 +1128,7 @@ def test_entry_dropping_a_residual_keeps_the_one_percent_test_for_contacts_far_f
     the 1% test, so it stays awake (cluster_awake_ratchet), its state untouched and _linres not tried."""
     import copy
     import math
-    from dolle_sim import verify_full as V
+    from dolle_extras import verify_full as V
     P, _ = V._cap_pile_prep("coast", (-8.0, 0.0, -2.0))
     mem = np.array([2, 3, 4, 5, 6])
     for E, sleeps in ((1e-20, True), (5e-20, False)):
@@ -1150,7 +1160,7 @@ def test_island_of_the_previous_format_is_upgraded_at_the_load_of_its_first_step
     10 ms the upgrade: its residual against F(T0) is within the Newton tolerances, it is within 1e-14 m of the
     previous version's own placement at T0 (the linear response) and > 1e-13 m from where it was; a wake at T0 hands
     exactly that state over with no fallback (island_wake_fallback 0)."""
-    from dolle_sim import dem, statics
+    from dolle_extras import dem, statics
     S, (mem,), rows = _rows_on_floor([(0.45e-3, 2)], g=(-2.0, 0.0, -1.0))
     _ramp(S, (0.0, 0.0, -1.0), 0.02)
     S._classify(0.0)
@@ -1195,9 +1205,9 @@ def test_drift_allowance_covers_an_out_and_back_load_through_a_stack():
     twisting ratio far below 1) is within s_isl."""
     import math
     from scipy.sparse.linalg import splu
-    from dolle_sim import dem, statics
-    from dolle_sim import verify_full as V
-    from dolle_sim.engine import ACTIVE, ASLEEP, FullContactSim
+    from dolle_extras import dem, statics
+    from dolle_extras import verify_full as V
+    from dolle_extras.engine import ACTIVE, ASLEEP, FullContactSim
     from dolle_sim.environment import G0
     cfg = {"dt_s": 1e-3, "duration_s": 0.3, "output_fps": 100,
            "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": [0.0, 0.0, -1.0]},
@@ -1265,7 +1275,7 @@ def test_mid_step_wake_tests_its_placement_against_this_steps_allowance():
     the row ramped in over 2 ms: in the first step after entry its allowance grows from the entry's 1e-12 m; woken at
     0.9 of that step, its placement moves it by more than 1e-12 m but within this step's allowance, and is used (no
     island_wake_fallback)."""
-    from dolle_sim.engine import ASLEEP
+    from dolle_extras.engine import ASLEEP
     S, (mem,), rows = _rows_on_floor([(0.45e-3, 2)], g=(-2.0, 0.0, -1.0), roll=1.001)
     _ramp(S, (-2.0, 0.0, 0.0), 0.002)
     S._classify(0.0)

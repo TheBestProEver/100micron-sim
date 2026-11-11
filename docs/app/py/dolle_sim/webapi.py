@@ -46,14 +46,15 @@ def default_config():
         "name": "browser_run", "seed": 1, "duration_s": 4.0, "dt_s": 0.004, "output_fps": 15,
         "environment": {"preset": "sounding_rocket", "pressure_pa": 1.0, "temperature_k": 293, "gas": "air",
                         "residual_accel_g": [0.0, 0.0, 1e-4], "jitter_rms_g": 5e-5, "jitter_corr_time": 0.05,
-                        "spin_rate_hz": 0.0167, "spin_axis": [0, 0, 1], "gravity_gradient": True,
+                        "spin_rate_hz": 0.0167, "spin_axis": [0, 0, 1], "gravity_gradient": False,
                         "altitude_m": 130000, "local_vertical": [0, 0, 1],
                         "electric_field_v_m": [0, 0, 0], "magnetic_field_t": [0, 2e-5, -4.5e-5],
                         "temperature_gradient_k_m": [0.0, 0.0, 3.0],
                         "illumination": {"intensity_w_m2": 1000.0, "direction": [1.0, 0.0, 0.0]}},
+        # the forces below 2.2% of the residual acceleration start switched off, as in the simulator (v0.7)
         "forces": {"coulomb": True, "space_charge": True, "polarization": True, "image_charges": True,
-                   "self_gravity": True, "lorentz": True, "external_e_field": True, "thermophoresis": True,
-                   "photophoresis": True, "radiation_pressure": True, "brownian": True,
+                   "self_gravity": False, "lorentz": False, "external_e_field": False, "thermophoresis": True,
+                   "photophoresis": False, "radiation_pressure": False, "brownian": False,
                    "long_range_cutoff_m": 0.003, "long_range_update_every": 1, "space_charge_update_every": 25},
         "contact": {"friction_coefficient": 0.3, "tangential_restitution": 0.0, "wall_sticking": "jkr",
                     "contact_charging": True, "fragmentation": True, "neighbor_skin_m": 0.001,
@@ -78,9 +79,27 @@ def info(_=None):
                   "default_config": default_config(), "checks": verification.list_checks()})
 
 
+def _mark_switched_off(pf):
+    """For the website's pre-flight panel: its chart (docs/app/app.js) draws every positive entry of the acceleration
+    budget under its name, so a term switched off in the config gets the name suffix " (off)", and a note under the
+    chart lists the switched-off terms (the command line marks them itself)."""
+    names = []
+    for g in pf["groups"]:
+        off = set(g.get("switched_off", ()))
+        g["acceleration_budget_m_s2"] = {(f"{k} (off)" if k in off else k): v
+                                         for k, v in g["acceleration_budget_m_s2"].items()}
+        names += [k.replace("_", " ") for k in sorted(off) if k.replace("_", " ") not in names]
+        if "brownian" in g.get("switched_off_forces", ()) and "Brownian motion" not in names:
+            names.append("Brownian motion")
+    if names:
+        pf["warnings"].append("Note: switched off in this config and shown only for their size (marked (off) in the "
+                              f"chart): {', '.join(names)}.")
+    return pf
+
+
 def preflight(cfg_json):
     cfg = json.loads(cfg_json)
-    return _dump([_preflight(cfg, ch) for ch in cfg["chambers"]])
+    return _dump([_mark_switched_off(_preflight(cfg, ch)) for ch in cfg["chambers"]])
 
 
 def _binned(v, stuck, nbins=14):

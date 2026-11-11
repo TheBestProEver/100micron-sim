@@ -6,13 +6,13 @@
     python -m dolle_sim invert --material graphite --radius 50e-6 --vstick 0.08
     python -m dolle_sim materials
     python -m dolle_sim analyze results/flight_carbon_vs_silica
-    python -m dolle_sim rebound-check configs/flight_carbon_vs_silica.json --duration 60 --max-grains 600
-    python -m dolle_sim verify
+    python -m dolle_sim verify         # the 26 model checks (verification.py)
     python -m dolle_sim sources        # where every part of the physics comes from
     python -m dolle_sim mission configs/mission_quarter_deck.json [--scenario kick] [--loads-only]
     python -m dolle_sim sizes --d10 90e-6 --d50 100e-6 --d90 112e-6 --weighting volume
-    python -m dolle_sim sizes --image photo.png --um-per-px 1.25
-    python -m dolle_sim lammps-check   # cross-check of the JKR contact model against LAMMPS
+
+The optional parts (the v0.6 full-contact engine and its checks, the REBOUND and LAMMPS cross-checks, grain sizes from
+microscope images) have their own command line in extras/: python -m dolle_extras --help (extras/README.md).
 
 Provenance: Command-line wrapper only (no physics).
 """
@@ -49,12 +49,14 @@ def _print_preflight(pf):
         print(f"      launch {g['launch_speed_m_s'] * 1e3:.2f} mm/s, crossing time {g['chamber_crossing_time_s']:.2f} s, "
               f"~{g['expected_pp_collisions_total']:.0f} grain-grain collisions expected")
         print(f"      spin-down time {g['spin_down_time_s']:.3g} s, rms charge {g['rms_charge_e']:.3g} e, "
-              f"Brownian speed {g['brownian_speed_m_s'] * 1e6:.2g} um/s")
+              f"Brownian speed {g['brownian_speed_m_s'] * 1e6:.2g} um/s"
+              + (" (off)" if "brownian" in g.get("switched_off_forces", ()) else ""))
         print(f"      wall: v_stick {g['v_stick_wall_DEM_m_s'] * 1e3:.2f} mm/s (adhesion factor {g['wall_adhesion_factor']:g}), "
               f"vibration {g['wall_vibration_speed_m_s'] * 1e3:.1f} mm/s -> {100 * g['wall_capture_probability_per_hit']:.1f}% of wall hits stick")
-        print("      acceleration budget (m/s^2, and in g):")
+        print("      acceleration budget (m/s^2, and in g; (off) = switched off in this config):")
+        off = set(g.get("switched_off", ()))
         for k, v in sorted(g["acceleration_budget_m_s2"].items(), key=lambda kv: -kv[1]):
-            print(f"        {k:34s} {v:10.3e}   {v / 9.80665:9.2e} g")
+            print(f"        {k:34s} {v:10.3e}   {v / 9.80665:9.2e} g" + ("   (off)" if k in off else ""))
     for w in pf["warnings"]:
         print("  ! " + w)
 
@@ -190,30 +192,9 @@ def cmd_invert(a):
           + (f"  (database value {base.gamma:g}; ratio {g / base.gamma:.2f})" if base else ""))
 
 
-def cmd_rebound_check(a):
-    from .rebound_check import compare
-    cfg = _load(a.config)
-    out = Path(a.out)
-    for ch in cfg["chambers"]:
-        print(f"Cross-checking '{ch.get('name')}' against REBOUND ({a.duration:g} s, <= {a.max_grains} grains in total) ...", flush=True)
-        r = compare(cfg, ch, a.duration, out, a.max_grains)
-        b = r["ballistic_check"]
-        print(f"  ballistic: {b['grains_compared']} grains, max position difference "
-              f"{b['max_position_difference_m'] * 1e6:.3f} um after {b['t_s']:g} s")
-        print(f"  {'':32s} {'DOLL-E':>12s} {'REBOUND':>12s}")
-        for k in ("grain_grain_impacts", "grain_grain_sticks", "free_monomer_impacts",
-                  "free_monomer_stick_fraction", "median_impact_speed_m_s", "free_monomer_median_speed_m_s",
-                  "wall_impacts", "wall_sticks", "run_time_s"):
-            x, y = r["dolle_engine"].get(k), r["rebound_engine"].get(k)
-            f = (lambda z: "-" if z is None else (f"{z:.4g}" if isinstance(z, float) else str(z)))
-            print(f"  {k:32s} {f(x):>12s} {f(y):>12s}")
-    print(f"Wrote {out.resolve()}")
-
-
 def cmd_verify(a):
     from .verification import run_all
-    from . import verify_full
-    print("DOLL-E verification suite (analytic benchmarks, conservation laws, independent models)")
+    print("DOLL-E model checks (analytic benchmarks, conservation laws, independent models; also run in the browser)")
     n_ok = 0
 
     def show(r):
@@ -221,11 +202,9 @@ def cmd_verify(a):
         n_ok += r["passed"]
         print(f"  {'PASS' if r['passed'] else 'FAIL'}  {r['seconds']:6.1f}s  {r['name']}: {r['value']}  [{r['criterion']}]",
               flush=True)
-    print("Part 1: shared physics and the v0.5 engine (also runs in the browser)")
     results = run_all(show)
-    print("Part 2: the v0.6 full-contact engine (dem.py, statics.py, loads.py, vibration.py)")
-    results += verify_full.run_all(show)
     print(f"{n_ok}/{len(results)} checks passed")
+    print("The optional v0.6 full-contact engine has its own checks: python -m dolle_extras verify (extras/README.md)")
     if a.json:
         Path(a.json).write_text(json.dumps(results, indent=2))
     return 0 if n_ok == len(results) else 1
@@ -239,8 +218,13 @@ def cmd_materials(a):
 
 
 def cmd_mission(a):
+    return run_mission_cli(_load(a.config), a)
+
+
+def run_mission_cli(mission: dict, a, runner=None):
+    """The mission command for a loaded config. python -m dolle_extras mission calls it too, passing the v0.6
+    engine's runner (dolle_sim itself only runs the v0.5 engine; mission.run_mission)."""
     from .mission import run_mission, launch_report, apply_scenario
-    mission = _load(a.config)
     if a.grains:
         for t in mission["tubules"]:
             t["dust"]["count"] = int(a.grains)
@@ -261,8 +245,9 @@ def cmd_mission(a):
               f"{100 * v['ground_random_test']:.1f}% (sine test {100 * v['ground_sine_test']:.1f}%), lift-off to burnout "
               f"{100 * v['flight_lift_off_to_burnout']:.1f}%, all {100 * v['all']:.1f}%")
     print("\n  'pulled off' and 'could slide' are this report's quasi-static estimate (pull-off normal to the aft face,"
-          "\n  sliding along it). The simulation itself resolves rolling, sliding and twisting on every wall: rolling"
-          "\n  starts at ~1 g of sideways load for 100 um silica on clean glass (PROVENANCE.md), below the spin loads.")
+          "\n  sliding along it). The v0.5 engine (the default) holds wall grains in place until they are pulled off;"
+          "\n  the v0.6 engine in extras/ also resolves rolling, sliding and twisting: rolling starts at ~1 g of"
+          "\n  sideways load for 100 um silica on clean glass (PROVENANCE.md), below the spin loads.")
     out = Path(a.out or Path("results") / "mission" / (a.scenario or "nominal"))
     if a.loads_only:
         out.mkdir(parents=True, exist_ok=True)
@@ -272,25 +257,16 @@ def cmd_mission(a):
     print(f"\nSimulating {len(m['tubules'])} tubules from T+{m.get('simulate_from_s', 0):g} s to the end of the run "
           f"(splashdown + 5 s unless simulate_to_s is set) ...")
     mission.setdefault("progress", True)
-    if a.checkpoint_at:
-        mission["checkpoints_s"] = list(a.checkpoint_at)
-    if a.resume_from:
-        if a.resume_at is None:
-            raise SystemExit("--resume-from needs --resume-at")
-        mission["resume_from"], mission["resume_at_s"] = a.resume_from, a.resume_at
-        print(f"Continuing from the checkpoints at T+{a.resume_at:g} s in {a.resume_from} (verified identical up to then)")
-    if a.autosave_min:
-        mission["autosave_s"] = 60.0 * a.autosave_min
     if a.tubule is not None:
         from .mission import run_tubule
-        path = run_tubule(mission, out, a.scenario, a.tubule)
+        path = run_tubule(mission, out, a.scenario, a.tubule, runner=runner)
         print(f"Tubule {a.tubule} done: final state in {path}")
         return 0
     if a.assemble:
         from .mission import assemble_mission
         summary, _ = assemble_mission(mission, out, a.scenario)
     else:
-        summary, _ = run_mission(mission, out, a.scenario, jobs=a.jobs)
+        summary, _ = run_mission(mission, out, a.scenario, jobs=a.jobs, runner=runner)
     for t in summary["tubules"]:
         print(f"  {t['tubule']}: {t['grains_released']} of {t['n_grains']} grains released at least once "
               f"({t['detachment_events']} release events: {t['detachments_by_phase']}); {t['free_at_power_off']} free at "
@@ -303,27 +279,6 @@ def cmd_mission(a):
 
 def cmd_sizes(a):
     from . import sizes
-    if a.image:
-        if not a.um_per_px:
-            print("--image needs --um-per-px (the calibration, e.g. from a stage micrometer)")
-            return 1
-        from .sizing import measure_image
-        d_all = []
-        for img in a.image:
-            m = measure_image(img, a.um_per_px, dark_on_light=a.dark_on_light, split_touching=not a.no_split)
-            d_all.append(m["diameters_m"])
-            print(f"{img}: {m['n']} grains measured")
-        d = np.concatenate(d_all) if d_all else np.zeros(0)
-        if len(d):
-            st = sizes.summary(d)
-            print(f"all images: {len(d)} grains; number D10/D50/D90 = {st['number_d10_m']*1e6:.1f} / "
-                  f"{st['number_d50_m']*1e6:.1f} / {st['number_d90_m']*1e6:.1f} um; volume D10/D50/D90 = "
-                  f"{st['volume_d10_m']*1e6:.1f} / {st['volume_d50_m']*1e6:.1f} / {st['volume_d90_m']*1e6:.1f} um")
-        if a.out:
-            np.savetxt(a.out, d, header="area-equivalent diameter [m]")
-            print(f"wrote {a.out} ({len(d)} grains from {len(a.image)} image(s); use as size_distribution "
-                  "{'type': 'measured', 'csv': ...})")
-        return 0
     if a.d10 and a.d50 and a.d90:
         f = sizes.lognormal_from_percentiles(a.d10, a.d50, a.d90, a.weighting)
         print(f"log-normal through {a.weighting}-weighted D10/D50/D90: count median {f['cmd_m']*1e6:.2f} um, "
@@ -331,31 +286,8 @@ def cmd_sizes(a):
         mu, s_ = math.log(f["cmd_m"]), math.log(f["gsd"])
         print(f"  volume median {math.exp(mu + 3 * s_ * s_) * 1e6:.2f} um, Sauter d32 {math.exp(mu + 2.5 * s_ * s_) * 1e6:.2f} um")
         return 0
-    print("give --image (and --um-per-px) or --d10 --d50 --d90")
+    print("give --d10 --d50 --d90 (grain sizes from images: python -m dolle_extras sizes-image)")
     return 1
-
-
-def cmd_lammps(a):
-    from .lammps_check import compare
-    import runpy
-    tool = Path(__file__).resolve().parents[1] / "tools" / "lammps_contact_check.py"
-    if tool.exists():
-        print("Full contact model (JKR, sliding, rolling, twisting) vs LAMMPS GRANULAR, same coefficients and step:")
-        mod = runpy.run_path(str(tool))
-        Path(a.out).mkdir(parents=True, exist_ok=True)
-        mod["main"](str(Path(a.out) / "lammps_contact_check.json"))
-    res = compare(Path(a.out))
-    for r in res["collisions"]:
-        print(f"{r['material']}: undamped sticking threshold LAMMPS {r['lammps_threshold_m_s']*1e3:.4f} mm/s vs DOLL-E "
-              f"(same break criterion) {r['dolle_threshold_force_break_m_s']*1e3:.4f} mm/s "
-              f"({100 * r['rel_diff_same_criterion']:+.2f}%); DOLL-E default criterion {r['dolle_threshold_default_m_s']*1e3:.4f} mm/s")
-        for e in r["restitution"]:
-            print(f"    v = {e['v_m_s']*1e3:.3f} mm/s: e LAMMPS {e['lammps_e']:.4f}, DOLL-E {e['dolle_e']:.4f}")
-    for p_ in res["pulloff"]:
-        print(f"pull-off {p_['grain']} on {p_['wall']}: LAMMPS {p_['lammps_detach_force_N']:.4e} N vs 1.5 pi w R "
-              f"{p_['jkr_pulloff_N']:.4e} N ({100 * p_['rel_diff']:+.2f}%; checked every {100 * p_['detection_step_rel']:.4f}% of F_c)")
-    print(f"Wrote {Path(a.out).resolve() / 'lammps_check.json'}")
-    return 0
 
 
 def cmd_sources(a):
@@ -363,7 +295,44 @@ def cmd_sources(a):
     print(as_markdown() if a.markdown else as_text())
 
 
+def add_mission_arguments(mi):
+    """The arguments of the mission command (shared with python -m dolle_extras mission)."""
+    mi.add_argument("config")
+    mi.add_argument("--scenario")
+    mi.add_argument("--out")
+    mi.add_argument("--jobs", type=int, default=1, help="run tubules in parallel processes")
+    mi.add_argument("--loads-only", action="store_true", help="only the analytic launch-load report")
+    mi.add_argument("--grains", type=int, help="grains per tubule (overrides the config's example amount)")
+    mi.add_argument("--tubule", type=int, help="run only this tubule (0-3) and save its final state (for a campaign "
+                    "that schedules tubules one by one)")
+    mi.add_argument("--assemble", action="store_true", help="write the outputs from the tubules' saved final states")
+    return mi
+
+
+MOVED_TO_EXTRAS = {"rebound-check": "rebound-check", "lammps-check": "lammps-check"}
+"""Commands that moved to extras/ in v0.7, with their new names there (python -m dolle_extras <name>)."""
+MOVED_MISSION_OPTIONS = ("--checkpoint-at", "--resume-from", "--resume-at", "--autosave-min")
+
+
+def moved_command(argv) -> str | None:
+    """The dolle_extras command that replaces a v0.6 command line, or None if the command line is a dolle_sim one."""
+    if not argv:
+        return None
+    if argv[0] in MOVED_TO_EXTRAS:
+        return MOVED_TO_EXTRAS[argv[0]]
+    if argv[0] == "sizes" and any(x == "--image" or x.startswith("--image=") for x in argv[1:]):
+        return "sizes-image"
+    if argv[0] == "mission" and any(x.split("=")[0] in MOVED_MISSION_OPTIONS for x in argv[1:]):
+        return "mission"
+    return None
+
+
 def main(argv=None):
+    moved = moved_command(sys.argv[1:] if argv is None else list(argv))
+    if moved:
+        print(f"moved to extras in v0.7: python -m dolle_extras {moved} ... (or, without installing, python "
+              f"extras/dolle_extras {moved} ...); see extras/README.md", file=sys.stderr)
+        return 2
     p = argparse.ArgumentParser(prog="dolle_sim", description=f"DOLL-E dust simulator v{__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="run a full multi-particle simulation from a JSON config")
@@ -401,52 +370,20 @@ def main(argv=None):
     an.add_argument("results")
     an.add_argument("--camera", help="JSON camera overrides, e.g. {\"fps\": 1000}")
     an.set_defaults(fn=cmd_analyze)
-    rc = sub.add_parser("rebound-check", help="cross-check the engine against REBOUND on the same chamber")
-    rc.add_argument("config")
-    rc.add_argument("--duration", type=float, default=10.0)
-    rc.add_argument("--max-grains", type=int, default=400)
-    rc.add_argument("--out", default="results/rebound_check")
-    rc.set_defaults(fn=cmd_rebound_check)
-    v = sub.add_parser("verify", help="run the physics verification suite")
+    v = sub.add_parser("verify", help="run the model checks (verification.py)")
     v.add_argument("--json", help="also write the results to this JSON file")
     v.set_defaults(fn=cmd_verify)
     m = sub.add_parser("materials", help="list the material database")
     m.set_defaults(fn=cmd_materials)
     mi = sub.add_parser("mission", help="all tubules through the whole flight on one clock (launch to splashdown)")
-    mi.add_argument("config")
-    mi.add_argument("--scenario")
-    mi.add_argument("--out")
-    mi.add_argument("--jobs", type=int, default=1, help="run tubules in parallel processes")
-    mi.add_argument("--loads-only", action="store_true", help="only the analytic launch-load report")
-    mi.add_argument("--checkpoint-at", type=float, nargs="*", help="flight times [s] at which to save each tubule's "
-                    "state (to <out>/checkpoints) for other scenarios to continue from")
-    mi.add_argument("--resume-from", help="a checkpoints directory of another scenario's run: continue from it "
-                    "(verified: the scenarios must be identical up to --resume-at)")
-    mi.add_argument("--resume-at", type=float, help="the checkpoint time to continue from [s]")
-    mi.add_argument("--grains", type=int, help="grains per tubule (overrides the config's example amount)")
-    mi.add_argument("--tubule", type=int, help="run only this tubule (0-3) and save its final state (for a campaign "
-                    "that schedules tubules one by one)")
-    mi.add_argument("--assemble", action="store_true", help="write the outputs from the tubules' saved final states")
-    mi.add_argument("--autosave-min", type=float, help="save each tubule's state every this many minutes of computing "
-                    "(to <out>/autosave); a run started again continues from it, bit-for-bit")
+    add_mission_arguments(mi)
     mi.set_defaults(fn=cmd_mission)
-    sz = sub.add_parser("sizes", help="size distributions: fit D10/D50/D90 or measure microscope images")
-    sz.add_argument("--image", nargs="+")
-    sz.add_argument("--um-per-px", type=float)
-    sz.add_argument("--dark-on-light", dest="dark_on_light", action="store_true", default=None,
-                    help="grains darker than the background (default: grains are the minority phase)")
-    sz.add_argument("--light-on-dark", dest="dark_on_light", action="store_false",
-                    help="grains brighter than the background (e.g. dark field)")
-    sz.add_argument("--no-split", action="store_true", help="do not split touching grains (watershed)")
+    sz = sub.add_parser("sizes", help="size distributions: a log-normal through D10/D50/D90")
     sz.add_argument("--d10", type=float)
     sz.add_argument("--d50", type=float)
     sz.add_argument("--d90", type=float)
     sz.add_argument("--weighting", default="volume", choices=["number", "volume"])
-    sz.add_argument("--out")
     sz.set_defaults(fn=cmd_sizes)
-    lc = sub.add_parser("lammps-check", help="cross-check the JKR contact model against LAMMPS (pip install lammps)")
-    lc.add_argument("--out", default="results/lammps_check")
-    lc.set_defaults(fn=cmd_lammps)
     so = sub.add_parser("sources", help="where every part of the physics comes from, how it is checked, what is assumed")
     so.add_argument("--markdown", action="store_true")
     so.set_defaults(fn=cmd_sources)

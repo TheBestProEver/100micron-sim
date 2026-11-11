@@ -14,6 +14,12 @@ from .materials import get_material, pair_props, sphere_mass
 from .contact import JKRContact
 from .environment import Environment, G0
 
+# Warning thresholds for the forces that are off by default (ASSUMED: a term below 5% of the residual acceleration
+# changes the drift of a grain by less than the g-jitter, whose rms is 50% of the residual in the sounding_rocket
+# preset; a Brownian speed below 1% of the sticking speed cannot change an impact's outcome.)
+OFF_WARN_FRACTION_OF_RESIDUAL = 0.05
+OFF_WARN_BROWNIAN_FRACTION_OF_V_STICK = 0.01
+
 K_E = 8.9875517923e9
 G_N = 6.67430e-11
 Q_E = 1.602176634e-19
@@ -84,7 +90,7 @@ def preflight(cfg: dict, chamber: dict) -> dict:
             "g_jitter_rms": env.jitter_rms,
             "centrifugal_payload_spin": a_cf,
             "coriolis_payload_spin": 2 * spin * v0,
-            "gravity_gradient_tidal": 2 * env.tidal_rate * x_far if env.gravity_gradient else 0.0,
+            "gravity_gradient_tidal": 2 * env.tidal_rate * x_far,      # shown also when it is switched off
             "mutual_gravity_at_contact": G_N * mass / (2 * r) ** 2,
             "mutual_gravity_at_mean_spacing": G_N * mass / sep ** 2,
             "coulomb_at_mean_spacing": K_E * q_rms ** 2 / sep ** 2 / mass,
@@ -110,6 +116,24 @@ def preflight(cfg: dict, chamber: dict) -> dict:
         Q_pr = m.absorptivity + 0.3 * (1 - m.absorptivity)
         budget["radiation_pressure"] = Q_pr * env.light_I * math.pi * r ** 2 / 2.99792458e8 / mass
         v_brown = math.sqrt(1.380649e-23 * env.T / mass)
+        # the forces switched off in this config (simulation.FORCES_OFF_BY_DEFAULT) stay in the budget, marked
+        from .simulation import FORCES_OFF_BY_DEFAULT
+        forces = cfg.get("forces", {})
+        off_forces = [key for key in FORCES_OFF_BY_DEFAULT if not forces.get(key, False)]
+        off = [k for key in off_forces for k in FORCES_OFF_BY_DEFAULT[key]]
+        if not env.gravity_gradient:
+            off_forces.append("gravity_gradient")
+            off.append("gravity_gradient_tidal")
+        a_ref = max(a_res, 1e-30)
+        for k in off:
+            if budget[k] > OFF_WARN_FRACTION_OF_RESIDUAL * a_ref and a_res > 0:
+                key = "gravity_gradient (environment)" if k == "gravity_gradient_tidal" else next(
+                    f for f, ks in FORCES_OFF_BY_DEFAULT.items() if k in ks)
+                W.append(f"[{m.name}] {k} is switched off but is {budget[k] / G0:.2g} g, "
+                         f"{100 * budget[k] / a_res:.0f}% of the residual acceleration: switch it on ({key}).")
+        if "brownian" in off_forces and v_brown > OFF_WARN_BROWNIAN_FRACTION_OF_V_STICK * v_pp:
+            W.append(f"[{m.name}] brownian is switched off but the Brownian speed {v_brown * 1e6:.2g} um/s is "
+                     f"{100 * v_brown / v_pp:.1f}% of the sticking speed: switch it on (forces.brownian).")
         # walls: vibration and the chance a wall hit ends in sticking
         vib = chamber.get("wall_vibration", {}) or {}
         v_vib = float(vib.get("amplitude_m", 0.0)) * 2 * math.pi * float(vib.get("frequency_hz", 0.0))
@@ -162,6 +186,7 @@ def preflight(cfg: dict, chamber: dict) -> dict:
             "rms_charge_e": q_rms / Q_E,
             "spin_down_time_s": tau * (0.3 + 0.814 * Kn / (1 + Kn)) if math.isfinite(tau) else math.inf,
             "acceleration_budget_m_s2": budget,
+            "switched_off": off, "switched_off_forces": off_forces,
         }
         out["groups"].append(d)
         if tau < t_cross:

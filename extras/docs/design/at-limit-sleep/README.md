@@ -4,8 +4,12 @@ This folder is the complete record of one engine change, from the measurement th
 checks. Every stage is kept as it was written, so anyone can follow each decision, see what was rejected and why, and
 check the final logic against the code.
 
-**Status (10 Nov 2026): implemented and verified against the full model.** The code is in `dolle_sim/engine.py`,
-`dolle_sim/statics.py` and `dolle_sim/loads.py`. The 13 existing engine checks, the unit tests of the helper
+Paths: since v0.7 (10 Nov 2026) the v0.6 engine is in `extras/` (`dolle_sim/engine.py` is now
+`extras/dolle_extras/engine.py`, `tests/test_full_engine.py` is `extras/tests/test_full_engine.py`, and so on).
+This page uses the new paths; the stage records 01-06 are verbatim and keep the old ones.
+
+**Status (10 Nov 2026): implemented and verified against the full model.** The code is in `extras/dolle_extras/engine.py`,
+`extras/dolle_extras/statics.py` and `extras/dolle_extras/loads.py`. The 13 existing engine checks, the unit tests of the helper
 functions and the six checks that compare the new treatment with the full model (14-19, section 5) pass. Writing
 those six checks found three faults, fixed in the code (section 5). A review of the implementation then found eleven
 more, all fixed (section 6).
@@ -209,9 +213,9 @@ and the largest per-step Newton and dynamics terms relative to the limit, `islan
 
 | verified | how |
 |---|---|
-| The helper functions (`statics.lift_caps` ... `statics.twist_ambiguous`): the lifted law is bit-identical to the real one below the limits; the real law's return map at a limit; the released stiffness; the equilibrium solver converges, detects mechanisms and contact breaks | `tests/test_statics_caps.py` (10 tests) |
-| Left limits at breakpoints; the chord-deviation bound holds on 50 random steps over the whole flight profile, including steps containing a kink; it is exact on the parachute and splash pulses | `tests/test_loads_chord.py` (6 tests) |
-| All 13 existing engine checks still pass on the new engine (contact law vs 1-D model, conservation, rolling, cluster statics, vibration, time step, slaved rolling, exact sleep, hand-off, regimes, linear-response sleep, slaved clusters) | `python -m pytest tests/test_full_engine.py -k full_engine_check` |
+| The helper functions (`statics.lift_caps` ... `statics.twist_ambiguous`): the lifted law is bit-identical to the real one below the limits; the real law's return map at a limit; the released stiffness; the equilibrium solver converges, detects mechanisms and contact breaks | `extras/tests/test_statics_caps.py` (10 tests) |
+| Left limits at breakpoints; the chord-deviation bound holds on 50 random steps over the whole flight profile, including steps containing a kink; it is exact on the parachute and splash pulses | `extras/tests/test_loads_chord.py` (6 tests) |
+| All 13 existing engine checks still pass on the new engine (contact law vs 1-D model, conservation, rolling, cluster statics, vibration, time step, slaved rolling, exact sleep, hand-off, regimes, linear-response sleep, slaved clusters) | `python -m pytest extras/tests/test_full_engine.py -k full_engine_check` |
 | 14 `cap_sleep_vs_dem`: a grain in an edge and a 3-grain corner cluster, floor rolling springs at their limits (ratios >= 0.9996), 30 ms of the engine vs the full model at 50 and 100 steps per contact period under (a) constant loads, (b) pressing 2 -> 0.2 g, (c) the sideways load turning by 30 degrees | asleep 95-97% of the island-steps; same contacts; positions and springs within 3x the full model's step error + the reported bound (largest: (c) twist 1.6e-7 rad against 4.3e-7); (a) every state committed at an unchanged load bit-identical to the placed one |
 | 15 `cap_twist_microgravity`: a grain in an edge with locked-in contact forces, both twisting springs at 0.96 of their limit, 1e-4 g turning at 1/60 Hz, 0.5 s | asleep from the first classification (499 of 500 steps, 0.499 s skipped); twist changes 1.5e-8 (engine) and 1.4e-8 (full model) of the limit angle; twist kept; positions 1.2e-14 m apart |
 | 16 `creep_island_vs_dem`: a 2-grain stack and a 5-grain corner pile at their limits under the burn's growing load (its first 30 ms) and the coast's shrinking pressing load; a 2-grain stack on a floor with both rolling springs at their limits | creep in 100% of the sleeping steps; 9.2 and 8.9 Newton iterations per creep step; springs and positions within 3x step error + the reported bound; island_bound_xi <= 1.2e-4; the true mechanism refused as `cluster_awake_mechanism` and never asleep while the full model rolls it 449 um in 10 ms |
@@ -219,7 +223,7 @@ and the largest per-step Newton and dynamics terms relative to the limit, `islan
 | 18 `ratchet_released_bound`: a grain in an edge at its rolling limit with left-over motion of 1e-25 to 1e-18 J, and under two load ramps | slip 2.5e-14 to 8.0e-11 m, always within the released bound (9x margin); the superseded E/cap bound exceeded in 4 of 5 cases; the ramps within the bounds of item 2 |
 | 19 `island_across_breakpoint`: a 3-grain cluster at its rolling limits across the de-spin knot | committed at the pre-jump equilibrium (1.8e-16 m from it, 6.2e-10 m from the post-jump one); engine vs full model within 3x step error; the jump's permanent slip 2.6e-11 m within the released bound of its energy dF^T K_rel^-1 dF / 2 = 5.4e-19 J (6.4e-10 m) |
 
-The measured values above are from one run (10 Nov 2026; checks 14 and 16 rerun after the review's fixes); [CHECKS.md](../../../CHECKS.md) has those of the latest
+The measured values above are from one run (10 Nov 2026; checks 14 and 16 rerun after the review's fixes); [CHECKS.md](../../../../CHECKS.md) has those of the latest
 full run. Faults found by writing checks 14-19, all fixed:
 
 1. `statics.solve_equilibrium` applied the lifted contact law at zero displacement, which in floating point is not
@@ -247,7 +251,7 @@ with no missed contact, and the final positions matched the full model to 2.8e-1
 ## 6. Review of the implementation (10 Nov 2026)
 
 A review of the code (one reviewer per finding, each confirmed by a second who tried to refute it with a run) found
-eleven faults. All are fixed in `dolle_sim/engine.py`; each but one has a unit test in `tests/test_full_engine.py`.
+eleven faults. All are fixed in `extras/dolle_extras/engine.py`; each but one has a unit test in `extras/tests/test_full_engine.py`.
 
 | finding | what went wrong | fix | test |
 |---|---|---|---|
@@ -266,9 +270,9 @@ eleven faults. All are fixed in `dolle_sim/engine.py`; each but one has a unit t
 ## 7. How to check it yourself
 
 ```bash
-python -m pytest tests/test_statics_caps.py tests/test_loads_chord.py -q
-python -m pytest tests/test_full_engine.py -q
-python -m dolle_sim verify --json results/verify_all.json
+python -m pytest extras/tests/test_statics_caps.py extras/tests/test_loads_chord.py -q
+python -m pytest extras/tests/test_full_engine.py -q
+python -m dolle_extras verify --json results/verify_extras.json
 ```
 
-Every result file the checks write is turned into [CHECKS.md](../../../CHECKS.md) by `tools/checks_table.py`.
+Every result file the checks write is turned into [CHECKS.md](../../../../CHECKS.md) by `tools/checks_table.py`.

@@ -1,7 +1,7 @@
 """Markdown tables of the mission scenario results, read from results/mission/<scenario>/ (summaries and
 trajectories), for the README and docs/data/mission_tables.md.
 
-    python tools/mission_table.py
+    python extras/tools/mission_table.py
 """
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from tools.run_campaign import ORDER  # noqa: E402
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from run_campaign import ORDER  # noqa: E402
 
 FACE = {"-z": "bottom", "+z": "top", "-x": "side -x", "+x": "side +x", "-y": "side -y", "+y": "side +y"}
 

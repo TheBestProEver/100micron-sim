@@ -20,7 +20,7 @@ import math
 
 import numpy as np
 
-from .flight import G0
+from dolle_sim.flight import G0
 
 
 class Loads:

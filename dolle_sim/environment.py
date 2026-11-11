@@ -98,8 +98,9 @@ class Environment:
             self.update(0.0)
         self.window_s = float(c.get("window_s", 210.0))
 
-        # gravity gradient of a free-falling payload
-        self.gravity_gradient = bool(c.get("gravity_gradient", True))
+        # gravity gradient of a free-falling payload: off unless switched on (v0.7; ~1e-7 g across a tubule, 1e-3 of
+        # the 1e-4 g residual acceleration, python -m dolle_sim preflight)
+        self.gravity_gradient = bool(c.get("gravity_gradient", False))
         self.altitude = float(c.get("altitude_m", 130e3))
         up = np.asarray(c.get("local_vertical", [0.0, 0.0, 1.0]), float)
         self.e_up = up / np.linalg.norm(up)

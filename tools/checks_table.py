@@ -1,11 +1,14 @@
 """Write CHECKS.md: every check and comparison, what it compares, its pass criterion and the measured value.
 
 Everything is read from the result files the checks themselves write, so the table cannot drift from the runs:
-  results/verify_all.json                         python -m dolle_sim verify --json results/verify_all.json
-  results/lammps_contact/lammps_contact_check.json python tools/lammps_contact_check.py   (needs pip install lammps)
-  results/lammps_check/lammps_check.json           python -m dolle_sim lammps-check
-  results/rebound_check/rebound_check_*.json       python -m dolle_sim rebound-check ...  (needs pip install rebound)
+  results/verify_all.json                          python -m dolle_sim verify --json results/verify_all.json
+  results/verify_extras.json                       python -m dolle_extras verify --json results/verify_extras.json
+  results/lammps_contact/lammps_contact_check.json python extras/tools/lammps_contact_check.py  (needs pip install lammps)
+  results/lammps_check/lammps_check.json           python -m dolle_extras lammps-check
+  results/rebound_check/rebound_check_*.json       python -m dolle_extras rebound-check ...  (needs pip install rebound)
   results/pytest.xml                               python -m pytest tests --junitxml=results/pytest.xml
+  results/pytest_extras.xml                        python -m pytest extras/tests --junitxml=results/pytest_extras.xml
+(python -m dolle_extras works after pip install -e .; in a plain clone write python extras/dolle_extras instead.)
 Run: python tools/checks_table.py   (also writes docs/data/checks.json: the same rows as data, kept in the repository)
 """
 from __future__ import annotations
@@ -36,11 +39,18 @@ def _ok(b):
 
 
 def suites():
-    """Part 1 (verification.py) and part 2 (verify_full.py) from verify_all.json."""
+    """Part 1 (dolle_sim/verification.py) from verify_all.json; part 2 (the optional v0.6 engine,
+    extras/dolle_extras/verify_full.py) from verify_extras.json, or from an older verify_all.json that holds both, or
+    None if it was not run here."""
     rows = json.loads((RES / "verify_all.json").read_text(encoding="utf-8"))
-    full_ids = set(re.findall(r'_res\("(\w+)"', (ROOT / "dolle_sim" / "verify_full.py").read_text(encoding="utf-8")))
+    vf = ROOT / "extras" / "dolle_extras" / "verify_full.py"
+    full_ids = set(re.findall(r'_res\("(\w+)"', vf.read_text(encoding="utf-8"))) if vf.exists() else set()
     p1 = [r for r in rows if r["id"] not in full_ids]
-    p2 = [r for r in rows if r["id"] in full_ids]
+    ext = RES / "verify_extras.json"
+    if ext.exists():
+        p2 = json.loads(ext.read_text(encoding="utf-8"))
+    else:
+        p2 = [r for r in rows if r["id"] in full_ids] or None
     return p1, p2
 
 
@@ -103,8 +113,8 @@ def rebound():
     return rows
 
 
-def pytest_counts():
-    f = RES / "pytest.xml"
+def pytest_counts(name="pytest.xml"):
+    f = RES / name
     if not f.exists():
         return None
     root = ET.parse(f).getroot()
@@ -123,10 +133,13 @@ def main():
     for title, rows, note in (
             ("Part 1: model checks (dolle_sim/verification.py; also run in the browser)", p1,
              "Analytic solutions, conservation laws, limits and published data for every model component."),
-            ("Part 2: full-contact engine (dolle_sim/verify_full.py)", p2,
+            ("Part 2: the optional v0.6 full-contact engine (extras/dolle_extras/verify_full.py)", p2,
              "The contact dynamics, statics, slaved rolling, vibration synthesis and the regime machinery of the "
              "v0.6 engine against exact solutions, the full model and their own convergence.")):
         out += [f"## {title}", "", note, ""]
+        if rows is None:
+            out += ["(not run on this machine: python -m dolle_extras verify --json results/verify_extras.json)", ""]
+            continue
         out += _table(["#", "check", "what is compared", "criterion", "measured", "result"],
                       [(k + 1, r["name"], r["what"], r["criterion"], r["value"], _ok(r["passed"]))
                        for k, r in enumerate(rows)])
@@ -134,13 +147,13 @@ def main():
         total += len(rows)
         passed += sum(r["passed"] for r in rows)
     for title, rows, note in (
-            ("LAMMPS: the same contact law, term by term (tools/lammps_contact_check.py)", lammps_contact(),
+            ("LAMMPS: the same contact law, term by term (extras/tools/lammps_contact_check.py)", lammps_contact(),
              "pair_style granular jkr / tangential linear_history / rolling sds / twisting sds, fix wall/gran, "
              "nve/sphere, with the same coefficients and step as dem.py (contact breaking at maximum tension, "
              "LAMMPS's rule). Relative differences of the final state."),
-            ("LAMMPS: sticking threshold, restitution, pull-off (dolle_sim/lammps_check.py)", lammps_threshold(),
+            ("LAMMPS: sticking threshold, restitution, pull-off (extras/dolle_extras/lammps_check.py)", lammps_threshold(),
              "LAMMPS's own JKR implementation against DOLL-E's 1-D contact model with the same break rule."),
-            ("REBOUND: a chamber of flying grains (dolle_sim/rebound_check.py)", rebound(),
+            ("REBOUND: a chamber of flying grains (extras/dolle_extras/rebound_check.py)", rebound(),
              "A simplified version of the same chamber in REBOUND: its IAS15 integrator for the ballistic part, "
              "its collision search with DOLL-E's contact model plugged in as the collision resolver for the "
              "statistics. Counted quantities agree within their Poisson errors.")):
@@ -153,16 +166,22 @@ def main():
         record["comparisons"][title] = [dict(test=r[0], measured=r[1], criterion=r[2], result=r[3]) for r in rows]
         total += len(rows)
         passed += sum(r[3] == "PASS" for r in rows)
-    pc = pytest_counts()
-    out += ["## Unit and regression tests (tests/)", ""]
-    if pc:
-        n, fail, err, skip = pc
-        out += [f"{n} tests: {n - fail - err - skip} passed, {fail} failed, {err} errors, {skip} skipped "
-                "(`python -m pytest tests`).", ""]
-    out += ["## Summary", "", f"{passed} of {total} checks and comparisons pass."
-            + (f" Unit tests: {pc[0] - pc[1] - pc[2] - pc[3]}/{pc[0]}." if pc else ""), ""]
+    pc, pe = pytest_counts(), pytest_counts("pytest_extras.xml")
+    out += ["## Unit and regression tests", ""]
+    for label, c, cmd in (("Main suite (tests/)", pc, "python -m pytest"),
+                          ("Extras suite (extras/tests/)", pe, "python -m pytest extras/tests")):
+        if c:
+            n, fail, err, skip = c
+            out += [f"{label}: {n} tests: {n - fail - err - skip} passed, {fail} failed, {err} errors, {skip} skipped "
+                    f"(`{cmd}`).", ""]
+        else:
+            out += [f"{label}: not run on this machine (`{cmd}`).", ""]
+    unit = "".join(f" {label}: {c[0] - c[1] - c[2] - c[3]}/{c[0]}." for label, c in
+                   (("Unit tests (main)", pc), ("Unit tests (extras)", pe)) if c)
+    out += ["## Summary", "", f"{passed} of {total} checks and comparisons pass." + unit, ""]
     (ROOT / "CHECKS.md").write_text("\n".join(out), encoding="utf-8")
     record["unit_tests"] = dict(zip(("tests", "failures", "errors", "skipped"), pc)) if pc else None
+    record["unit_tests_extras"] = dict(zip(("tests", "failures", "errors", "skipped"), pe)) if pe else None
     record["summary"] = dict(passed=passed, total=total)
     (ROOT / "docs" / "data" / "checks.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
     print(f"wrote CHECKS.md: {passed}/{total} checks pass" + (f", {pc[0]} unit tests" if pc else ""))

@@ -431,7 +431,7 @@ def _impact_energy_audit(s):
 
 
 def _phantom_bonds(s):
-    return sum(len(s._components(s.members[b])) > 1 for b in np.flatnonzero(s.alive & (s.nmono > 1)))
+    return sum(len(s._components(b)) > 1 for b in np.flatnonzero(s.alive & (s.nmono > 1)))
 
 
 def check_fragmentation_energy():

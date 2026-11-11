@@ -14,7 +14,7 @@ a = a0/4^(1/3)), while DOLL-E, like Chokshi et al. (1993) and Dominik & Tielens 
 curve to the end of the stable branch (a = a0/6^(2/3)). For an undamped collision this halves LAMMPS's
 adhesive energy loss. DOLL-E's contact model can use either criterion (JKRContact(separation=...)).
 
-What is compared (python -m dolle_sim lammps-check):
+What is compared (python -m dolle_extras lammps-check):
   1. Undamped head-on collisions of two equal spheres (silica, graphite): the sticking threshold and the
      restitution e(v) from LAMMPS vs DOLL-E with the same break criterion (expected to agree to the
      integration accuracy), and vs DOLL-E's default criterion (expected ratio 0.70).
@@ -37,8 +37,8 @@ import json
 import math
 from pathlib import Path
 
-from .contact import JKRContact
-from .materials import get_material, pair_props, sphere_mass
+from dolle_sim.contact import JKRContact
+from dolle_sim.materials import get_material, pair_props, sphere_mass
 
 
 def _lmp():

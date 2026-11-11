@@ -1,4 +1,4 @@
-"""Term-by-term comparison of DOLL-E's full contact model (dolle_sim/dem.py) with LAMMPS (pip install lammps).
+"""Term-by-term comparison of DOLL-E's full contact model (extras/dolle_extras/dem.py) with LAMMPS (pip install lammps).
 
 Both codes run the same physical set-ups with the same contact model (JKR with LAMMPS's break at maximum tension,
 LAMMPS "viscoelastic" normal damping, Mindlin sliding, SDS rolling and twisting), the same coefficients and the same
@@ -10,7 +10,7 @@ time step, and the final states are compared:
   D  a grain on a wall spinning about the wall normal: the twisting limit
   E  20 grains dropped on a floor in a box (multi-contact, walls): positions and velocities after a short time
 
-python tools/lammps_contact_check.py [out.json]
+python extras/tools/lammps_contact_check.py [out.json]
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from dolle_sim import dem                                     # noqa: E402
+sys.path[:0] = [str(Path(__file__).resolve().parents[2]), str(Path(__file__).resolve().parents[1])]   # repo, extras/
+from dolle_extras import dem                                  # noqa: E402
 from dolle_sim.materials import get_material                  # noqa: E402
 
 MAT = get_material("silica")

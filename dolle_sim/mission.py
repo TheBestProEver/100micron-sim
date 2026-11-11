@@ -5,7 +5,9 @@
     python -m dolle_sim mission configs/mission_quarter_deck.json --loads-only
 
 A mission config describes the payload (tubules on the deck), the flight timeline (flight.py) and the gas.
-Each tubule becomes one simulated chamber. All tubules share the same flight clock: the simulation starts at
+Each tubule becomes one simulated chamber, run by the event-driven engine of simulation.py, in which stuck grains form
+rigid clumps ("engine": "v05"). The optional v0.6 full-contact engine runs only through its own command,
+python -m dolle_extras mission (extras/README.md), which passes its runner to run_mission / run_tubule. All tubules share the same flight clock: the simulation starts at
 "simulate_from_s" (T+0 = lift-off, with the dust settled on the aft face as it is on the pad) and runs to 5 s
 after splashdown (or to "simulate_to_s"), passing through the boost, coast, spin, de-spin, microgravity,
 re-entry, parachute, descent and splashdown phases with the correct timing. Impact statistics are counted in the microgravity window only (ug_start_s to
@@ -120,15 +122,16 @@ def mission_cfg(m: dict) -> dict:
     prof = FlightProfile.from_config(m.get("flight_profile"))
     t0 = float(m.get("simulate_from_s", 0.0))
     gas = dict(m.get("gas", {"pressure_pa": 1e-3}))
-    env = {"preset": "ideal", "gravity_gradient": True, "start_time_s": t0,
+    # gravity gradient: off unless the mission config switches it on (below 0.1% of the residual acceleration)
+    env = {"preset": "ideal", "gravity_gradient": bool(m.get("gravity_gradient", False)), "start_time_s": t0,
            "flight_profile": m.get("flight_profile", {}), "jitter_rms_g": m.get("jitter_rms_g", 0.0), **gas}
     cfg = {"name": m.get("name", "mission"), "dt_s": m.get("dt_s", 4e-3), "dt_launch_s": m.get("dt_launch_s", 5e-4),
            "duration_s": min(float(m.get("simulate_to_s", prof.end_s)), prof.end_s) - t0,
            "output_fps": m.get("output_fps", 5), "seed": m.get("seed", 0),
            "environment": env, "forces": m.get("forces", {}), "contact": m.get("contact", {}),
            "camera": m.get("camera", {}), "materials": m.get("materials", {}),
-           "engine": m.get("engine", "full"), "progress": m.get("progress", False)}
-    for k in ("checkpoints_s", "resume_from", "resume_at_s", "autosave_s"):      # see _run_one and engine.branch
+           "engine": m.get("engine", "v05"), "progress": m.get("progress", False)}
+    for k in ("checkpoints_s", "resume_from", "resume_at_s", "autosave_s"):   # used only by the v0.6 engine in extras/
         if m.get(k) is not None:
             cfg[k] = m[k]
     return cfg
@@ -229,44 +232,26 @@ def launch_report(m: dict, n_samples: int = 4000) -> dict:
 
 
 # ---------------------------------------------------------------------------- simulation
+FULL_ENGINE_COMMAND = "python -m dolle_extras mission CONFIG (or python extras/dolle_extras mission CONFIG)"
+
+
 def _run_one(args):
+    """Run one tubule with the event-driven engine of simulation.py (engine "v05"; stuck grains are rigid clumps).
+
+    dolle_sim never imports the optional extras: the v0.6 full-contact engine ("engine": "full") runs only through
+    its own command, which hands its runner (dolle_extras/full_mission.py run_args) to run_mission and run_tubule."""
     cfg, ch, seed, out_dir = args
-    if cfg.get("engine", "full") == "full":
-        from .engine import FullContactSim as Sim          # v0.6: every grain a body, full contact mechanics
-    else:
-        from .simulation import ChamberSim as Sim           # v0.5 event-driven engine with rigid aggregates
-    s = Sim(cfg, ch, seed)
-    if cfg.get("checkpoints_s") or cfg.get("resume_from"):
-        from .engine import branch
-        s.checkpoints = list(cfg.get("checkpoints_s") or [])
-        s.checkpoint_dir = Path(out_dir) / "checkpoints"
-        if cfg.get("resume_from"):
-            # continue a run of another scenario saved at resume_at_s (identical up to then; branch() verifies it,
-            # and if it cannot be shown identical the run starts from lift-off instead)
-            try:
-                s = branch(s.checkpoint_path(float(cfg["resume_at_s"]), cfg["resume_from"]), s)
-                print(f"  [{s.name}] continuing from T+{float(cfg['resume_at_s']):g} s of {cfg['resume_from']}",
-                      flush=True)
-            except (ValueError, FileNotFoundError) as e:
-                print(f"  [{s.name}] not branched ({e}); running from lift-off", flush=True)
-    auto = None
-    if cfg.get("autosave_s") is not None and cfg.get("engine", "full") == "full":
-        # a run killed before its end (out of memory, reboot) continues from its last autosave: the same tubule and
-        # configuration (the saved run's initial-state signature equals this one's), bit-for-bit the uninterrupted run
-        import pickle
-        auto = autosave_path(out_dir, s.name)
-        if auto.exists():
-            with open(auto, "rb") as f:
-                A = pickle.load(f)
-            if A.name == s.name and A._init_sig == s._init_sig:
-                print(f"  [{s.name}] continuing from its autosave at T+{A.env.t0_flight + A.t:.3f} s", flush=True)
-                s = A
-            else:
-                print(f"  [{s.name}] autosave {auto.name} is of another configuration; not used", flush=True)
-    if auto is not None:
-        s.run(progress=bool(cfg.get("progress", False)), autosave_path=auto, autosave_s=float(cfg["autosave_s"]))
-    else:
-        s.run(progress=bool(cfg.get("progress", False)))
+    engine = cfg.get("engine", "v05")
+    if engine == "full":
+        raise ValueError(f'"engine": "full" is the optional v0.6 engine in extras/; run it with {FULL_ENGINE_COMMAND}')
+    if engine != "v05":
+        raise ValueError(f"unknown engine {engine!r} (dolle_sim runs 'v05'; the v0.6 engine: {FULL_ENGINE_COMMAND})")
+    from .simulation import ChamberSim
+    if ch.get("vibration"):
+        print(f"  [{ch['name']}] note: random launch vibration is modelled only by the v0.6 engine in extras/ "
+              "(python -m dolle_extras mission); this v0.5 run leaves it out", flush=True)
+    s = ChamberSim(cfg, ch, seed)
+    s.run(progress=bool(cfg.get("progress", False)))
     return s
 
 
@@ -317,13 +302,15 @@ def final_state_path(out: Path, name: str) -> Path:
     return Path(out) / "tubules" / f"{name}.pkl"
 
 
-def run_tubule(mission: dict, out: Path, scenario: str | None, index: int) -> Path:
+def run_tubule(mission: dict, out: Path, scenario: str | None, index: int, runner=None) -> Path:
     """Run one tubule of a scenario (the same configuration and seed as in run_mission) and save its final state, so
-    a campaign can schedule tubules one by one; assemble_mission writes the scenario's outputs from the four."""
+    a campaign can schedule tubules one by one; assemble_mission writes the scenario's outputs from the four.
+    runner: the function that runs one tubule from its (cfg, chamber, seed, out) tuple (default _run_one, the v0.5
+    engine; python -m dolle_extras mission passes the v0.6 engine's)."""
     import pickle
     out.mkdir(parents=True, exist_ok=True)
     m, cfg, args = _tubule_args(mission, out, scenario)
-    s = _run_one(args[index])
+    s = (runner or _run_one)(args[index])
     path = final_state_path(out, s.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -345,15 +332,19 @@ def assemble_mission(mission: dict, out: Path, scenario: str | None = None, writ
     return _write_mission(m, cfg, out, sims, write_outputs)
 
 
-def run_mission(mission: dict, out: Path, scenario: str | None = None, jobs: int = 1, write_outputs=True):
+def run_mission(mission: dict, out: Path, scenario: str | None = None, jobs: int = 1, write_outputs=True,
+                runner=None):
+    """Run every tubule of a scenario (jobs > 1: in parallel processes) and write the outputs. runner: as in
+    run_tubule (default: the v0.5 engine)."""
     out.mkdir(parents=True, exist_ok=True)
     m, cfg, args = _tubule_args(mission, out, scenario)
+    run = runner or _run_one
     if jobs > 1:
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=jobs) as ex:
-            sims = list(ex.map(_run_one, args))
+            sims = list(ex.map(run, args))
     else:
-        sims = [_run_one(a) for a in args]
+        sims = [run(a) for a in args]
     return _write_mission(m, cfg, out, sims, write_outputs)
 
 

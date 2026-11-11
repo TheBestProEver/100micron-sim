@@ -56,7 +56,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from . import dem, roll1, slaved, statics
-from .environment import G0
+from dolle_sim.environment import G0
 from .loads import Loads
 
 FREE, ACTIVE, ASLEEP, ROLL, SLAV = 0, 1, 2, 3, 4
@@ -91,7 +91,7 @@ MU_DEFAULT = {("silica", "wall"): 0.4, ("silica", "silica"): 0.6, ("graphite", "
 
 class FullContactSim:
     def __init__(self, cfg: dict, chamber: dict, seed: int = 0):
-        from .simulation import ChamberSim
+        from dolle_sim.simulation import ChamberSim
         b = self.base = ChamberSim(cfg, chamber, seed)
         self.cfg, self.chamber = cfg, chamber
         self.env, self.name, self.N = b.env, b.name, b.N

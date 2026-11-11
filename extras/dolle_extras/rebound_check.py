@@ -54,9 +54,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .simulation import ChamberSim
-from .materials import pair_props
-from .contact import JKRContact
+from dolle_sim.simulation import ChamberSim
+from dolle_sim.materials import pair_props
+from dolle_sim.contact import JKRContact
 
 
 def _simplify(cfg, chamber, n_max):

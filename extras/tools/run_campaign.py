@@ -1,8 +1,9 @@
 """Run the mission scenarios, launch to splashdown, all four tubules each (results/mission/<scenario>).
 
-    python tools/run_campaign.py [--workers 8] [scenario ...]       (default: every scenario below, in this order)
+    python extras/tools/run_campaign.py [--workers 8] [scenario ...]       (default: every scenario below, in this order)
 
-Every tubule of every scenario is one job: `python -m dolle_sim mission configs/mission_quarter_deck.json
+Every tubule of every scenario is one job with the v0.6 full-contact engine: `python -m dolle_extras mission
+configs/mission_quarter_deck.json
 --scenario <s> --grains 100 --tubule <i> --autosave-min 30` (the same configuration and seed as a whole-scenario run,
 so the result is the same; tested), logged to results/mission_<s>_T<i>.log. A pool of workers takes the next job that
 can start; when a scenario's four tubules are done its outputs are written (`--assemble`, logged to
@@ -39,7 +40,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CONFIG = "configs/mission_quarter_deck.json"
 ORDER = ["nominal", "launch_vibration", "rough_grains", "kick+spin_1hz", "kick", "no_release", "strong_shaker",
          "no_drag", "kick+lying", "kick+gas_100pa", "kick+gas_1atm", "rough_grains+hang_nose_up",
@@ -150,7 +151,7 @@ def running_jobs(names):
     found = {}
     for pr in psutil.process_iter(["cmdline"]):
         c = pr.info.get("cmdline") or []
-        if "dolle_sim" not in c or "mission" not in c or "--tubule" not in c:
+        if "dolle_extras" not in c or "mission" not in c or "--tubule" not in c:
             continue
         sc = c[c.index("--scenario") + 1] if "--scenario" in c else "nominal"
         i = int(c[c.index("--tubule") + 1])
@@ -162,6 +163,11 @@ def running_jobs(names):
 class _Null:
     def close(self):
         pass
+
+
+def _child_env():
+    """The environment of a job: the repository and extras/ on the path (python -m dolle_extras without an install)."""
+    return dict(os.environ, PYTHONPATH=os.pathsep.join([str(ROOT), str(ROOT / "extras"), os.environ.get("PYTHONPATH", "")]))
 
 
 def base_args(sc):
@@ -188,13 +194,13 @@ def start(sc, i, attempt):
     if sc in BRANCH:
         src, T = BRANCH[sc]
         arg += ["--resume-from", str((out_dir(src) / "checkpoints").relative_to(ROOT)), "--resume-at", str(T)]
-    env = dict(os.environ, NUMBA_NUM_THREADS=os.environ.get("NUMBA_NUM_THREADS", "1"))
+    env = dict(_child_env(), NUMBA_NUM_THREADS=os.environ.get("NUMBA_NUM_THREADS", "1"))
     again = attempt or (out_dir(sc) / "autosave" / f"{tubule_names(sc)[i]}.pkl").exists()     # continuing
     log = open(ROOT / "results" / f"mission_{sc}_T{i + 1}.log", "a" if again else "w", encoding="utf-8")
     if again:
         log.write(f"\n--- started again (attempt {attempt + 1}) {time.ctime()} ---\n")
         log.flush()
-    p = subprocess.Popen([sys.executable, "-u", "-m", "dolle_sim", "mission", CONFIG, *arg], cwd=ROOT, stdout=log,
+    p = subprocess.Popen([sys.executable, "-u", "-m", "dolle_extras", "mission", CONFIG, *arg], cwd=ROOT, stdout=log,
                          stderr=subprocess.STDOUT, env=env)
     return p, log
 
@@ -203,8 +209,8 @@ def assemble(sc, t0, codes):
     code = max(codes)
     if code == 0:
         with open(ROOT / "results" / f"mission_{sc}.log", "w", encoding="utf-8") as f:
-            code = subprocess.call([sys.executable, "-u", "-m", "dolle_sim", "mission", CONFIG, *base_args(sc),
-                                    "--assemble"], cwd=ROOT, stdout=f, stderr=subprocess.STDOUT)
+            code = subprocess.call([sys.executable, "-u", "-m", "dolle_extras", "mission", CONFIG, *base_args(sc),
+                                    "--assemble"], cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, env=_child_env())
     line = f"{sc} exit={code} {time.time() - t0:.0f} s"
     with open(ROOT / "results" / "mission_scenarios_done.txt", "a", encoding="utf-8") as f:
         f.write(line + "\n")

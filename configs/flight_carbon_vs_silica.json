@@ -23,7 +23,7 @@
       0,
       1
     ],
-    "gravity_gradient": true,
+    "gravity_gradient": false,
     "altitude_m": 130000,
     "local_vertical": [
       0,
@@ -55,17 +55,18 @@
     }
   },
   "forces": {
+    "_comment_forces": "self_gravity, lorentz, external_e_field, photophoresis, radiation_pressure, brownian and environment.gravity_gradient are off: each is below 2.2% of the 1e-4 g residual acceleration (python -m dolle_sim preflight prints them). Set one to true to include it. The stored results of this config (docs/USER_GUIDE.md) were computed with all of them on (v0.6.2).",
     "coulomb": true,
     "polarization": true,
     "image_charges": true,
-    "self_gravity": true,
-    "lorentz": true,
-    "external_e_field": true,
+    "self_gravity": false,
+    "lorentz": false,
+    "external_e_field": false,
     "long_range_cutoff_m": 0.003,
     "thermophoresis": true,
-    "photophoresis": true,
-    "radiation_pressure": true,
-    "brownian": true,
+    "photophoresis": false,
+    "radiation_pressure": false,
+    "brownian": false,
     "long_range_update_every": 1
   },
   "contact": {

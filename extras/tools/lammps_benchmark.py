@@ -1,7 +1,7 @@
 """How long would a time-driven DEM code (LAMMPS) take for one DOLL-E tubule? (pip install lammps)
 
-    python tools/lammps_benchmark.py          # grains in flight (no contacts: a lower bound)
-    python tools/lammps_benchmark.py --bed    # the settled single layer, every grain in a JKR wall contact
+    python extras/tools/lammps_benchmark.py          # grains in flight (no contacts: a lower bound)
+    python extras/tools/lammps_benchmark.py --bed    # the settled single layer, every grain in a JKR wall contact
 
 800 silica grains (R = 50 um, E = 54 GPa, nu = 0.17, rho = 2000 kg/m^3, gamma = 0.025 J/m^2) moving at ~1 cm/s in
 a 12.7 x 12.7 x 38.1 mm box with JKR walls, real stiffness, time step 20% of the Rayleigh time (EDEM's guidance for

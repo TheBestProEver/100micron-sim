@@ -1,16 +1,18 @@
-"""The decision map (docs/ENGINE_LOGIC.md) and the design record (docs/design/at-limit-sleep/README.md) must name
-only functions, checks and tests that exist, so that what they say can always be traced to the code."""
+"""The decision map (extras/docs/ENGINE_LOGIC.md) and the design record (extras/docs/design/at-limit-sleep/README.md)
+must name only functions, checks and tests that exist, so that what they say can always be traced to the code."""
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-PKG = ROOT / "dolle_sim"
-DOCS = [ROOT / "docs" / "ENGINE_LOGIC.md", ROOT / "docs" / "design" / "at-limit-sleep" / "README.md"]
+ROOT = Path(__file__).resolve().parents[2]
+EXTRAS = ROOT / "extras" / "dolle_extras"          # the v0.6 engine's modules
+SIM = ROOT / "dolle_sim"                           # flight, mission, simulation
+DOCS = [ROOT / "extras" / "docs" / "ENGINE_LOGIC.md", ROOT / "extras" / "docs" / "design" / "at-limit-sleep" / "README.md"]
 MODULES = ("engine", "statics", "loads", "dem", "slaved", "roll1", "flight", "mission", "simulation")
 
 
 def _src(name):
-    return (PKG / f"{name}.py").read_text(encoding="utf-8")
+    f = EXTRAS / f"{name}.py"
+    return (f if f.exists() else SIM / f"{name}.py").read_text(encoding="utf-8")
 
 
 def _defined(src, name):
@@ -19,14 +21,14 @@ def _defined(src, name):
 
 def _check_ids():
     ids = set()
-    for f in ("verification.py", "verify_full.py"):
-        ids |= set(re.findall(r'_res\(\s*"(\w+)"', (PKG / f).read_text(encoding="utf-8")))
+    for f in (SIM / "verification.py", EXTRAS / "verify_full.py"):
+        ids |= set(re.findall(r'_res\(\s*"(\w+)"', f.read_text(encoding="utf-8")))
     return ids
 
 
 def _tests():
     names = set()
-    for f in (ROOT / "tests").glob("test_*.py"):
+    for f in [*(ROOT / "tests").glob("test_*.py"), *(ROOT / "extras" / "tests").glob("test_*.py")]:
         names |= set(re.findall(r"^def (test_\w+)", f.read_text(encoding="utf-8"), re.M))
     return names
 
@@ -42,9 +44,9 @@ def test_named_functions_exist():
             if rest == "py":                      # a file name, not a function
                 continue
             name = rest.split(".")[-1]
-            assert _defined(_src(mod), name), f"{doc}: {mod}.{rest} is not defined in dolle_sim/{mod}.py"
+            assert _defined(_src(mod), name), f"{doc}: {mod}.{rest} is not defined in {mod}.py"
         for name in re.findall(r"`(_[a-z]\w*)`", text):
-            assert _defined(all_src, name), f"{doc}: {name} is not defined in dolle_sim"
+            assert _defined(all_src, name), f"{doc}: {name} is not defined in the engine's modules"
         for cls, meth in re.findall(r"`([A-Z]\w+)\.(\w+)(?:\([^`]*\))?`", text):
             assert _defined(all_src, cls) and _defined(all_src, meth), f"{doc}: {cls}.{meth} is not defined"
 

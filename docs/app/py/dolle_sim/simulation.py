@@ -63,6 +63,15 @@ EPS0 = 8.8541878128e-12
 K_B = 1.380649e-23
 C_LIGHT = 2.99792458e8
 FRAG_TAG_S = 0.05            # impacts within this time of a fragmentation are tagged post_fragment
+# Forces that are OFF unless a config switches them on ("forces": {"<key>": true}), since v0.7. For the flight demo
+# config each is at most 2.2% of the 1e-4 g residual acceleration (radiation pressure on graphite; Brownian motion
+# ~2 um/s against mm/s impacts): python -m dolle_sim preflight prints every one, marks these "(off)", and warns when a
+# switched-off one would matter (design.py). config key -> the preflight budget entries it covers. (The gravity
+# gradient is switched in the environment: "environment": {"gravity_gradient": true}.)
+FORCES_OFF_BY_DEFAULT = {"self_gravity": ("mutual_gravity_at_contact", "mutual_gravity_at_mean_spacing"),
+                         "lorentz": ("lorentz_qvB",), "external_e_field": ("external_E_field",),
+                         "photophoresis": ("photophoresis",), "radiation_pressure": ("radiation_pressure",),
+                         "brownian": ()}
 
 
 def _cross3(a, b):
@@ -104,6 +113,9 @@ class ChamberSim:
         self.charging = bool(cc.get("contact_charging", False))
         self.z0 = float(cc.get("charging_cutoff_distance_m", 5e-10))
         self.fragmentation = bool(cc.get("fragmentation", True))
+        # fraction of a break-up's left-over dissipated energy given back to the fragments as separation energy
+        # (ASSUMED: 1 = all of it, the default; 0 = none, the opposite bound; see _fragment)
+        self.frag_separation = float(cc.get("fragment_separation", 1.0))
         self.skin = float(cc.get("neighbor_skin_m", 1e-3))
         self.contact_steps = int(cc.get("steps_per_contact", 300))
         # wall roughness / coating: scales the work of adhesion of grain-wall contacts
@@ -134,14 +146,15 @@ class ChamberSim:
         self.f_coulomb = bool(fc.get("coulomb", True))
         self.f_polar = bool(fc.get("polarization", True))
         self.f_image = bool(fc.get("image_charges", True))
-        self.f_selfgrav = bool(fc.get("self_gravity", True))
-        self.f_lorentz = bool(fc.get("lorentz", True))
-        self.f_efield = bool(fc.get("external_e_field", True))
         self.f_thermo = bool(fc.get("thermophoresis", True))
-        self.f_photo = bool(fc.get("photophoresis", True))
-        self.f_radp = bool(fc.get("radiation_pressure", True))
-        self.f_brown = bool(fc.get("brownian", True))
         self.f_space = bool(fc.get("space_charge", True))
+        # off unless the config switches them on (FORCES_OFF_BY_DEFAULT above says why)
+        self.f_selfgrav = bool(fc.get("self_gravity", False))
+        self.f_lorentz = bool(fc.get("lorentz", False))
+        self.f_efield = bool(fc.get("external_e_field", False))
+        self.f_photo = bool(fc.get("photophoresis", False))
+        self.f_radp = bool(fc.get("radiation_pressure", False))
+        self.f_brown = bool(fc.get("brownian", False))
         self.photo_alpha = float(fc.get("photophoresis_accommodation", 1.0))
         self.coulomb_cut = float(fc.get("long_range_cutoff_m", cc.get("coulomb_cutoff_m", 3e-3)))
         self.lr_every = max(1, int(fc.get("long_range_update_every", 1)))
@@ -307,6 +320,7 @@ class ChamberSim:
         # bodies: initially one per monomer
         self.body = np.arange(N)
         self.members = [[k] for k in range(N)]
+        self.bonds = [[] for _ in range(N)]  # each body's grain-grain bonds: the pairs (i, j), i < j, that stuck
         self.off = np.zeros((N, 3))          # monomer offset from its body COM, world frame
         self.offb = np.zeros((N, 3))         # same, body (principal-axis) frame
         self.X = self.pos.copy()
@@ -898,7 +912,7 @@ class ChamberSim:
             rec["outcome"] = "rest"
         if res.stuck or resting:
             self.n_events["rest" if resting else "stick"] += 1
-            self._merge(A, B)
+            self._merge(A, B, bond=(i, j))
         else:
             self.n_events["bounce"] += 1
             P = self._impulse(K, vrel, n, res.e_n)
@@ -971,22 +985,18 @@ class ChamberSim:
 
     # ------------------------------------------------------------ fragmentation
     def _bond_energy(self, b, k):
-        """Break energy of the grain-grain bond holding grain k in aggregate b (nearest member)."""
-        mem = [x for x in self.members[b] if x != k]
+        """Break energy of the grain-grain bond holding grain k in aggregate b (nearest member bonded to it)."""
+        mem = [x for x in self.members[b] if x != k and (min(x, k), max(x, k)) in self.bonds[b]] or \
+            [x for x in self.members[b] if x != k]
         d = np.linalg.norm(self.pos[mem] - self.pos[k], axis=1)
         return self._contact(k, mem[int(np.argmin(d))]).p.E_break
 
-    def _contacts_of(self, mem, k=None):
-        """Number of touching grain pairs among mem (or only those involving grain k)."""
-        mem = list(mem)
-        n = 0
-        for a_i, a in enumerate(mem):
-            for b in mem[a_i + 1:]:
-                if k is not None and k not in (a, b):
-                    continue
-                if np.linalg.norm(self.pos[a] - self.pos[b]) < (self.rad[a] + self.rad[b]) * (1 + 1e-6):
-                    n += 1
-        return n
+    def _contacts_of(self, b, k=None):
+        """Number of bonds of body b (or only those of grain k). The bonds are stored when grains stick (_merge),
+        not recomputed from distances: a grain that sticks to a spinning body is merged where the straight-line
+        contact search put it, a few nm from touching (at most rho theta^2/2 = 1.25e-3 rho, rho the grain's distance
+        from the body's centre of mass, after _rotation_window's 0.05 rad), which a distance test would miss."""
+        return sum(1 for bd in self.bonds[b] if k is None or k in bd)
 
     def _fragment(self, hits, E_coll, E_diss, t_now):
         """Dominik & Tielens (1997) thresholds: erosion above ~3 N_c E_break, shattering above ~10 N_c E_break,
@@ -995,7 +1005,9 @@ class ChamberSim:
         Energy budget (rigid bodies): the only energy available is E_diss, the kinetic energy the bounce
         actually removed. Every broken contact costs E_break; if E_diss cannot pay for a shatter, the impact
         erodes the struck grain instead, and if it cannot pay for that either, nothing breaks. Fragments
-        separate with what is left, so kinetic + bond energy never increases."""
+        separate with the fraction frag_separation of what is left (ASSUMED, default 1: all of it; the contact
+        model had turned it into heat, and how much comes back is not known), so kinetic + bond energy never
+        increases. The thresholds were derived for large aggregates; for 2-3 grain bodies they are extrapolated."""
         agg = [(b, k) for b, k in hits if self.nmono[b] > 1 and not self.frozen[b]]
         if not agg:
             return 0
@@ -1004,10 +1016,10 @@ class ChamberSim:
         options = []
         if E_coll > 10 * N_c * E_b:
             options.append(("shatter", {b: [[x] for x in self.members[b]][1:] for b, _ in agg},
-                            sum(self._contacts_of(self.members[b]) for b, _ in agg)))
+                            sum(self._contacts_of(b) for b, _ in agg)))
         if E_coll > 3 * N_c * E_b:
             options.append(("erosion", {b: [[k]] for b, k in agg},
-                            sum(self._contacts_of(self.members[b], k) for b, k in agg)))
+                            sum(self._contacts_of(b, k) for b, k in agg)))
         if not options:
             return 0
         for mode, detach, n_contacts in options:
@@ -1020,7 +1032,7 @@ class ChamberSim:
         if mode != options[0][0]:
             self.n_events["fragmentation_energy_limited"] += 1
         self.E_bonds_broken += cost
-        E_sep = E_diss - cost
+        E_sep = self.frag_separation * (E_diss - cost)
         out = 0
         for b, groups in detach.items():
             members_before = list(self.members[b])
@@ -1061,17 +1073,17 @@ class ChamberSim:
             I += (self.I0[k] + self.mass[k] * (r @ r)) * np.eye(3) - self.mass[k] * np.outer(r, r)
         return I
 
-    def _components(self, mem):
-        """Groups of mutually touching grains (an aggregate is held together only by contacts)."""
-        mem = list(mem)
-        left, comps = set(mem), []
+    def _components(self, b):
+        """Groups of grains of body b held together by its bonds (an aggregate is held together only by them)."""
+        adj = set(self.bonds[b])
+        left, comps = set(self.members[b]), []
         while left:
             stack = [left.pop()]
             comp = list(stack)
             while stack:
                 k = stack.pop()
                 for j in list(left):
-                    if np.linalg.norm(self.pos[j] - self.pos[k]) < (self.rad[j] + self.rad[k]) * (1 + 1e-6):
+                    if (min(j, k), max(j, k)) in adj:
                         left.remove(j)
                         stack.append(j)
                         comp.append(j)
@@ -1082,7 +1094,7 @@ class ChamberSim:
         """After grains were removed, any part of body b no longer in contact becomes its own body."""
         if self.nmono[b] < 2:
             return []
-        comps = self._components(self.members[b])
+        comps = self._components(b)
         if len(comps) < 2:
             return []
         comps.sort(key=len, reverse=True)
@@ -1096,8 +1108,11 @@ class ChamberSim:
         Lo = self.L[b] + self.M[b] * _cross3(self.X[b], self.V[b])
         free = list(np.flatnonzero(~self.alive)[:len(groups)])
         new = []
+        bonds = self.bonds[b]
         for g, nb in zip(groups, free):
             g = [int(k) for k in g]
+            gs = set(g)
+            self.bonds[nb] = [bd for bd in bonds if bd[0] in gs and bd[1] in gs]   # bonds across parts break
             mg = self.mass[g]
             Mg = float(mg.sum())
             vg = self.V[b][None, :] + _crossN(w[None, :], self.off[g])
@@ -1127,6 +1142,8 @@ class ChamberSim:
             self.brot[nb] = self._rot_drag(g)
             new.append(int(nb))
         mem = self.members[b]
+        rest = set(mem)
+        self.bonds[b] = [bd for bd in bonds if bd[0] in rest and bd[1] in rest]
         M = self.mass[mem].sum()
         X = (self.mass[mem, None] * self.pos[mem]).sum(0) / M
         self.M[b], self.X[b], self.V[b] = M, X, P / M
@@ -1172,7 +1189,9 @@ class ChamberSim:
         if j is not None:
             self.q[j] += dq
 
-    def _merge(self, A, B):
+    def _merge(self, A, B, bond=None):
+        """Bodies A and B stick into one rigid body. bond = (i, j), the grains that stuck; without it (bodies
+        built by hand from grains placed touching) the touching pairs between A and B become the bonds."""
         if self.nmono[B] > self.nmono[A]:
             A, B = B, A
         MA, MB = self.M[A], self.M[B]
@@ -1189,6 +1208,12 @@ class ChamberSim:
         if fz:
             src = A if self.frozen[A] else B
             self.fw_ax[A], self.fw_side[A] = self.fw_ax[src], self.fw_side[src]
+        if bond is None:
+            new = [(min(j, k), max(j, k)) for j in self.members[A] for k in self.members[B]
+                   if np.linalg.norm(self.pos[j] - self.pos[k]) < (self.rad[j] + self.rad[k]) * (1 + 1e-6)]
+        else:
+            new = [(min(bond), max(bond))]
+        self.bonds[A], self.bonds[B] = self.bonds[A] + self.bonds[B] + new, []
         mem = self.members[A] + self.members[B]
         self.members[A], self.members[B] = mem, []
         self.body[mem] = A
@@ -1344,10 +1369,8 @@ class ChamberSim:
         key = (b, tuple(mem))
         if key not in self._agg_strength:
             fc = float(self.Fc_wall[mem].min())
-            for i, k in enumerate(mem):
-                for j in mem[i + 1:]:
-                    if np.linalg.norm(self.pos[j] - self.pos[k]) < (self.rad[j] + self.rad[k]) * (1 + 1e-6):
-                        fc = min(fc, float(self._contact(k, j).p.F_c))
+            for k, j in self.bonds[b]:
+                fc = min(fc, float(self._contact(k, j).p.F_c))
             self._agg_strength[key] = fc
         a = self._a_app_now[None, :] + self._F_pos[mem] / self.mass[mem][:, None]
         load = float(np.linalg.norm(self.mass[mem][:, None] * a, axis=1).sum()) + float(self.M[b]) * a_sh
@@ -1376,12 +1399,13 @@ class ChamberSim:
         wall_pos = 0.0 if side < 0 else self.size[ax]
         gap = np.abs(self.pos[mem, ax] - wall_pos) - self.rad[mem]
         root = mem[int(np.argmin(gap))]
-        # spanning tree of touching grains, from the grain on the wall
+        # spanning tree of the bonds, from the grain on the wall
+        adj = set(self.bonds[b])
         parent, order, todo = {root: None}, [root], [root]
         while todo:
             k = todo.pop()
             for j in mem:
-                if j not in parent and np.linalg.norm(self.pos[j] - self.pos[k]) < (self.rad[j] + self.rad[k]) * (1 + 1e-6):
+                if j not in parent and (min(j, k), max(j, k)) in adj:
                     parent[j] = k
                     order.append(j)
                     todo.append(j)

@@ -5,7 +5,8 @@
     python tools/build_site.py --figures  # also rebuild docs/figures from results/
 
 The site is static: docs/app runs the Python package in the browser with Pyodide,
-docs/replays holds down-sampled 3D replays of the desktop flight runs.
+docs/replays holds down-sampled 3D replays of the desktop flight runs. (The 3-D page docs/sim3d is built by
+tools/make_sim3d_replays.py, its replays, and tools/build_sim3d.py, the dolle_core copies of its live sandbox.)
 """
 from __future__ import annotations
 
@@ -76,8 +77,12 @@ def write_provenance():
     (DOCS / "data" / "provenance.json").write_text(json.dumps(provenance.as_dict(counts), indent=1), encoding="utf-8")
     (ROOT / "PROVENANCE.md").write_text(provenance.as_markdown(counts), encoding="utf-8")
     print("wrote PROVENANCE.md and docs/data/provenance.json")
-    # keep the number of verification checks quoted on the pages in step with verification.py
-    n, n_model = provenance.n_checks(), provenance.n_checks("model")
+    # keep the number of verification checks quoted on the pages in step with verification.py and, for the
+    # optional v0.6 engine whose checks "need the desktop" (the page says so), extras/dolle_extras/verify_full.py
+    n_model = provenance.n_checks()
+    vf = ROOT / "extras" / "dolle_extras" / "verify_full.py"
+    n_engine = len(set(re.findall(r'_res\("(\w+)"', vf.read_text(encoding="utf-8")))) if vf.exists() else 0
+    n = n_model + n_engine
     page = DOCS / "index.html"
     html = page.read_text(encoding="utf-8")
     html = re.sub(r"<!--checks-->.*?<!--/checks-->", f"<!--checks-->{n} checks<!--/checks-->", html)
@@ -119,8 +124,7 @@ def _decimate_viewer(src: Path, dst: Path, title: str, max_particles=500, frame_
 
 
 def build_replays():
-    runs = [("flight_carbon_vs_silica", "mission.html", "Simulated flight: graphite vs silica (first 60 s)"),
-            ("colliding_clouds", "clouds.html", "Colliding clouds: graphite vs silica (60 s)")]
+    runs = [("flight_carbon_vs_silica", "mission.html", "Simulated flight: graphite vs silica (first 60 s)")]
     for run, name, title in runs:
         src = ROOT / "results" / run / "viewer.html"
         if src.exists():
@@ -137,8 +141,7 @@ def build_figures():
     fig_dir = DOCS / "figures"
     fig_dir.mkdir(exist_ok=True)
     R = ROOT / "results"
-    for src, dst in [("colliding_clouds/sticking_measurement.png", "sticking_measurement_clouds.png"),
-                     ("flight_carbon_vs_silica/sticking_measurement.png", "sticking_measurement_isotropic.png"),
+    for src, dst in [("flight_carbon_vs_silica/sticking_measurement.png", "sticking_measurement_isotropic.png"),
                      ("flight_carbon_vs_silica/timeseries.png", "timeseries_isotropic.png"),
                      ("sweep/sticking_sweep.png", "sticking_sweep.png"),
                      ("rebound_check/rebound_check_carbon.png", "rebound_check_carbon.png")]:
@@ -147,21 +150,6 @@ def build_figures():
             print(f"copied {dst}")
         else:
             print(f"skip {dst}: results/{src} not found")
-    if (R / "colliding_clouds" / "carbon" / "trajectory.npz").exists():
-        fig = plt.figure(figsize=(11, 5), constrained_layout=True)
-        for k, (ch, t_show) in enumerate([("carbon", 2.0), ("silica", 5.0)]):
-            d = np.load(R / "colliding_clouds" / ch / "trajectory.npz")
-            t, pos, body = d["t"], d["pos"], d["body"]
-            f = int(np.searchsorted(t, t_show))
-            p = pos[f] * 1e3
-            agg = np.bincount(body[f], minlength=len(body[f]))[body[f]]
-            ax = fig.add_subplot(1, 2, k + 1, projection="3d")
-            ax.scatter(p[:, 0], p[:, 1], p[:, 2], s=2, c=np.where(agg > 1, "#e0703a", "#2a6fdb"), depthshade=False)
-            ax.set(xlim=(0, 60), ylim=(0, 30), zlim=(0, 30), xlabel="x [mm]", ylabel="y [mm]", zlabel="z [mm]",
-                   title=f"{ch}: colliding clouds at t = {t[f]:.1f} s (orange = aggregates)")
-            ax.set_box_aspect((2, 1, 1))
-        fig.savefig(fig_dir / "clouds_snapshot.png", dpi=120)
-        print("wrote clouds_snapshot.png")
 
 
 if __name__ == "__main__":

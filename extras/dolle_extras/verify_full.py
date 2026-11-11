@@ -1,7 +1,7 @@
 """Checks of the v0.6 full-contact engine (dem.py, statics.py, loads.py, vibration.py, engine.py).
 
 Each check states what it compares, against what, and the pass criterion. They need numba (desktop); the browser app
-runs only the checks in verification.py. Run them all with: python -m dolle_sim verify
+runs only the checks in verification.py. Run these with: python -m dolle_extras verify
 """
 from __future__ import annotations
 
@@ -10,7 +10,20 @@ import math
 import numpy as np
 
 from . import dem, statics
-from .materials import get_material, pair_props, sphere_mass
+from dolle_sim.materials import get_material, pair_props, sphere_mass
+
+
+# The engine checks below were written, and their values recorded, with every force of v0.6.2 on (its defaults). v0.7
+# switched the negligible ones off by default (dolle_sim.simulation.FORCES_OFF_BY_DEFAULT, environment
+# "gravity_gradient"); the checks that build a whole engine set them on explicitly, so that each still tests what it
+# was written to test (engine_handoff (a1), for example: exact free flight under the tidal and mutual-gravity terms).
+FORCES_V062 = {"self_gravity": True, "lorentz": True, "external_e_field": True, "photophoresis": True,
+               "radiation_pressure": True, "brownian": True}
+
+
+def _env(**kw):
+    """The checks' environment: preset ideal, no gas, the gravity gradient on (as in v0.6.2), plus kw."""
+    return {"preset": "ideal", "pressure_pa": 0.0, "gravity_gradient": True, **kw}
 
 
 def _res(key, name, what, value, criterion, ok):
@@ -39,7 +52,7 @@ def _collide(mat, R, v, dt, **kw):
 
 def check_dem_vs_1d():
     """Head-on impacts in the 3-D DEM against the independent 1-D JKR integrator of contact.py (same physics)."""
-    from .contact import JKRContact
+    from dolle_sim.contact import JKRContact
     worst = 0.0
     vals = []
     for name in ("silica", "graphite"):
@@ -68,7 +81,7 @@ def check_dem_vs_1d():
 def check_dem_conservation():
     """Undamped oblique impact of spinning, adhesive grains: momentum exact; total energy (kinetic + JKR + springs)
     constant while the contact holds (the JKR snap-on and break are the model's only losses)."""
-    from .contact import JKRContact
+    from dolle_sim.contact import JKRContact
     mat = get_material("silica")
     R = 50e-6
     x = [[0.0, 0.0, 0.0], [math.sqrt(4 - 0.25) * R + 1e-8, 0.5 * R, 0.0]]
@@ -366,8 +379,8 @@ def check_engine_handoff():
     time-discretisation spread (its step at different phases of the time grid) of a fine reference."""
     import math
     from .engine import FullContactSim, FREE
-    cfg = {"dt_s": 1e-3, "duration_s": 2e-3, "output_fps": 1000, "environment": {"preset": "ideal", "pressure_pa": 0.0},
-           "contact": {"contact_charging": False}, "forces": {}}
+    cfg = {"dt_s": 1e-3, "duration_s": 2e-3, "output_fps": 1000, "environment": _env(),
+           "contact": {"contact_charging": False}, "forces": dict(FORCES_V062)}
     ch = {"name": "handoff", "size_m": [0.01, 0.01, 0.01], "wall_material": "glass_borosilicate",
           "particles": [{"material": "silica", "count": 2, "radius_m": 50e-6, "velocity": {"speed_mean_m_s": 0.0},
                          "initial_state": {"type": "free"}}]}
@@ -475,8 +488,9 @@ def _regime_scene(all_dem=False, n_ppp=50, v_proj=0.06, nrow=3, gap=6e-6, v_land
     a grain rolling at 4 mm/s beside the row; a grain landing on the row from above; spare grains resting apart."""
     from .engine import FullContactSim, ASLEEP, ROLL, FREE
     cfg = {"dt_s": 1e-3, "duration_s": dur, "output_fps": 1000,
-           "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": [0.0, 0.0, -1.0]},
-           "contact": {"contact_charging": False, "all_dem": all_dem, "steps_per_period": n_ppp}, "forces": {}}
+           "environment": _env(residual_accel_g=[0.0, 0.0, -1.0]),
+           "contact": {"contact_charging": False, "all_dem": all_dem, "steps_per_period": n_ppp},
+           "forces": dict(FORCES_V062)}
     ch = {"name": "regimes", "size_m": [0.003, 0.001, 0.001], "wall_material": "glass_borosilicate",
           "particles": [{"material": "silica", "count": 11, "radius_m": 50e-6, "velocity": {"speed_mean_m_s": 0.0},
                          "initial_state": {"type": "free"}}]}
@@ -548,8 +562,8 @@ def check_linres():
     import copy
     from .engine import FullContactSim, ACTIVE
     cfg = {"dt_s": 1e-3, "duration_s": 4e-3, "output_fps": 1000,
-           "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": [0.0, 0.0, -1.0]},
-           "contact": {"contact_charging": False, "all_dem": True}, "forces": {}}
+           "environment": _env(residual_accel_g=[0.0, 0.0, -1.0]),
+           "contact": {"contact_charging": False, "all_dem": True}, "forces": dict(FORCES_V062)}
     ch = {"name": "linres", "size_m": [0.001, 0.001, 0.001], "wall_material": "glass_borosilicate",
           "particles": [{"material": "silica", "count": 2, "radius_m": 50e-6, "velocity": {"speed_mean_m_s": 0.0},
                          "initial_state": {"type": "free"}}]}
@@ -701,8 +715,9 @@ def _slaved_scene(all_dem=False, n_ppp=50, dur=6e-3):
     grain rolling after it, 0.4 mm behind and 10 cm/s faster, until it catches up and hits it."""
     from .engine import FullContactSim, ACTIVE, ASLEEP, ROLL, FREE
     cfg = {"dt_s": 1e-3, "duration_s": dur, "output_fps": 1000,
-           "environment": {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": [10.0, 0.0, -1.0]},
-           "contact": {"contact_charging": False, "all_dem": all_dem, "steps_per_period": n_ppp}, "forces": {}}
+           "environment": _env(residual_accel_g=[10.0, 0.0, -1.0]),
+           "contact": {"contact_charging": False, "all_dem": all_dem, "steps_per_period": n_ppp},
+           "forces": dict(FORCES_V062)}
     ch = {"name": "slaved", "size_m": [0.003, 0.001, 0.001], "wall_material": "glass_borosilicate",
           "particles": [{"material": "silica", "count": 3, "radius_m": 50e-6, "velocity": {"speed_mean_m_s": 0.0},
                          "initial_state": {"type": "free"}}]}
@@ -780,9 +795,10 @@ def _cap_sim(pos, a_g=(0.0, 0.0, 0.0), size=(1e-3, 1e-3, 1e-3), n_ppp=50, env=No
     """Grains of 50 um silica at pos in a glass box, at rest, all in the full model (all_dem), under the uniform load
     a_g [g] (environment preset ideal, no gas, no charging) or the environment env (a flight profile)."""
     from .engine import FullContactSim, ACTIVE
-    e = {"preset": "ideal", "pressure_pa": 0.0, "residual_accel_g": list(a_g)} if env is None else env
+    e = _env(residual_accel_g=list(a_g)) if env is None else {"gravity_gradient": True, **env}
     cfg = {"dt_s": dt, "duration_s": 1e-3, "output_fps": 1000, "environment": e,
-           "contact": {"contact_charging": False, "all_dem": True, "steps_per_period": n_ppp}, "forces": {}}
+           "contact": {"contact_charging": False, "all_dem": True, "steps_per_period": n_ppp},
+           "forces": dict(FORCES_V062)}
     ch = {"name": "cap", "size_m": list(size), "wall_material": "glass_borosilicate",
           "particles": [{"material": "silica", "count": len(pos), "radius_m": 50e-6,
                          "velocity": {"speed_mean_m_s": 0.0}, "initial_state": {"type": "free"}}]}
@@ -1292,7 +1308,7 @@ def check_between_sample_bound(n_grid=20):
     inside every step, through the nominal flight's drag decay, splash, spin-up, a descent-table knot and the
     de-spin knot."""
     import time
-    from .flight import FlightProfile
+    from dolle_sim.flight import FlightProfile
     t0 = time.time()
     prof = FlightProfile()
     R, d, L = 50e-6, 2 * 50e-6 - 2e-9, 1e-3
@@ -1543,7 +1559,7 @@ def check_island_across_breakpoint():
     import copy
     import time
     from scipy.sparse.linalg import splu
-    from .flight import FlightProfile
+    from dolle_sim.flight import FlightProfile
     t0 = time.time()
     Tk = FlightProfile().despin_s
     R, d, L = 50e-6, 2 * 50e-6 - 2e-9, 1e-3

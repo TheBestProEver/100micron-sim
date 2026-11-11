@@ -7,7 +7,7 @@ import pytest
 
 from dolle_sim.environment import Environment
 from dolle_sim.flight import G0
-from dolle_sim.loads import Loads
+from dolle_extras.loads import Loads
 
 L_STEP = 4e-3
 
@@ -139,7 +139,7 @@ def test_spin_chord_is_the_exact_deviation_of_omega_squared(loads):
 def test_release_and_vibration_terms_are_present_when_their_windows_overlap(loads):
     """A step overlapping a release window carries twice the waveform's amplitude on its axis, one overlapping a
     vibration window twice the vibration's largest value over the step; neither elsewhere."""
-    from dolle_sim.vibration import VibrationHistory
+    from dolle_extras.vibration import VibrationHistory
     rel = [dict(start_s=90.0, end_s=90.2, omega=2 * math.pi * 200.0, peak_g=50.0, axis=2, type="shake")]
     hv = VibrationHistory(100.0, 20000.0, np.random.default_rng(0).normal(size=(3, 201)))
     L = Loads(loads.env, rel, [hv])

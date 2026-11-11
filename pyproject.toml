@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "dolle-sim"
-version = "0.6.2"
+version = "0.7.0"
 description = "DOLL-E: microgravity dust-collision simulator for 100 um grains on a sounding-rocket flight"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,16 +12,23 @@ dependencies = ["numpy>=1.24", "scipy>=1.10", "matplotlib>=3.7"]
 
 [project.optional-dependencies]
 fast = ["numba>=0.58"]
-rebound = ["rebound>=4.0"]
-lammps = ["lammps>=2025.7.22"]
-image = ["scikit-image>=0.21"]
-test = ["pytest>=7"]
+extras = ["numba>=0.58", "psutil>=5"]         # the v0.6 engine (extras/) and the campaign scheduler
+rebound = ["rebound>=4.0"]                    # python -m dolle_extras rebound-check
+lammps = ["lammps>=2025.7.22"]                # python -m dolle_extras lammps-check
+image = ["scikit-image>=0.21"]                # python -m dolle_extras sizes-image
+test = ["pytest>=7", "nbformat", "nbclient", "ipykernel"]
 
 [project.scripts]
 dolle-sim = "dolle_sim.__main__:main"
 
 [tool.setuptools]
-packages = ["dolle_sim", "dolle_core"]
+packages = ["dolle_sim", "dolle_core", "dolle_extras"]
+
+[tool.setuptools.package-dir]
+dolle_extras = "extras/dolle_extras"          # the optional extras live in extras/ (extras/README.md)
 
 [tool.setuptools.package-data]
 dolle_sim = ["viewer_template.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]                         # python -m pytest: the main suite; python -m pytest extras/tests: the extras

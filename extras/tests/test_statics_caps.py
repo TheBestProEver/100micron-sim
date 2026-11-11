@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from scipy.sparse.linalg import splu
 
-from dolle_sim import dem, statics
+from dolle_extras import dem, statics
 from dolle_sim.materials import get_material, sphere_mass
 
 R = 50e-6
