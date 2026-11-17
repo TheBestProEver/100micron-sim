@@ -29,6 +29,7 @@ dolle_extras = "extras/dolle_extras"          # the optional extras live in extr
 
 [tool.setuptools.package-data]
 dolle_sim = ["viewer_template.html"]
+dolle_core = ["inverse_grid.json"]           # the restitution table of dolle_core/inverse.py
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]                         # python -m pytest: the main suite; python -m pytest extras/tests: the extras

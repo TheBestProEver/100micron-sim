@@ -15,6 +15,7 @@ from a cited paper and shows the algebra. Each "why this choice" box gives the a
 | `04_grain_on_a_wall.ipynb` | What holds a grain on the wall (pull-off, sliding, rolling, twisting) and which flight loads move it |
 | `05_the_flight_in_brief.ipynb` | The flight from lift-off to splashdown as loads on the dust, and what can be measured in the microgravity window |
 | `06_the_3d_simulation.ipynb` | How the 3-D page (https://thebestproever.github.io/100micron-sim/sim3d/) is computed: grains that stick form rigid clumps |
+| `07_edry_the_energy_loss.ipynb` | What the dry restitution $e_{dry}$ is and how it becomes a damping force; what has been measured; how much every result moves with it; how the flight's impacts (speed, stuck or not, restitution) give back $e_{dry}$ and the surface energy, and how many are needed |
 
 ## How to open them
 

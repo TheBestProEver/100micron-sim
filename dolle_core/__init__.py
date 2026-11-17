@@ -19,6 +19,8 @@ Read it in this order:
   scaling.py     undamped_sticking_speed, scaling_law_speed, damping_factor       the threshold by hand
   wall.py        wall_limits, rolling_acceleration                                a grain resting on a wall
   many.py        line_collision                                                   grains on a line: momentum
+  inverse.py     predict, fit, make_synthetic_flight, read_impacts_csv,          from filmed impacts back to
+                 write_impacts_csv, residuals                                     gamma and e_dry (notebook 07)
 
 The 3-D simulation (notebook 06; the page docs/sim3d/):
 
