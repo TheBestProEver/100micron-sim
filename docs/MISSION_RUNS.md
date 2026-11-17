@@ -2,8 +2,11 @@
 
 Moved here from the README in v0.7 (10 Nov 2026), unchanged except where marked. The scenario table below was
 computed with the **v0.5 event-driven engine** (`dolle_sim/simulation.py`: stuck grains form rigid clumps, wall grains
-are held in place until they are pulled off), which is again the default engine since v0.7. It was computed with the
-v0.6.2 code and the mission defaults of then, which had the negligible forces switched on. Since v0.7 they are off;
+are held in place until they are pulled off), which is again the default engine since v0.7. It was computed on
+26 Oct 2026 with the v0.5 code (commit 0731b2f, "All twelve scenarios re-run to splashdown") and the mission defaults
+of then, which had the negligible forces switched on, and it has not been re-run since (v0.6 made the v0.6 engine the
+mission engine, but its re-runs never finished; corrected in Nov 2026: this header used to say the v0.6.2 code).
+Since v0.7 the negligible forces are off;
 for these tubules the only non-zero ones are the gravity gradient (2-3e-8 g, 3e-4 of the 1e-4 g residual acceleration
 in the microgravity window), Brownian motion (2-6 µm/s, at most 5e-4 of the sticking speeds) and mutual gravity
 (< 1e-12 g), from the pre-flight budget of the mission tubules (`dolle_sim.design.preflight`). A re-run therefore gives slightly different
@@ -64,8 +67,8 @@ splashdown pulls the dust off the bottom only if the payload hangs nose down, as
    threshold is close to the peak leave slower). That is about 250 times the predicted sticking speed of
    100 µm silica. To free 1,000 g-bound grains at ~cm/s, the frequency must be ~100 kHz or more
    (ultrasonic), or the grains must be slowed afterwards (gas).
-4. **Bare glass walls recapture the grains within seconds** (wall sticking speed ~8 mm/s for silica on clean
-   glass), which limits the observing time after each release. This is why the earlier example configs
+4. **Bare glass walls recapture the grains within seconds** (wall sticking speed 6.66 mm/s for a 50 µm radius
+   silica grain on clean borosilicate, `dolle_core.collide.sticking_threshold`; corrected in Nov 2026 from ~8 mm/s), which limits the observing time after each release. This is why the earlier example configs
    assume an anti-stick coating and vibrating walls.
 5. **Rolling (modelled only by the optional v0.6 engine in `extras/`).** The sideways spin load (~7–10 g for the
    example layout, up to ~14 g at the deck edge) is above the rolling threshold of most grains (~1.3 g for 100 µm

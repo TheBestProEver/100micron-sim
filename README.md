@@ -11,6 +11,11 @@ experiment, from the physics of one impact to the whole flight, and explains eve
 five steps, the key results, how the code is organised, how we know it is right, the main decisions and what is
 still open.
 
+- **Every decision** (when, who, the alternatives, the evidence, the effect on the results, how to change it):
+  [docs/DECISIONS.md](docs/DECISIONS.md).
+- **To learn it all in ten study sessions** (exercises, self-tests, talk outlines, glossary, numbers to know):
+  [docs/STUDY_GUIDE.md](docs/STUDY_GUIDE.md).
+
 The notebooks explain the physics step by step: each derivation starts from a cited paper, and each "why this
 choice" box gives the alternatives and the evidence. Every notebook opens in the browser from its badge.
 
@@ -140,5 +145,6 @@ The physics and the values are those of the full simulator; every simplification
 
 [docs/USER_GUIDE.md](docs/USER_GUIDE.md) (using the simulator, the physics, the results, every check, the
 configuration, the materials) · [docs/MISSION_RUNS.md](docs/MISSION_RUNS.md) (the whole flight in one sweep, the
-scenario table) · [docs/HISTORY.md](docs/HISTORY.md) (what changed in each version, the code reviews) ·
+scenario table) · [docs/DECISIONS.md](docs/DECISIONS.md) (every decision: why, the alternatives, how to
+change it) · [docs/HISTORY.md](docs/HISTORY.md) (what changed in each version, the code reviews) ·
 [extras/README.md](extras/README.md) (the optional parts) · [PROVENANCE.md](PROVENANCE.md) (all references).

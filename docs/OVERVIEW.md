@@ -53,8 +53,8 @@ on e_dry: 1.61 for silica's e_dry = 0.85, 2.46 for graphite's 0.70.
 
 **Why graphite sticks ~6x more easily than silica** (notebook 03, `python examples/silica_vs_carbon.py`):
 x6.2 = x4.07 from the material values (higher surface energy x2.5, softer x1.7, density x0.95) times x1.52 from the
-**ASSUMED** energy loss (e_dry). So about a third of the difference rests on a number nobody has measured for these
-grains: exactly the kind of thing the flight measures.
+**ASSUMED** energy loss (e_dry). So a factor 1.5 of the 6.2 (23% of it on a logarithmic scale, notebook 03 section
+6) rests on a number nobody has measured for these grains: exactly the kind of thing the flight measures.
 
 **Which carbon is not decided** (neither is which silica). Depending on the carbon and on literature values, carbon
 sticks between **1.8x and 36x** more easily than silica (graphite 22-220 mm/s, glassy carbon 20-127, amorphous
@@ -93,7 +93,7 @@ https://thebestproever.github.io/100micron-sim/sim3d/
   REBOUND to 3e-10 m.
 * **The readable core equals the full code**: identical sticking speeds, restitution within 6e-16
   (`tests/test_dolle_core.py`).
-* **Tests**: 195 in the main suite and 82 for the extras, all passing.
+* **Tests**: 203 in the main suite and 82 for the extras, all passing.
 
 ## 5. The decisions that matter most
 
@@ -105,8 +105,14 @@ https://thebestproever.github.io/100micron-sim/sim3d/
 | A head-on impact is enough for the threshold | the full 3-D contact model gives the same sticking speed to 0.16% (check `dem_vs_1d`) | - |
 | 100 grains per tubule in simulations | the team has not decided the dust amount; 800 made runs take weeks; impact counts scale with grains squared | mission config |
 | Stuck grains become rigid clumps (3-D core, v0.5) | simple, exact momentum and spin bookkeeping; the cost: clumps cannot roll or bend at their contacts (the v0.6 engine in extras can) | `dolle_core/clumps.py` |
-| Strip-down (v0.7) | the team asked for something one can understand: the v0.6 engine and the cross-checks moved to `extras/`; forces 1000x too small to matter switched off by default (sizes listed in the README) | README, `extras/` |
+| Strip-down (v0.7) | the team's reviewer asked for something one can understand, and the owner chose each change feature by feature: the v0.6 engine and the cross-checks moved to `extras/`; seven forces, each at most 2.2% of the residual acceleration, switched off by default (sizes listed in the README) | README, `extras/` |
 | Materials | carbon and silica types not decided: graphite and the table silica as placeholders, with ranges | `dolle_core/materials.py` |
+
+Every decision, with its date, who decided, the alternatives, the evidence, its effect on the results and how to
+change it: [DECISIONS.md](DECISIONS.md).
+
+To learn all of it in ten study sessions, with exercises, self-tests, talk outlines, a glossary and the numbers worth
+knowing: [STUDY_GUIDE.md](STUDY_GUIDE.md).
 
 ## 6. What is still open
 

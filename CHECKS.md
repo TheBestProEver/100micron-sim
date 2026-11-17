@@ -103,10 +103,10 @@ A simplified version of the same chamber in REBOUND: its IAS15 integrator for th
 
 ## Unit and regression tests
 
-Main suite (tests/): 195 tests: 195 passed, 0 failed, 0 errors, 0 skipped (`python -m pytest`).
+Main suite (tests/): 203 tests: 203 passed, 0 failed, 0 errors, 0 skipped (`python -m pytest`).
 
 Extras suite (extras/tests/): 82 tests: 82 passed, 0 failed, 0 errors, 0 skipped (`python -m pytest extras/tests`).
 
 ## Summary
 
-64 of 64 checks and comparisons pass. Unit tests (main): 195/195. Unit tests (extras): 82/82.
+64 of 64 checks and comparisons pass. Unit tests (main): 203/203. Unit tests (extras): 82/82.
