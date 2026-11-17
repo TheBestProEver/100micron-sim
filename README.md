@@ -7,6 +7,10 @@ experiment, from the physics of one impact to the whole flight, and explains eve
 
 ## Start here
 
+**New to the project? Read [docs/OVERVIEW.md](docs/OVERVIEW.md) first** (15 minutes): the question, the physics in
+five steps, the key results, how the code is organised, how we know it is right, the main decisions and what is
+still open.
+
 The notebooks explain the physics step by step: each derivation starts from a cited paper, and each "why this
 choice" box gives the alternatives and the evidence. Every notebook opens in the browser from its badge.
 
